@@ -26,7 +26,18 @@ pub fn methodNotAllowed(req: *std.http.Server.Request) !void {
 ///
 /// `max + 1`: allocRemaining errors when the limit is *reached* (≥), but Go's
 /// MaxBytesReader allows exactly `max` and rejects only `max + 1`.
+///
+/// No-framing guard: a request with NO Content-Length and NO chunked transfer
+/// encoding has no body (RFC 9110). zig's bodyReader would otherwise frame that
+/// as `.body_none` = the raw connection reader, so allocRemaining reads until the
+/// socket closes — which, with keep-alive off and the client awaiting our
+/// response, hangs forever. A browser form post always sends Content-Length (0
+/// for an empty form), so this only bites a malformed/handcrafted client; we
+/// treat it as the empty body it spec'ly is rather than hang. (Steve, 2026-06-19.)
 pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, max: usize) !?[]u8 {
+    if (req.head.content_length == null and req.head.transfer_encoding == .none) {
+        return try alloc.alloc(u8, 0);
+    }
     var buf: [4 * 1024]u8 = undefined;
     const reader = try req.readerExpectContinue(&buf);
     return reader.allocRemaining(alloc, .limited(max + 1)) catch |e| switch (e) {
