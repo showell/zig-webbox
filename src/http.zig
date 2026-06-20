@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const edge = @import("edge.zig");
 
 pub const html_ct = std.http.Header{ .name = "content-type", .value = "text/html; charset=utf-8" };
 pub const js_ct = std.http.Header{ .name = "content-type", .value = "application/javascript; charset=utf-8" };
@@ -42,11 +43,11 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
     const reader = try req.readerExpectContinue(&buf);
     return reader.allocRemaining(alloc, .limited(max + 1)) catch |e| switch (e) {
         error.StreamTooLong => {
-            try req.respond("request body too large\n", .{ .status = .payload_too_large });
+            try edge.reject(req, .body_too_large, "request body too large\n");
             return null;
         },
         else => {
-            try req.respond("read body\n", .{ .status = .bad_request });
+            try edge.reject(req, .body_unreadable, "read body\n");
             return null;
         },
     };
