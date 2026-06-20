@@ -1,5 +1,5 @@
-//! bus: a keyed pub/sub fan-out for SSE streams — the zig port's answer to Go's
-//! `subBus[T]` (server/chat/sse.go). Each key maps to a set of Subscribers (one
+//! bus: a keyed pub/sub fan-out for SSE streams.
+//! Each key maps to a set of Subscribers (one
 //! per open tab); `publish` is best-effort (a full subscriber drops the event,
 //! since every stream using this is live-only — a missed event is re-derived on
 //! reload). This is the SPIKE artifact that settles chat's concurrency runtime
@@ -42,7 +42,7 @@ pub const Subscriber = struct {
     const cap = 16;
     /// How long next() blocks with no message before returning .idle, so the
     /// stream emits a keepalive (and thereby notices a vanished client on the
-    /// failed write). Go uses 25s; matched here.
+    /// failed write).
     const keepalive_s = 25;
 
     pub const Next = union(enum) {
@@ -53,8 +53,8 @@ pub const Subscriber = struct {
     };
 
     /// push enqueues a COPY of msg, dropping it if the ring is full or the copy
-    /// allocation fails (best-effort, exactly like Go's non-blocking channel
-    /// send). Wakes next() via the seq futex.
+    /// allocation fails (best-effort: a non-blocking enqueue that drops rather
+    /// than blocks). Wakes next() via the seq futex.
     fn push(self: *Subscriber, msg: []const u8) void {
         {
             self.mutex.lockUncancelable(self.io);
