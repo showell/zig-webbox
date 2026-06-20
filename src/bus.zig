@@ -6,8 +6,8 @@
 //! BEFORE chat lands: prove fan-out + cross-connection synchronization on a toy
 //! tenant (spike.zig's /spike/events), then graduate this verbatim into chat.
 //!
-//! Specialized to owned-`[]u8` messages (Go's T is `string` for the live-only
-//! streams). When chat needs typed events it becomes `Bus(comptime T)`; the
+//! Specialized to owned-`[]u8` messages.
+//! When chat needs typed events it becomes `Bus(comptime T)`; the
 //! shape doesn't change.
 //!
 //! Synchronization (all io-aware, std.Io primitives — work across the thread
