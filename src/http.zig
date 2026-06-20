@@ -14,19 +14,17 @@ pub fn notFound(req: *std.http.Server.Request) !void {
     try req.respond("not found\n", .{ .status = .not_found });
 }
 
-/// methodNotAllowed mirrors Go's http.Error(w, "method not allowed", 405) — the
-/// trailing newline matches http.Error's behavior.
 pub fn methodNotAllowed(req: *std.http.Server.Request) !void {
     try req.respond("method not allowed\n", .{ .status = .method_not_allowed });
 }
 
-/// readLimitedBody reads the request body capped at `max` bytes, mirroring Go's
-/// lynrummy.readLimitedBody. On success returns the body (alloc-owned). On
-/// overflow it responds 413 and returns null; on any other read error it responds
-/// 400 and returns null — so callers just `return` when the result is null.
+/// readLimitedBody reads the request body capped at `max` bytes. On success
+/// returns the body (alloc-owned). On overflow it responds 413 and returns null;
+/// on any other read error it responds 400 and returns null — so callers just
+/// `return` when the result is null.
 ///
-/// `max + 1`: allocRemaining errors when the limit is *reached* (≥), but Go's
-/// MaxBytesReader allows exactly `max` and rejects only `max + 1`.
+/// `max + 1`: allocRemaining errors when the limit is *reached* (≥), so to allow
+/// a body of exactly `max` and reject only `max + 1` we pass `max + 1`.
 ///
 /// No-framing guard: a request with NO Content-Length and NO chunked transfer
 /// encoding has no body (RFC 9110). zig's bodyReader would otherwise frame that
