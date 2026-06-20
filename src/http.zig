@@ -53,7 +53,7 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
     };
 }
 
-/// redirect sends a 303 See Other to `location` (Go's http.StatusSeeOther).
+/// redirect sends a 303 See Other to `location`.
 pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
     try req.respond("", .{
         .status = .see_other,
@@ -65,7 +65,7 @@ pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
 
 /// sse_headers are the response headers for an event-stream: the content type,
 /// no-cache, and x-accel-buffering off (defeats reverse-proxy buffering so
-/// frames arrive live). Mirrors Go's serveChatStream header set.
+/// frames arrive live).
 pub const sse_headers = [_]std.http.Header{
     .{ .name = "content-type", .value = "text/event-stream" },
     .{ .name = "cache-control", .value = "no-cache" },
