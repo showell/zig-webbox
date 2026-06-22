@@ -10,6 +10,28 @@ pub const js_ct = std.http.Header{ .name = "content-type", .value = "application
 pub const json_ct = std.http.Header{ .name = "content-type", .value = "application/json; charset=utf-8" };
 pub const plain_ct = std.http.Header{ .name = "content-type", .value = "text/plain; charset=utf-8" };
 
+/// header returns the value of the first request header whose name
+/// case-insensitively matches `name`, or null.
+pub fn header(req: *std.http.Server.Request, name: []const u8) ?[]const u8 {
+    var it = req.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    }
+    return null;
+}
+
+/// queryValue pulls one (un-decoded) query parameter from a raw request target
+/// (`/path?a=1&b=2`), or null when absent.
+pub fn queryValue(target: []const u8, name: []const u8) ?[]const u8 {
+    const q = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var it = std.mem.splitScalar(u8, target[q + 1 ..], '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
+    }
+    return null;
+}
+
 pub fn notFound(req: *std.http.Server.Request) !void {
     try req.respond("not found\n", .{ .status = .not_found });
 }
