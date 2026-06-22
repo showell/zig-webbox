@@ -21,3 +21,14 @@ pub fn htmlEscape(alloc: Alloc, s: []const u8) ![]const u8 {
     };
     return out.toOwnedSlice(alloc);
 }
+
+/// scriptSafe makes a JSON/text blob safe to embed inside an inline <script>:
+/// the only sequence that can close the element early is `</` (e.g. `</script>`),
+/// so escape it to `<\/`. Browsers read `<\/script>` as literal text. Returns an
+/// alloc-owned copy.
+pub fn scriptSafe(alloc: Alloc, s: []const u8) ![]u8 {
+    const n = std.mem.replacementSize(u8, s, "</", "<\\/");
+    const out = try alloc.alloc(u8, n);
+    _ = std.mem.replace(u8, s, "</", "<\\/", out);
+    return out;
+}
