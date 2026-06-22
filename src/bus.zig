@@ -2,9 +2,8 @@
 //! Each key maps to a set of Subscribers (one
 //! per open tab); `publish` is best-effort (a full subscriber drops the event,
 //! since every stream using this is live-only — a missed event is re-derived on
-//! reload). This is the SPIKE artifact that settles chat's concurrency runtime
-//! BEFORE chat lands: prove fan-out + cross-connection synchronization on a toy
-//! tenant (spike.zig's /spike/events), then graduate this verbatim into chat.
+//! reload). It drives chat's live streams (chat_sse.zig); it was prototyped on a
+//! standalone concurrency spike (since removed) before chat was ported.
 //!
 //! Specialized to owned-`[]u8` messages.
 //! When chat needs typed events it becomes `Bus(comptime T)`; the
@@ -155,16 +154,109 @@ pub const Bus = struct {
             if (std.mem.eql(u8, e.key, key)) e.sub.push(msg);
         }
     }
-
-    /// subscriberCount reports how many streams are open on `key` (for the
-    /// spike's /spike/broadcast acknowledgement — handy proof of fan-out width).
-    pub fn subscriberCount(self: *Bus, key: []const u8) usize {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        var n: usize = 0;
-        for (self.entries.items) |e| {
-            if (std.mem.eql(u8, e.key, key)) n += 1;
-        }
-        return n;
-    }
 };
+
+// ── tests ────────────────────────────────────────────────────────────────────
+//
+// The fan-out semantics, exercised single-threaded (the cross-thread futex
+// races aren't unit-testable here, but the registry/ring/keying contract is).
+// Everything runs on std.testing.allocator, so an unfreed message, key, or
+// Subscriber fails the test — these double as a leak check on open/close/drain.
+//
+// INVARIANT the tests must respect: next() blocks for keepalive_s (25s) on an
+// EMPTY subscriber. So we only ever call next() after publishing, and exactly as
+// many times as there are buffered messages; emptiness is asserted via the
+// private `count` field instead.
+
+const testing = std.testing;
+
+/// expectMsg drains one buffered message and checks it (the sub MUST be non-empty
+/// or next() would block on the keepalive). Frees it with the bus allocator.
+fn expectMsg(sub: *Subscriber, want: []const u8) !void {
+    switch (sub.next()) {
+        .msg => |m| {
+            defer testing.allocator.free(m);
+            try testing.expectEqualStrings(want, m);
+        },
+        .idle => return error.TestUnexpectedIdle,
+    }
+}
+
+test "bus: a published message reaches a subscriber as an owned copy" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var bus = Bus.init(threaded.io(), testing.allocator);
+    defer bus.entries.deinit(testing.allocator);
+
+    const sub = try bus.open("room");
+    bus.publish("room", "hello");
+    try expectMsg(sub, "hello");
+    bus.close(sub);
+}
+
+test "bus: publish fans out to every subscriber on the key; other keys never see it" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var bus = Bus.init(threaded.io(), testing.allocator);
+    defer bus.entries.deinit(testing.allocator);
+
+    const a1 = try bus.open("room");
+    const a2 = try bus.open("room");
+    const other = try bus.open("elsewhere");
+
+    bus.publish("room", "hi");
+    try expectMsg(a1, "hi"); // both room subscribers receive it
+    try expectMsg(a2, "hi");
+    try testing.expectEqual(@as(usize, 0), other.count); // keyed isolation: nothing queued
+
+    bus.close(a1);
+    bus.close(a2);
+    bus.close(other);
+}
+
+test "bus: open/close add and remove registry entries" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var bus = Bus.init(threaded.io(), testing.allocator);
+    defer bus.entries.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), bus.entries.items.len);
+    const s1 = try bus.open("k");
+    const s2 = try bus.open("k");
+    try testing.expectEqual(@as(usize, 2), bus.entries.items.len);
+    bus.close(s1);
+    try testing.expectEqual(@as(usize, 1), bus.entries.items.len);
+    // a publish after one closes still reaches the survivor (and frees cleanly)
+    bus.publish("k", "still here");
+    try expectMsg(s2, "still here");
+    bus.close(s2);
+    try testing.expectEqual(@as(usize, 0), bus.entries.items.len);
+}
+
+test "bus: a full ring drops new messages best-effort, keeping the oldest cap in FIFO order" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var bus = Bus.init(threaded.io(), testing.allocator);
+    defer bus.entries.deinit(testing.allocator);
+
+    const sub = try bus.open("k");
+
+    // publish cap+4 distinct messages; only the first `cap` fit, the rest drop.
+    const overflow = Subscriber.cap + 4;
+    var n: usize = 0;
+    while (n < overflow) : (n += 1) {
+        const m = try std.fmt.allocPrint(testing.allocator, "{d}", .{n});
+        defer testing.allocator.free(m);
+        bus.publish("k", m);
+    }
+    try testing.expectEqual(Subscriber.cap, sub.count);
+
+    // draining yields exactly 0..cap-1 in order (the late arrivals were dropped).
+    var want: usize = 0;
+    while (want < Subscriber.cap) : (want += 1) {
+        const s = try std.fmt.allocPrint(testing.allocator, "{d}", .{want});
+        defer testing.allocator.free(s);
+        try expectMsg(sub, s);
+    }
+    bus.close(sub);
+}

@@ -97,7 +97,7 @@ pub const sse_headers = [_]std.http.Header{
 /// own buffer into the protocol output (emitting the HTTP chunk), then
 /// body.flush() pushes that chunk out the socket. body.flush() ALONE is a no-op
 /// while bytes still sit in the writer buffer — the subtle bit that makes SSE
-/// actually stream. (Proven on the /spike surface; chat's streams reuse it.)
+/// actually stream. (Every chat SSE stream pushes its frames through here.)
 pub fn pushFrame(body: *std.http.BodyWriter, bytes: []const u8) !void {
     try body.writer.writeAll(bytes);
     try body.writer.flush();
