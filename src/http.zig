@@ -10,21 +10,62 @@ pub const js_ct = std.http.Header{ .name = "content-type", .value = "application
 pub const json_ct = std.http.Header{ .name = "content-type", .value = "application/json; charset=utf-8" };
 pub const plain_ct = std.http.Header{ .name = "content-type", .value = "text/plain; charset=utf-8" };
 
+// ── request-head accessors (the OWNING chokepoint) ───────────────────────────
+//
+// Reading the request BODY invalidates the std.http head strings (the zig-0.16
+// `received_head` gotcha): any borrowed slice of a header value or the target
+// silently becomes garbage afterward, which once mis-attributed an authenticated
+// post to the wrong principal. So every accessor here returns memory OWNED by the
+// caller's allocator — a head value you hold can never dangle. This module is the
+// ONLY place allowed to touch `req.head.target` / `req.iterateHeaders()` directly;
+// tools/lint_head_access.py enforces that, which is what makes the foot-gun
+// impossible to reintroduce rather than merely fixed once.
+
 /// header returns the value of the first request header whose name
-/// case-insensitively matches `name`, or null.
-pub fn header(req: *std.http.Server.Request, name: []const u8) ?[]const u8 {
+/// case-insensitively matches `name`, OWNED (duped into `alloc`), or null.
+pub fn header(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !?[]const u8 {
     var it = req.iterateHeaders();
     while (it.next()) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return try alloc.dupe(u8, h.value);
     }
     return null;
 }
 
-/// queryValue pulls one (un-decoded) query parameter from a raw request target
-/// (`/path?a=1&b=2`), or null when absent.
-pub fn queryValue(target: []const u8, name: []const u8) ?[]const u8 {
-    const q = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var it = std.mem.splitScalar(u8, target[q + 1 ..], '&');
+/// target returns the request target (`/path?query`), OWNED. Routing keeps
+/// slices of it alive past body reads, so it must not borrow from the head.
+pub fn target(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const u8 {
+    return alloc.dupe(u8, req.head.target);
+}
+
+/// cookie returns the value of cookie `name` from any Cookie header, OWNED, or null.
+pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    var it = req.iterateHeaders();
+    while (it.next()) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "cookie")) continue;
+        if (parseCookieValue(h.value, name)) |v| return try alloc.dupe(u8, v);
+    }
+    return null;
+}
+
+/// parseCookieValue extracts cookie `name` from one Cookie header value
+/// (`a=1; b=2`), or null. PURE — returns a slice INTO `header_value`; the owning
+/// is `cookie`'s job. Split out so the parse is unit-testable without a Request.
+pub fn parseCookieValue(header_value: []const u8, name: []const u8) ?[]const u8 {
+    var pairs = std.mem.splitScalar(u8, header_value, ';');
+    while (pairs.next()) |raw| {
+        const pair = std.mem.trim(u8, raw, " \t");
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
+    }
+    return null;
+}
+
+/// queryValue pulls one (un-decoded) query parameter from a request target
+/// (`/path?a=1&b=2`), or null when absent. PURE — a slice into `target`; pass an
+/// OWNED target (from `target`) when the result outlives a body read.
+pub fn queryValue(target_str: []const u8, name: []const u8) ?[]const u8 {
+    const q = std.mem.indexOfScalar(u8, target_str, '?') orelse return null;
+    var it = std.mem.splitScalar(u8, target_str[q + 1 ..], '&');
     while (it.next()) |pair| {
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
         if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
@@ -102,4 +143,34 @@ pub fn pushFrame(body: *std.http.BodyWriter, bytes: []const u8) !void {
     try body.writer.writeAll(bytes);
     try body.writer.flush();
     try body.flush();
+}
+
+const testing = std.testing;
+
+test "parseCookieValue: picks the named cookie, trims spaces, ignores the rest" {
+    try testing.expectEqualStrings("xyz", parseCookieValue("a=1; gopher_auth=xyz; b=2", "gopher_auth").?);
+    try testing.expectEqualStrings("1", parseCookieValue("a=1", "a").?);
+    try testing.expectEqualStrings("3", parseCookieValue("gopher_uid=3", "gopher_uid").?);
+    try testing.expect(parseCookieValue("a=1; b=2", "c") == null);
+    try testing.expect(parseCookieValue("", "a") == null);
+    try testing.expect(parseCookieValue("noequalssign", "a") == null);
+}
+
+// The regression test for the bug this whole module exists to prevent: a value
+// read from the request head, used after the body read that clobbers the head
+// buffer. parseCookieValue returns a slice INTO the source (what the accessor
+// borrows before duping); we prove the dupe — and only the dupe — survives the
+// source being overwritten, exactly as a chunked body read overwrites the head.
+test "head value must be owned: a clobbered source buffer corrupts the borrow, not the dupe" {
+    var buf: [12]u8 = undefined;
+    @memcpy(&buf, "sid=deadbee0"); // "sid=" + an 8-char value
+    const borrowed = parseCookieValue(&buf, "sid").?;
+    try testing.expectEqualStrings("deadbee0", borrowed);
+
+    const owned = try testing.allocator.dupe(u8, borrowed); // what the accessor does
+    defer testing.allocator.free(owned);
+
+    @memset(&buf, 0xAA); // simulate the body read overwriting the head buffer
+    try testing.expectEqualStrings("deadbee0", owned); // the owned copy is intact
+    try testing.expect(!std.mem.eql(u8, borrowed, owned)); // the borrow is now garbage
 }
