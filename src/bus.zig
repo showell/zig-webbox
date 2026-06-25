@@ -29,7 +29,9 @@ const Alloc = std.mem.Allocator;
 /// (under bus.mutex), no publisher can reference it, so destroy is race-free.
 pub const Subscriber = struct {
     io: Io,
-    alloc: Alloc,
+    /// SERVER-lifetime allocator (named `gpa`, like presence's): the ring outlives
+    /// any one request, so `push` DUPES each message into it. Never the request arena.
+    gpa: Alloc,
     mutex: Io.Mutex = .init,
     /// Bumped on every push (the futex wakeup edge). next() waits on a snapshot
     /// of this; a push between snapshot and wait makes futexWait return at once.
@@ -59,7 +61,7 @@ pub const Subscriber = struct {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             if (self.count < cap) {
-                if (self.alloc.dupe(u8, msg)) |copy| {
+                if (self.gpa.dupe(u8, msg)) |copy| {
                     self.ring[(self.head + self.count) % cap] = copy;
                     self.count += 1;
                 } else |_| {}
@@ -96,33 +98,35 @@ pub const Subscriber = struct {
     }
 
     fn drainAndFree(self: *Subscriber) void {
-        while (self.take()) |m| self.alloc.free(m);
+        while (self.take()) |m| self.gpa.free(m);
     }
 };
 
 pub const Bus = struct {
     io: Io,
-    alloc: Alloc,
+    /// SERVER-lifetime allocator: registry + every Subscriber it mints live on this,
+    /// so `open` dupes the key into it. `alloc` (request arena) must never land here.
+    gpa: Alloc,
     mutex: Io.Mutex = .init,
     entries: std.ArrayListUnmanaged(Entry) = .empty,
 
     const Entry = struct { key: []u8, sub: *Subscriber };
 
-    pub fn init(io: Io, alloc: Alloc) Bus {
-        return .{ .io = io, .alloc = alloc };
+    pub fn init(io: Io, gpa: Alloc) Bus {
+        return .{ .io = io, .gpa = gpa };
     }
 
     /// open registers a new Subscriber under `key` and returns it. The caller
     /// owns it and must pair this with `close`.
     pub fn open(self: *Bus, key: []const u8) !*Subscriber {
-        const sub = try self.alloc.create(Subscriber);
-        sub.* = .{ .io = self.io, .alloc = self.alloc };
-        const key_copy = try self.alloc.dupe(u8, key);
+        const sub = try self.gpa.create(Subscriber);
+        sub.* = .{ .io = self.io, .gpa = self.gpa };
+        const key_copy = try self.gpa.dupe(u8, key);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        self.entries.append(self.alloc, .{ .key = key_copy, .sub = sub }) catch |e| {
-            self.alloc.free(key_copy);
-            self.alloc.destroy(sub);
+        self.entries.append(self.gpa, .{ .key = key_copy, .sub = sub }) catch |e| {
+            self.gpa.free(key_copy);
+            self.gpa.destroy(sub);
             return e;
         };
         return sub;
@@ -136,14 +140,14 @@ pub const Bus = struct {
         var i: usize = 0;
         while (i < self.entries.items.len) : (i += 1) {
             if (self.entries.items[i].sub == sub) {
-                self.alloc.free(self.entries.items[i].key);
+                self.gpa.free(self.entries.items[i].key);
                 _ = self.entries.swapRemove(i);
                 break;
             }
         }
         self.mutex.unlock(self.io);
         sub.drainAndFree();
-        self.alloc.destroy(sub);
+        self.gpa.destroy(sub);
     }
 
     /// publish delivers msg (best-effort) to every subscriber on `key`.
