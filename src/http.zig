@@ -12,6 +12,7 @@ pub const plain_ct = std.http.Header{ .name = "content-type", .value = "text/pla
 pub const pdf_ct = std.http.Header{ .name = "content-type", .value = "application/pdf" };
 pub const png_ct = std.http.Header{ .name = "content-type", .value = "image/png" };
 pub const svg_ct = std.http.Header{ .name = "content-type", .value = "image/svg+xml" };
+pub const wasm_ct = std.http.Header{ .name = "content-type", .value = "application/wasm" };
 
 // ── request-head accessors (the OWNING chokepoint) ───────────────────────────
 //
