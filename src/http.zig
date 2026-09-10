@@ -9,6 +9,7 @@ pub const html_ct = std.http.Header{ .name = "content-type", .value = "text/html
 pub const js_ct = std.http.Header{ .name = "content-type", .value = "application/javascript; charset=utf-8" };
 pub const json_ct = std.http.Header{ .name = "content-type", .value = "application/json; charset=utf-8" };
 pub const plain_ct = std.http.Header{ .name = "content-type", .value = "text/plain; charset=utf-8" };
+pub const ndjson_ct = std.http.Header{ .name = "content-type", .value = "application/x-ndjson; charset=utf-8" };
 pub const pdf_ct = std.http.Header{ .name = "content-type", .value = "application/pdf" };
 pub const png_ct = std.http.Header{ .name = "content-type", .value = "image/png" };
 pub const svg_ct = std.http.Header{ .name = "content-type", .value = "image/svg+xml" };
