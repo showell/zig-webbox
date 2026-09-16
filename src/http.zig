@@ -18,6 +18,13 @@ pub const octet_ct = std.http.Header{ .name = "content-type", .value = "applicat
 
 // ── request-head accessors (the OWNING chokepoint) ───────────────────────────
 //
+// WHO CALLS WHAT, because the answers differ and the module name hides it:
+// `notFound` has two dozen callers and is genuinely everyone's; `cookie` has
+// exactly two, `users.zig` and `player.zig`, because reading a cookie is what
+// identity does and nothing else needs to; and the Server-Sent Events section at
+// the bottom has exactly one, `chat_sse.zig`. If this file is ever split, that
+// is where the cuts are.
+//
 // Reading the request BODY invalidates the std.http head strings (the zig-0.16
 // `received_head` gotcha): any borrowed slice of a header value or the target
 // silently becomes garbage afterward, which once mis-attributed an authenticated
@@ -56,7 +63,7 @@ pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []c
 /// parseCookieValue extracts cookie `name` from one Cookie header value
 /// (`a=1; b=2`), or null. PURE — returns a slice INTO `header_value`; the owning
 /// is `cookie`'s job. Split out so the parse is unit-testable without a Request.
-pub fn parseCookieValue(header_value: []const u8, name: []const u8) ?[]const u8 {
+fn parseCookieValue(header_value: []const u8, name: []const u8) ?[]const u8 {
     var pairs = std.mem.splitScalar(u8, header_value, ';');
     while (pairs.next()) |raw| {
         const pair = std.mem.trim(u8, raw, " \t");
@@ -128,7 +135,7 @@ pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
     });
 }
 
-// ── Server-Sent Events ───────────────────────────────────────────────────────
+// ── Server-Sent Events — CHAT ONLY (chat_sse.zig is the sole caller) ─────────
 
 /// sse_headers are the response headers for an event-stream: the content type,
 /// no-cache, and x-accel-buffering off (defeats reverse-proxy buffering so
