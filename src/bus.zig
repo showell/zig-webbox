@@ -53,6 +53,10 @@ pub const Subscriber = struct {
     ring: [cap]?[]u8 = @splat(null),
     head: usize = 0,
     count: usize = 0,
+    /// An event was dropped because the ring was full. A host that can end
+    /// the stream (so its browser reconnects and resumes) should, rather than
+    /// carry on with a gap.
+    missed: bool = false,
 
     const cap = 16;
     /// How long next() blocks with no message before returning .idle, so the
@@ -78,7 +82,11 @@ pub const Subscriber = struct {
                 if (self.gpa.dupe(u8, msg)) |copy| {
                     self.ring[(self.head + self.count) % cap] = copy;
                     self.count += 1;
-                } else |_| {}
+                } else |_| {
+                    self.missed = true;
+                }
+            } else {
+                self.missed = true;
             }
         }
         _ = self.seq.fetchAdd(1, .release);
@@ -266,7 +274,10 @@ pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
 /// `arena`, without waiting; null when nothing has arrived. One at a time, so
 /// the host takes an event only when it has room to send it: until then the
 /// event stays in the mailbox, as it would on Linux while a write blocks.
+/// `error.EventsMissed` once the mailbox has dropped one: the host ends the
+/// stream, and the browser reconnects and resumes.
 pub fn nextFrame(k: Kept, arena: Alloc) !?[]const u8 {
+    if (k.sub.missed) return error.EventsMissed;
     while (k.sub.poll()) |blob| {
         defer k.sub.gpa.free(blob);
         const frame = k.render(k.ctx, arena, blob) orelse continue;
@@ -439,6 +450,25 @@ test "bus: nextFrame renders what has arrived one at a time, skips what render d
     try testing.expectEqualStrings("data: two for bob\n\n", (try nextFrame(k, arena.allocator())).?);
     try testing.expectEqual(@as(?[]const u8, null), try nextFrame(k, arena.allocator()));
     try testing.expectEqual(@as(usize, 0), sub.count); // all taken, the skipped one freed
+    hub.close(sub);
+}
+
+test "bus: a mailbox that overflowed says so, and nextFrame stops rather than skip" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+
+    const sub = try hub.open("k");
+    const k = Kept{ .sub = sub, .render = upper, .ctx = "bob" };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    for (0..Subscriber.cap) |_| hub.publish("k", "fits");
+    try testing.expect(!sub.missed);
+    hub.publish("k", "one too many");
+    try testing.expect(sub.missed);
+    try testing.expectError(error.EventsMissed, nextFrame(k, arena.allocator()));
     hub.close(sub);
 }
 
