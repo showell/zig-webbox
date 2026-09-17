@@ -1,4 +1,17 @@
-//! bus: a keyed pub/sub fan-out for SSE streams.
+//! bus: a keyed pub/sub fan-out for SSE streams, and the seam where a HOST
+//! takes a stream over.
+//!
+//! **THE APPLICATION DESCRIBES A STREAM; THE HOST KEEPS IT.** A stream handler
+//! writes its headers and backlog, then records a `Kept` — its subscriber, and
+//! how to render an event for this viewer — on its request's `Bus` and returns.
+//! The host serves what was kept: on Linux, `serveKept` blocks on the
+//! connection's own task exactly as the handler's loop used to; on a machine
+//! with one loop, `drainKept` renders whatever has arrived and the host writes
+//! it, then moves on. The application is one source for both.
+//!
+//! `Hub` is the shared registry (one per process). `Bus` is a small
+//! per-request handle over it, which is what makes "the stream this request
+//! kept" a field rather than a global — requests run concurrently on Linux.
 //! Each key maps to a set of Subscribers (one
 //! per open tab); `publish` is best-effort (a full subscriber drops the event,
 //! since every stream using this is live-only — a missed event is re-derived on
@@ -44,7 +57,7 @@ pub const Subscriber = struct {
     /// How long next() blocks with no message before returning .idle, so the
     /// stream emits a keepalive (and thereby notices a vanished client on the
     /// failed write).
-    const keepalive_s = 25;
+    pub const keepalive_s = 25;
 
     pub const Next = union(enum) {
         /// An owned message — the caller must free it with the bus allocator.
@@ -69,6 +82,12 @@ pub const Subscriber = struct {
         }
         _ = self.seq.fetchAdd(1, .release);
         self.io.futexWake(u32, &self.seq.raw, 1);
+    }
+
+    /// poll takes the oldest message without waiting, or null. For hosts that
+    /// cannot block: the caller frees it with the bus allocator.
+    pub fn poll(self: *Subscriber) ?[]u8 {
+        return self.take();
     }
 
     /// take pops the oldest message if present (caller holds nothing; takes the
@@ -102,7 +121,7 @@ pub const Subscriber = struct {
     }
 };
 
-pub const Bus = struct {
+pub const Hub = struct {
     io: Io,
     /// SERVER-lifetime allocator: registry + every Subscriber it mints live on this,
     /// so `open` dupes the key into it. `alloc` (request arena) must never land here.
@@ -112,13 +131,13 @@ pub const Bus = struct {
 
     const Entry = struct { key: []u8, sub: *Subscriber };
 
-    pub fn init(io: Io, gpa: Alloc) Bus {
+    pub fn init(io: Io, gpa: Alloc) Hub {
         return .{ .io = io, .gpa = gpa };
     }
 
     /// open registers a new Subscriber under `key` and returns it. The caller
     /// owns it and must pair this with `close`.
-    pub fn open(self: *Bus, key: []const u8) !*Subscriber {
+    pub fn open(self: *Hub, key: []const u8) !*Subscriber {
         const sub = try self.gpa.create(Subscriber);
         sub.* = .{ .io = self.io, .gpa = self.gpa };
         const key_copy = try self.gpa.dupe(u8, key);
@@ -135,7 +154,7 @@ pub const Bus = struct {
     /// close removes `sub` from the registry, then frees it. Removal happens
     /// under bus.mutex, so once it returns no publisher can reach `sub` —
     /// draining + destroy is then race-free.
-    pub fn close(self: *Bus, sub: *Subscriber) void {
+    pub fn close(self: *Hub, sub: *Subscriber) void {
         self.mutex.lockUncancelable(self.io);
         var i: usize = 0;
         while (i < self.entries.items.len) : (i += 1) {
@@ -151,7 +170,7 @@ pub const Bus = struct {
     }
 
     /// publish delivers msg (best-effort) to every subscriber on `key`.
-    pub fn publish(self: *Bus, key: []const u8, msg: []const u8) void {
+    pub fn publish(self: *Hub, key: []const u8, msg: []const u8) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         for (self.entries.items) |e| {
@@ -159,6 +178,101 @@ pub const Bus = struct {
         }
     }
 };
+
+/// A request's handle on the hub. Everything a handler does with the bus goes
+/// through it; the one thing it adds is `kept`.
+pub const Bus = struct {
+    hub: *Hub,
+    /// The stream this request handed to the host, if it did.
+    kept: ?Kept = null,
+
+    pub fn of(hub: *Hub) Bus {
+        return .{ .hub = hub };
+    }
+
+    pub fn open(self: *Bus, key: []const u8) !*Subscriber {
+        return self.hub.open(key);
+    }
+
+    pub fn close(self: *Bus, sub: *Subscriber) void {
+        self.hub.close(sub);
+    }
+
+    pub fn publish(self: *Bus, key: []const u8, msg: []const u8) void {
+        self.hub.publish(key, msg);
+    }
+
+    /// The server-lifetime allocator, for anything a kept stream owns.
+    pub fn gpa(self: *Bus) Alloc {
+        return self.hub.gpa;
+    }
+
+    /// Hands the stream to the host. At most once per request.
+    pub fn keep(self: *Bus, k: Kept) void {
+        std.debug.assert(self.kept == null);
+        self.kept = k;
+    }
+};
+
+/// What a host needs to go on serving a stream after its handler returned.
+/// Nothing in it points into the request: its arena and writer are gone by
+/// the time the host uses this.
+pub const Kept = struct {
+    sub: *Subscriber,
+    /// This viewer's frame for one published event, or null to send nothing.
+    /// `arena` lives for that one frame.
+    render: *const fn (ctx: []const u8, arena: Alloc, blob: []const u8) ?[]const u8,
+    /// What `render` needs to know about the viewer, owned by the hub's
+    /// allocator and freed with the stream.
+    ctx: []const u8 = "",
+};
+
+/// The keepalive: a comment line, which a browser ignores. A stream that has
+/// sent nothing for `Subscriber.keepalive_s` sends this, and a closed tab is
+/// noticed when it cannot be written.
+pub const ping = ": ping\n\n";
+
+/// Ends a kept stream: its subscriber leaves the registry, its context is
+/// freed.
+pub fn drop(hub: *Hub, k: Kept) void {
+    hub.close(k.sub);
+    if (k.ctx.len > 0) hub.gpa.free(k.ctx);
+}
+
+/// **FOR A HOST WITH A TASK PER CONNECTION.** Serves a kept stream until its
+/// client goes away — the loop the stream handlers used to run themselves.
+pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
+    defer drop(hub, k);
+    while (true) {
+        switch (k.sub.next()) {
+            .msg => |blob| {
+                defer k.sub.gpa.free(blob);
+                var arena = std.heap.ArenaAllocator.init(hub.gpa);
+                defer arena.deinit();
+                const frame = k.render(k.ctx, arena.allocator(), blob) orelse continue;
+                w.writeAll(frame) catch return;
+                w.flush() catch return;
+            },
+            .idle => {
+                w.writeAll(ping) catch return;
+                w.flush() catch return;
+            },
+        }
+    }
+}
+
+/// **FOR A HOST WITH ONE LOOP.** Everything the stream has now, rendered and
+/// appended to `out`, without waiting. Answers how many frames were added.
+pub fn drainKept(k: Kept, arena: Alloc, out: *std.ArrayList(u8)) !usize {
+    var frames: usize = 0;
+    while (k.sub.poll()) |blob| {
+        defer k.sub.gpa.free(blob);
+        const frame = k.render(k.ctx, arena, blob) orelse continue;
+        try out.appendSlice(arena, frame);
+        frames += 1;
+    }
+    return frames;
+}
 
 // ── tests ────────────────────────────────────────────────────────────────────
 //
@@ -189,7 +303,7 @@ fn expectMsg(sub: *Subscriber, want: []const u8) !void {
 test "bus: a published message reaches a subscriber as an owned copy" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
-    var bus = Bus.init(threaded.io(), testing.allocator);
+    var bus = Hub.init(threaded.io(), testing.allocator);
     defer bus.entries.deinit(testing.allocator);
 
     const sub = try bus.open("room");
@@ -201,7 +315,7 @@ test "bus: a published message reaches a subscriber as an owned copy" {
 test "bus: publish fans out to every subscriber on the key; other keys never see it" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
-    var bus = Bus.init(threaded.io(), testing.allocator);
+    var bus = Hub.init(threaded.io(), testing.allocator);
     defer bus.entries.deinit(testing.allocator);
 
     const a1 = try bus.open("room");
@@ -221,7 +335,7 @@ test "bus: publish fans out to every subscriber on the key; other keys never see
 test "bus: open/close add and remove registry entries" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
-    var bus = Bus.init(threaded.io(), testing.allocator);
+    var bus = Hub.init(threaded.io(), testing.allocator);
     defer bus.entries.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), bus.entries.items.len);
@@ -240,7 +354,7 @@ test "bus: open/close add and remove registry entries" {
 test "bus: a full ring drops new messages best-effort, keeping the oldest cap in FIFO order" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
-    var bus = Bus.init(threaded.io(), testing.allocator);
+    var bus = Hub.init(threaded.io(), testing.allocator);
     defer bus.entries.deinit(testing.allocator);
 
     const sub = try bus.open("k");
@@ -263,4 +377,85 @@ test "bus: a full ring drops new messages best-effort, keeping the oldest cap in
         try expectMsg(sub, s);
     }
     bus.close(sub);
+}
+
+fn upper(ctx: []const u8, arena: Alloc, blob: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, blob, "skip")) return null;
+    return std.fmt.allocPrint(arena, "data: {s} for {s}\n\n", .{ blob, ctx }) catch null;
+}
+
+test "bus: a request's handle forwards to the hub, and keeps at most one stream" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+
+    var bus = Bus.of(&hub);
+    const sub = try bus.open("k");
+    bus.publish("k", "via the handle");
+    try expectMsg(sub, "via the handle");
+    try testing.expect(bus.kept == null);
+    bus.keep(.{ .sub = sub, .render = upper, .ctx = try testing.allocator.dupe(u8, "ann") });
+    try testing.expect(bus.kept != null);
+    drop(&hub, bus.kept.?);
+    try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
+}
+
+test "bus: two requests' handles are separate — keeping on one is not keeping on the other" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+
+    var a = Bus.of(&hub);
+    const b = Bus.of(&hub);
+    const sub = try a.open("k");
+    a.keep(.{ .sub = sub, .render = upper });
+    try testing.expect(b.kept == null);
+    drop(&hub, a.kept.?);
+}
+
+test "bus: drainKept renders what has arrived, skips what render declines, and never waits" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+
+    const sub = try hub.open("k");
+    const k = Kept{ .sub = sub, .render = upper, .ctx = "bob" };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.ArrayList(u8) = .empty;
+
+    // Nothing yet: returns at once with nothing.
+    try testing.expectEqual(@as(usize, 0), try drainKept(k, arena.allocator(), &out));
+
+    hub.publish("k", "one");
+    hub.publish("k", "skip");
+    hub.publish("k", "two");
+    try testing.expectEqual(@as(usize, 2), try drainKept(k, arena.allocator(), &out));
+    try testing.expectEqualStrings("data: one for bob\n\ndata: two for bob\n\n", out.items);
+    try testing.expectEqual(@as(usize, 0), sub.count); // all taken, the skipped one freed
+    hub.close(sub);
+}
+
+test "bus: serveKept writes each frame, and a write that fails ends the stream and frees it" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+
+    const sub = try hub.open("k");
+    hub.publish("k", "first");
+    hub.publish("k", "second");
+
+    // A writer that takes exactly one frame and then fails, as a closed
+    // socket does: serveKept must return (not wait out a keepalive) and the
+    // registry must be empty afterwards. testing.allocator checks the rest.
+    var storage: [64]u8 = undefined;
+    const want = "data: first for cy\n\n";
+    var w: std.Io.Writer = .fixed(storage[0..want.len]);
+    serveKept(&hub, .{ .sub = sub, .render = upper, .ctx = try testing.allocator.dupe(u8, "cy") }, &w);
+    try testing.expectEqualStrings(want, w.buffered());
+    try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
 }
