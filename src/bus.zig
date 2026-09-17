@@ -6,8 +6,9 @@
 //! how to render an event for this viewer — on its request's `Bus` and returns.
 //! The host serves what was kept: on Linux, `serveKept` blocks on the
 //! connection's own task exactly as the handler's loop used to; on a machine
-//! with one loop, `drainKept` renders whatever has arrived and the host writes
-//! it, then moves on. The application is one source for both.
+//! with one loop, `nextFrame` renders the next event that has arrived — when
+//! the host has somewhere to put it — and the host moves on. The application
+//! is one source for both.
 //!
 //! `Hub` is the shared registry (one per process). `Bus` is a small
 //! per-request handle over it, which is what makes "the stream this request
@@ -261,17 +262,18 @@ pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
     }
 }
 
-/// **FOR A HOST WITH ONE LOOP.** Everything the stream has now, rendered and
-/// appended to `out`, without waiting. Answers how many frames were added.
-pub fn drainKept(k: Kept, arena: Alloc, out: *std.ArrayList(u8)) !usize {
-    var frames: usize = 0;
+/// **FOR A HOST WITH ONE LOOP.** The stream's next frame, rendered into
+/// `arena`, without waiting; null when nothing has arrived. One at a time, so
+/// the host takes an event only when it has room to send it: until then the
+/// event stays in the mailbox, as it would on Linux while a write blocks.
+pub fn nextFrame(k: Kept, arena: Alloc) !?[]const u8 {
     while (k.sub.poll()) |blob| {
         defer k.sub.gpa.free(blob);
         const frame = k.render(k.ctx, arena, blob) orelse continue;
-        try out.appendSlice(arena, frame);
-        frames += 1;
+        // The frame may point into the event, which is freed on return.
+        return try arena.dupe(u8, frame);
     }
-    return frames;
+    return null;
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -415,7 +417,7 @@ test "bus: two requests' handles are separate — keeping on one is not keeping 
     drop(&hub, a.kept.?);
 }
 
-test "bus: drainKept renders what has arrived, skips what render declines, and never waits" {
+test "bus: nextFrame renders what has arrived one at a time, skips what render declines, and never waits" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     var hub = Hub.init(threaded.io(), testing.allocator);
@@ -425,16 +427,17 @@ test "bus: drainKept renders what has arrived, skips what render declines, and n
     const k = Kept{ .sub = sub, .render = upper, .ctx = "bob" };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var out: std.ArrayList(u8) = .empty;
 
     // Nothing yet: returns at once with nothing.
-    try testing.expectEqual(@as(usize, 0), try drainKept(k, arena.allocator(), &out));
+    try testing.expectEqual(@as(?[]const u8, null), try nextFrame(k, arena.allocator()));
 
     hub.publish("k", "one");
     hub.publish("k", "skip");
     hub.publish("k", "two");
-    try testing.expectEqual(@as(usize, 2), try drainKept(k, arena.allocator(), &out));
-    try testing.expectEqualStrings("data: one for bob\n\ndata: two for bob\n\n", out.items);
+    try testing.expectEqualStrings("data: one for bob\n\n", (try nextFrame(k, arena.allocator())).?);
+    try testing.expectEqual(@as(usize, 2), sub.count); // the rest wait in the mailbox
+    try testing.expectEqualStrings("data: two for bob\n\n", (try nextFrame(k, arena.allocator())).?);
+    try testing.expectEqual(@as(?[]const u8, null), try nextFrame(k, arena.allocator()));
     try testing.expectEqual(@as(usize, 0), sub.count); // all taken, the skipped one freed
     hub.close(sub);
 }
