@@ -41,6 +41,52 @@ pub fn facts(io: Io, alloc: Alloc) ![]const Fact {
     };
 }
 
+// ── the host's own log ──────────────────────────────────────────────────────
+
+/// A host's log, newest last, or null when it keeps none it can show.
+/// **SECRETS ARE THE HOST'S TO TAKE OUT, ON THE WAY IN**: the page shows
+/// what it is given, to the admin only.
+pub const Log = *const fn (io: Io, alloc: Alloc) anyerror!?[]const u8;
+
+var log: ?Log = null;
+
+/// The host calls this once, before serving, if it keeps a log to show.
+pub fn provideLog(l: Log) void {
+    log = l;
+}
+
+/// How many of the log's newest lines the page shows.
+pub const log_lines = 60;
+
+/// The newest `log_lines` lines of the host's log, or null when it keeps
+/// none. An error reading it becomes a line saying so.
+pub fn logText(io: Io, alloc: Alloc) !?[]const u8 {
+    const l = log orelse return null;
+    const text = (l(io, alloc) catch |e| return try std.fmt.allocPrint(alloc, "(the host's log could not be read: {s})", .{@errorName(e)})) orelse return null;
+    return newestLines(text, log_lines);
+}
+
+/// The last `n` lines of `text`; a final newline does not count as a line.
+pub fn newestLines(text: []const u8, n: usize) []const u8 {
+    const body = std.mem.trimEnd(u8, text, "\n");
+    var seen: usize = 0;
+    var i = body.len;
+    while (i > 0) : (i -= 1) {
+        if (body[i - 1] == '\n') {
+            seen += 1;
+            if (seen == n) return body[i..];
+        }
+    }
+    return body;
+}
+
+test "the newest lines of a log" {
+    try std.testing.expectEqualStrings("c\nd", newestLines("a\nb\nc\nd\n", 2));
+    try std.testing.expectEqualStrings("a\nb", newestLines("a\nb", 5));
+    try std.testing.expectEqualStrings("", newestLines("", 3));
+    try std.testing.expectEqualStrings("d", newestLines("a\nb\nc\nd", 1));
+}
+
 // ── formatting, shared so both hosts read alike ─────────────────────────────
 
 /// `2026-10-02 14:03:09 UTC`.
