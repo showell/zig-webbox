@@ -24,6 +24,29 @@
 //! that exists is taken as it is, and only a name that is not found is looked
 //! for in another case.
 //!
+//! **A FOLDER HOLDS AT MOST 65,536 ENTRIES ON FAT** (the spec's 2 MiB; a long
+//! name takes 2 to 4 of them). gopher-metal refuses to grow a folder past it:
+//! the write that needed the room fails as a full disk would
+//! (`error.NoSpaceLeft`). Linux has no such limit, and this Store does not
+//! count entries on every write, so at that bound the two hosts would
+//! differ. What the application's folders can reach (gopher-metal QUEUE item
+//! 68; prod's counts from 2026-10-02):
+//!
+//!   - `data/players`: one folder per player, two entries each, so about
+//!     32,000 players. **Nothing bounds it** but game_limits' 5 new players
+//!     an address an hour. Prod: 19.
+//!   - `data/lynrummy`: one folder per player who has played. Prod: 5.
+//!   - a player's `sessions` folders: at most 500 (game_limits). Prod's
+//!     largest: 65.
+//!   - a conversation's `sessions`: a topic is about five files of 2-4
+//!     entries each, so a few thousand topics. A topic's uploads: about
+//!     16,000. Prod's largest folder of all: 70 entries.
+//!
+//! So prod is a few hundred times inside every one of them. The players
+//! folder is the one that grows without a bound of its own; when it nears
+//! the limit, the fix is a fan-out (`data/players/<first digit>/p...`),
+//! not a bigger folder.
+//!
 //! **AN ERROR IS NOT AN EMPTY FILE.** `readOrEmpty` says the difference between
 //! a file that is not there ("nothing yet") and one that will not read.
 
