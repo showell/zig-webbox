@@ -194,6 +194,11 @@ pub const Bus = struct {
     hub: *Hub,
     /// The stream this request handed to the host, if it did.
     kept: ?Kept = null,
+    /// The address the connection came from, as text (`203.0.113.7`,
+    /// `2001:db8::1`), if the host knows it: the host sets it before `route`.
+    /// What one address may make and write is bounded by it
+    /// (game_limits.zig); with none, those bounds do not apply.
+    peer: ?[]const u8 = null,
 
     pub fn of(hub: *Hub) Bus {
         return .{ .hub = hub };
