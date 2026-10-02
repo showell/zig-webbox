@@ -1,7 +1,8 @@
 //! edge: the one policy for incoming data at the server's edges.
 //!
-//! THREAT MODEL (read this first). Prod ships ReleaseSafe, so zig's bounds and
-//! integer-overflow checks are ON: a classic C-style buffer overflow — write
+//! THREAT MODEL (read this first). Prod ships a Debug build (ops/deploy), so
+//! zig's bounds and integer-overflow checks are ON (Debug's safety checks are a
+//! superset of ReleaseSafe's; gopher-metal ships ReleaseSafe): a classic C-style buffer overflow — write
 //! past a buffer, corrupt adjacent memory, keep running — cannot happen. If we
 //! ever index/copy out of bounds we PANIC (clean crash, systemd restarts). So
 //! the realistic "overflow" attack here is a panic-as-DoS: feed input that
