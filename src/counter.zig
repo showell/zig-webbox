@@ -14,6 +14,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Alloc = std.mem.Allocator;
+const store = @import("store.zig");
 
 /// mu serializes the read-add-write within this process, so two requests cannot
 /// be handed the same id.
@@ -25,12 +26,8 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
     mu.lockUncancelable(io);
     defer mu.unlock(io);
 
-    if (std.fs.path.dirname(path)) |parent| {
-        try Io.Dir.cwd().createDirPath(io, parent);
-    }
-
     var n: i64 = 0;
-    if (Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64))) |body| {
+    if (store.read(io, alloc, path, .limited(64))) |body| {
         const trimmed = std.mem.trim(u8, body, " \t\r\n");
         if (std.fmt.parseInt(i64, trimmed, 10)) |parsed| {
             n = parsed;
@@ -39,7 +36,7 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
     if (n < 1) n = 1;
 
     const out = try std.fmt.allocPrint(alloc, "{d}\n", .{n + 1});
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out });
+    try store.write(io, alloc, path, out, .{});
     return n;
 }
 
