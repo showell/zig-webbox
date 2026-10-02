@@ -36,7 +36,7 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
     if (n < 1) n = 1;
 
     const out = try std.fmt.allocPrint(alloc, "{d}\n", .{n + 1});
-    try store.write(io, alloc, path, out, .{});
+    try store.replace(io, alloc, path, out, .{});
     return n;
 }
 
