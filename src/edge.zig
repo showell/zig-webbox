@@ -52,11 +52,6 @@ fn bump(kind: RejectKind) void {
     _ = counters[@intFromEnum(kind)].fetchAdd(1, .monotonic);
 }
 
-/// get returns the current count for a kind (for tests / introspection).
-pub fn get(kind: RejectKind) u64 {
-    return counters[@intFromEnum(kind)].load(.monotonic);
-}
-
 /// statusFor maps a reject kind to its canonical HTTP status. Category, not
 /// message: every body-size reject is a 413, every malformed-input reject a 400.
 pub fn statusFor(kind: RejectKind) std.http.Status {
