@@ -274,22 +274,22 @@ pub fn removeTree(io: Io, alloc: Alloc, path: []const u8) !void {
 
 const testing = std.testing;
 
+/// A temp directory and an arena. The thread pool each test needs is made in
+/// the test itself: outside a `test` block the host's Io is out of bounds
+/// (tools/lint_portable.py), since this module is in the route table's reach.
 const Fixture = struct {
     arena: std.heap.ArenaAllocator,
     tmp: testing.TmpDir,
-    threaded: std.Io.Threaded,
     base: []const u8 = "",
 
     fn init(self: *Fixture) !void {
         self.arena = std.heap.ArenaAllocator.init(testing.allocator);
         self.tmp = testing.tmpDir(.{});
-        self.threaded = std.Io.Threaded.init(self.arena.allocator(), .{});
         // tmpDir() makes .zig-cache/tmp/<sub_path> through Io.Dir.cwd(), which
         // is what every call here resolves against.
         self.base = try std.fs.path.join(self.arena.allocator(), &.{ ".zig-cache", "tmp", &self.tmp.sub_path });
     }
     fn deinit(self: *Fixture) void {
-        self.threaded.deinit();
         self.tmp.cleanup();
         self.arena.deinit();
     }
@@ -310,7 +310,9 @@ test "write, read, append, readAt, stat, list, remove" {
     try f.init();
     defer f.deinit();
     const a = f.arena.allocator();
-    const io = f.threaded.io();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     try write(io, a, f.p("data/chat/1_2/sessions/topic.md"), "hello", .{});
     try testing.expectEqualStrings("hello", try read(io, a, f.p("data/chat/1_2/sessions/topic.md"), .unlimited));
@@ -346,7 +348,9 @@ test "a name FAT refuses is refused here too, before anything is made" {
     try f.init();
     defer f.deinit();
     const a = f.arena.allocator();
-    const io = f.threaded.io();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     try testing.expectError(error.BadName, write(io, a, f.p("data/what?.md"), "x", .{}));
     try testing.expectError(error.BadName, append(io, a, f.p("data/" ++ "x" ** 97), "x"));
@@ -360,7 +364,9 @@ test "case does not tell two names apart, and the first case is kept" {
     try f.init();
     defer f.deinit();
     const a = f.arena.allocator();
-    const io = f.threaded.io();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     try write(io, a, f.p("data/chat/channels/Dev/sessions/plan.md"), "one", .{});
     // Read in another case: the same file, as FAT finds it.
