@@ -34,7 +34,57 @@ const Alloc = std.mem.Allocator;
 /// fat16.zig's max_name: the longest name gopher-metal reads and writes.
 pub const max_name = 96;
 
-pub const Error = error{BadName};
+/// io.zig's max_path: the longest path gopher-metal holds a file by.
+pub const max_path = 256;
+
+/// fat16.zig's max_tree_depth: how deep gopher-metal removes a tree and
+/// checks a volume at boot. A path is held to it from the volume's root.
+pub const max_depth = 16;
+
+pub const Error = error{ BadName, PathTooLong, PathTooDeep };
+
+// ── the paths gopher-metal would hold ───────────────────────────────────────
+//
+// **FAT'S PATH LIMITS, ON EVERY HOST, MEASURED AS GOPHER-METAL SPELLS THE
+// PATH.** There the data is `data/...` and `auth/...` on the volume; on Linux
+// the same files are under configured roots, often absolute and long. So a
+// path under a root is measured as if the root were spelled `data` or `auth`:
+// what gopher-metal would be asked to hold. A path under neither root (a
+// test's temporary folder, the site's own files) is not measured.
+
+/// The two roots roots.point sets, as this host spells them; null until then.
+pub var data_base: ?[]const u8 = null;
+pub var auth_base: ?[]const u8 = null;
+
+/// Called by roots.point, with the same two directories.
+pub fn setBases(data_dir: []const u8, auth_dir: []const u8) void {
+    data_base = data_dir;
+    auth_base = auth_dir;
+}
+
+/// `path`'s length and depth as gopher-metal would spell it, or null when it
+/// is under neither root.
+fn metalShape(path: []const u8) ?struct { len: usize, depth: usize } {
+    for ([_]struct { ?[]const u8, []const u8 }{ .{ data_base, "data" }, .{ auth_base, "auth" } }) |pair| {
+        const base = std.mem.trimEnd(u8, pair[0] orelse continue, "/");
+        if (!std.mem.startsWith(u8, path, base)) continue;
+        const rest = path[base.len..];
+        if (rest.len != 0 and rest[0] != '/') continue; // "data2" is not under "data"
+        var depth: usize = 1;
+        var it = std.mem.tokenizeScalar(u8, rest, '/');
+        while (it.next()) |_| depth += 1;
+        return .{ .len = pair[1].len + rest.len, .depth = depth };
+    }
+    return null;
+}
+
+/// Refuses a path gopher-metal could not hold: longer than max_path or
+/// deeper than max_depth, measured as it would spell it.
+fn withinLimits(path: []const u8) Error!void {
+    const shape = metalShape(path) orelse return;
+    if (shape.len > max_path) return error.PathTooLong;
+    if (shape.depth > max_depth) return error.PathTooDeep;
+}
 
 /// Whether FAT, as gopher-metal holds it, can store `name`.
 pub fn fatName(name: []const u8) bool {
@@ -87,12 +137,14 @@ pub fn resolve(io: Io, alloc: Alloc, path: []const u8) ![]const u8 {
 /// must be one FAT holds.
 fn forWrite(io: Io, alloc: Alloc, path: []const u8) ![]const u8 {
     if (!fatName(std.fs.path.basename(path))) return error.BadName;
+    try withinLimits(path);
     return resolve(io, alloc, path);
 }
 
 /// `path` resolved for a call that creates folders: every component past the
 /// existing part must be a name FAT holds.
 fn forMakeDir(io: Io, alloc: Alloc, path: []const u8) ![]const u8 {
+    try withinLimits(path);
     const p = try resolve(io, alloc, path);
     var rest = p;
     while (!exists(io, rest)) {
@@ -436,6 +488,44 @@ test "replace makes the file hold exactly the data, keeps its name, and leaves n
     try testing.expect(!std.mem.eql(u8, try siblingName(a, "a.count"), try siblingName(a, "b.count")));
     try testing.expectEqual(@as(usize, 13), (try siblingName(a, "x" ** 96)).len);
     try testing.expect(fatName(try siblingName(a, "x" ** 96)));
+}
+
+test "a path gopher-metal could not hold is refused, measured as it would spell it" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const saved = .{ data_base, auth_base };
+    defer data_base, auth_base = saved;
+    // Roots spelled long, as a Linux host's are: the limits do not count them.
+    const data = f.p("home/someone/a-long-host-path/prod/data");
+    setBases(data, f.p("home/someone/a-long-host-path/prod/auth"));
+
+    // data/ + 245 bytes is 250: held. Spelled here it is far longer.
+    const near = try std.fs.path.join(a, &.{ data, "x" ** 90, "y" ** 90, "z" ** 63 });
+    try write(io, a, near, "ok", .{});
+    // data/ + 252 bytes is 257: refused, before anything is made.
+    const over = try std.fs.path.join(a, &.{ data, "x" ** 90, "y" ** 90, "q" ** 70 });
+    try testing.expectError(error.PathTooLong, write(io, a, over, "no", .{}));
+    try testing.expectError(error.PathTooLong, append(io, a, over, "no"));
+    try testing.expectError(error.PathTooLong, replace(io, a, over, "no", .{}));
+    try testing.expectError(error.PathTooLong, makeDir(io, a, over));
+
+    // 16 names from the volume's root (data and 15 more): held; 17: refused.
+    var parts: [17][]const u8 = undefined;
+    parts[0] = data;
+    for (parts[1..]) |*p| p.* = "d";
+    try write(io, a, try std.fs.path.join(a, parts[0..16]), "ok", .{});
+    try testing.expectError(error.PathTooDeep, write(io, a, try std.fs.path.join(a, parts[0..17]), "no", .{}));
+    try testing.expectError(error.PathTooDeep, makeDir(io, a, try std.fs.path.join(a, parts[0..17])));
+    try testing.expect(!has(io, a, try std.fs.path.join(a, parts[0..17])));
+
+    // Under auth/ too; and not a path that only begins like a root.
+    try testing.expectError(error.PathTooLong, write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/auth"), "x" ** 96, "y" ** 96, "z" ** 96 }), "no", .{}));
+    try write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/data2"), "x" ** 96, "y" ** 96, "z" ** 96 }), "free", .{});
 }
 
 test "a missing file is empty, and something unreadable in its place is not" {
