@@ -40,6 +40,17 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
     return n;
 }
 
+/// peek answers the value `next` would hand out, and writes nothing: what a
+/// page offers before anything is made (puzzles.zig, a session made on its
+/// first move). Floors at 1, as `next` does.
+pub fn peek(io: Io, alloc: Alloc, path: []const u8) i64 {
+    mu.lockUncancelable(io);
+    defer mu.unlock(io);
+    const body = store.read(io, alloc, path, .limited(64)) catch return 1;
+    const n = std.fmt.parseInt(i64, std.mem.trim(u8, body, " \t\r\n"), 10) catch return 1;
+    return @max(n, 1);
+}
+
 // ══ TESTS ════════════════════════════════════════════════════════════════════
 //
 // A counter that forgets is a counter that reissues an id, so the contract under
@@ -71,4 +82,24 @@ test "fs: ids are handed out once, and survive a restart" {
     // A corrupt counter restarts rather than failing the request.
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "not a number" });
     try testing.expectEqual(@as(i64, 1), try next(io, a, path));
+}
+
+test "fs: peek answers what next would, and writes nothing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "deep", "n.txt" });
+    try testing.expectEqual(@as(i64, 1), peek(io, a, path));
+    try testing.expect(!store.has(io, a, path)); // no file, and no folder for it, made
+    try testing.expectEqual(@as(i64, 1), peek(io, a, path));
+    try testing.expectEqual(@as(i64, 1), try next(io, a, path));
+    try testing.expectEqual(@as(i64, 2), peek(io, a, path));
+    try testing.expectEqual(@as(i64, 2), peek(io, a, path));
+    try testing.expectEqual(@as(i64, 2), try next(io, a, path));
 }
