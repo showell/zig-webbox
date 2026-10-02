@@ -232,6 +232,48 @@ pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: Wri
     }
 }
 
+/// **MAKES `path` HOLD EXACTLY `data`, SO THAT NO STOP LOSES IT.** `write`
+/// empties the file and then fills it (on gopher-metal it removes the entry
+/// and writes a new one), so a machine that stops between the two has lost
+/// the record. This writes `data` to a sibling with a temporary name first,
+/// then renames it over `path`:
+///   - stopped before the rename: `path` is the old record, whole, and the
+///     sibling is left over (the next replace writes over it);
+///   - the rename itself: on Linux one atomic step; on gopher-metal,
+///     fat16.rename's order, which leaves the old record or the new, whole,
+///     and at worst leaked clusters (the boot-time disk check reports them).
+/// A `path` that does not exist yet is made as `write` makes it. It keeps the
+/// name it has, in its case, as `write` does.
+///
+/// Not a lock: two replaces of one path at once share the sibling's name, so
+/// the callers that need one order (a counter, a sidecar) hold their own.
+/// Nothing is flushed: on Linux the rename is atomic in the namespace, but a
+/// power cut can still lose recent data that the kernel had not written.
+pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
+    const p = try forWrite(io, alloc, path);
+    const dir = std.fs.path.dirname(p);
+    if (dir) |d| try makeDir(io, alloc, d);
+    const tmp_name = try siblingName(alloc, std.fs.path.basename(p));
+    const tmp = if (dir) |d| try std.fs.path.join(alloc, &.{ d, tmp_name }) else tmp_name;
+    if (opts.private) {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @enumFromInt(0o600) } });
+    } else {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
+    }
+    try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), p, io);
+}
+
+/// The temporary name `replace` writes beside `name`: `~` and eight hex digits
+/// of a hash of the name, then `.tmp`. Thirteen bytes whatever the name's
+/// length, so it fits where the name does, and one per name, so replaces of
+/// two files in one folder do not meet.
+fn siblingName(alloc: Alloc, name: []const u8) ![]u8 {
+    var lower: [max_name]u8 = undefined;
+    const folded = std.ascii.lowerString(lower[0..@min(name.len, max_name)], name[0..@min(name.len, max_name)]);
+    const h: u32 = @truncate(std.hash.Wyhash.hash(0, folded));
+    return std.fmt.allocPrint(alloc, "~{x:0>8}.tmp", .{h});
+}
+
 /// Adds `bytes` at the end of `path`, making it and the folders above it if
 /// needed, and answers its size afterwards. One positional write at the end.
 pub fn append(io: Io, alloc: Alloc, path: []const u8, bytes: []const u8) !u64 {
@@ -357,6 +399,43 @@ test "a name FAT refuses is refused here too, before anything is made" {
     try testing.expectError(error.BadName, makeDir(io, a, f.p("data/trailing./inner")));
     try testing.expectError(error.BadName, removeTree(io, a, f.p("data/users/   ")));
     try testing.expect(!has(io, a, f.p("data/trailing.")));
+}
+
+test "replace makes the file hold exactly the data, keeps its name, and leaves no sibling" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // New: made, folders and all.
+    try replace(io, a, f.p("data/players/next-id.txt"), "4\n", .{});
+    try testing.expectEqualStrings("4\n", try read(io, a, f.p("data/players/next-id.txt"), .unlimited));
+    // Shorter than before: nothing of the old tail is left.
+    try replace(io, a, f.p("data/players/next-id.txt"), "5", .{});
+    try testing.expectEqualStrings("5", try read(io, a, f.p("data/players/next-id.txt"), .unlimited));
+    // In another case: the same file, in its first case.
+    try write(io, a, f.p("data/chat/topic.count"), "1 10\n", .{});
+    try replace(io, a, f.p("data/chat/TOPIC.count"), "2 20\n", .{});
+    const entries = try list(io, a, f.p("data/chat"));
+    try testing.expectEqual(@as(usize, 1), entries.len); // and no sibling left over
+    try testing.expectEqualStrings("topic.count", entries[0].name);
+    try testing.expectEqualStrings("2 20\n", try read(io, a, f.p("data/chat/topic.count"), .unlimited));
+    // A sibling a stop left behind is written over.
+    const left = try std.fs.path.join(a, &.{ f.p("data/chat"), try siblingName(a, "topic.count") });
+    try write(io, a, left, "stale", .{});
+    try replace(io, a, f.p("data/chat/topic.count"), "3 30\n", .{});
+    try testing.expectEqual(@as(usize, 1), (try list(io, a, f.p("data/chat"))).len);
+    try testing.expectEqualStrings("3 30\n", try read(io, a, f.p("data/chat/topic.count"), .unlimited));
+    // A name FAT cannot hold is refused before anything is written.
+    try testing.expectError(error.BadName, replace(io, a, f.p("data/what?"), "x", .{}));
+    // One sibling name per file, in any case, and short enough for any name.
+    try testing.expectEqualStrings(try siblingName(a, "Topic.count"), try siblingName(a, "topic.COUNT"));
+    try testing.expect(!std.mem.eql(u8, try siblingName(a, "a.count"), try siblingName(a, "b.count")));
+    try testing.expectEqual(@as(usize, 13), (try siblingName(a, "x" ** 96)).len);
+    try testing.expect(fatName(try siblingName(a, "x" ** 96)));
 }
 
 test "a missing file is empty, and something unreadable in its place is not" {
