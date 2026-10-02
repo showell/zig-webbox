@@ -83,6 +83,21 @@ pub fn count(kind: RejectKind) void {
     bump(kind);
 }
 
+/// countsText renders the counters that are not zero, for a person:
+/// `body_too_large 3, malformed_markdown 1`, or `none`.
+pub fn countsText(alloc: Alloc) ![]u8 {
+    var b: std.ArrayList(u8) = .empty;
+    inline for (@typeInfo(RejectKind).@"enum".fields, 0..) |f, i| {
+        const n = counters[i].load(.monotonic);
+        if (n != 0) {
+            if (b.items.len != 0) try b.appendSlice(alloc, ", ");
+            try b.print(alloc, "{s} {d}", .{ f.name, n });
+        }
+    }
+    if (b.items.len == 0) try b.appendSlice(alloc, "none");
+    return b.toOwnedSlice(alloc);
+}
+
 /// countsJSON renders the counters as a JSON object keyed by kind name, e.g.
 /// {"header_too_large":0,"body_too_large":3,...}. Embedded in /version.
 pub fn countsJSON(alloc: Alloc) ![]u8 {
