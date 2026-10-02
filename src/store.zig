@@ -160,7 +160,9 @@ pub const Stat = struct {
     mtime: i96,
 };
 
-fn kindOf(k: Io.File.Kind) Kind {
+/// The host's kind of entry as ours. **`anytype`, on purpose**: std.Io and
+/// gopher-metal's io name the type differently, and both have these tags.
+fn kindOf(k: anytype) Kind {
     return switch (k) {
         .file => .file,
         .directory => .directory,
@@ -221,9 +223,13 @@ pub const WriteOptions = struct {
 pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
     const p = try forWrite(io, alloc, path);
     if (std.fs.path.dirname(p)) |d| try makeDir(io, alloc, d);
-    var flags: Io.File.CreateFlags = .{};
-    if (opts.private) flags.permissions = @enumFromInt(0o600);
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data, .flags = flags });
+    // The flags are spelled in place, not named: std.Io and gopher-metal's io
+    // call their type differently.
+    if (opts.private) {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data, .flags = .{ .permissions = @enumFromInt(0o600) } });
+    } else {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data });
+    }
 }
 
 /// Adds `bytes` at the end of `path`, making it and the folders above it if
