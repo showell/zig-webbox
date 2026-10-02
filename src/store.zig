@@ -359,6 +359,22 @@ test "a name FAT refuses is refused here too, before anything is made" {
     try testing.expect(!has(io, a, f.p("data/trailing.")));
 }
 
+test "a missing file is empty, and something unreadable in its place is not" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expectEqualStrings("", try readOrEmpty(io, a, f.p("not-here"), .unlimited));
+    // **SOMETHING THAT EXISTS BUT WILL NOT READ MUST NOT COME BACK AS ""**,
+    // because the caller is about to write over what it thinks is empty.
+    try makeDir(io, a, f.p("a-directory"));
+    try testing.expect(readOrEmpty(io, a, f.p("a-directory"), .unlimited) catch null == null);
+}
+
 test "case does not tell two names apart, and the first case is kept" {
     var f: Fixture = undefined;
     try f.init();
