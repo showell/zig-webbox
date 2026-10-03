@@ -15,13 +15,11 @@ const net = std.Io.net;
 pub const default = "0.0.0.0";
 
 /// The address to listen on: `raw` (GOPHER_BIND's value, or null when it is
-/// unset) on `port`.
+/// unset) on `port`. BadBindAddress when it is not an IP address; the caller
+/// says so (server.zig), so a test of the refusal prints nothing.
 pub fn address(raw: ?[]const u8, port: u16) !net.IpAddress {
     const host = std.mem.trim(u8, raw orelse default, " \t\r\n");
-    return net.IpAddress.parse(host, port) catch {
-        std.debug.print("zig-server: GOPHER_BIND={s} is not an IP address; not starting\n", .{raw orelse ""});
-        return error.BadBindAddress;
-    };
+    return net.IpAddress.parse(host, port) catch error.BadBindAddress;
 }
 
 test "unset is every interface, 127.0.0.1 is loopback only, and a bad one is refused" {
