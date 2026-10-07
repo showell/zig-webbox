@@ -258,6 +258,11 @@ pub fn drop(hub: *Hub, k: Kept) void {
 pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
     defer drop(hub, k);
     while (true) {
+        // **A MAILBOX THAT OVERFLOWED ENDS THE STREAM**, as `nextFrame` ends it
+        // on a host with one loop: the browser reconnects and resumes from
+        // its cursor. Carrying on would show this viewer a conversation with
+        // a hole in it and no sign of one, which metal never did.
+        if (k.sub.missed) return;
         switch (k.sub.next()) {
             .msg => |blob| {
                 defer k.sub.gpa.free(blob);
@@ -477,6 +482,20 @@ test "bus: a mailbox that overflowed says so, and nextFrame stops rather than sk
     hub.close(sub);
 }
 
+test "bus: a mailbox that overflowed ends serveKept at once, as nextFrame ends it" {
+    var hub = Hub.init(testing.io, testing.allocator);
+    const sub = try hub.open("k");
+    for (0..Subscriber.cap + 1) |_| hub.publish("k", "x");
+    try testing.expect(sub.missed);
+    var storage: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&storage);
+    // Returns without writing or waiting: the stream ends, and drop frees it.
+    serveKept(&hub, .{ .sub = sub, .render = upper }, &w);
+    try testing.expectEqual(@as(usize, 0), w.end);
+    try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
+    hub.entries.deinit(testing.allocator);
+}
+
 test "bus: serveKept writes each frame, and a write that fails ends the stream and frees it" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -496,4 +515,104 @@ test "bus: serveKept writes each frame, and a write that fails ends the stream a
     serveKept(&hub, .{ .sub = sub, .render = upper, .ctx = try testing.allocator.dupe(u8, "cy") }, &w);
     try testing.expectEqualStrings(want, w.buffered());
     try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
+}
+
+// ── the mailbox contract, over seeded runs ──────────────────────────────────
+//
+// **THE CONTRACT BOTH HOSTS SERVE** (gopher-metal HOST.md, "Live streams"):
+// a reader sees exactly the events published on its key since it opened, in
+// the order they were published, nothing from another key and nothing
+// skipped; a reader whose mailbox was full when an event arrived ends with
+// `EventsMissed` (serveKept ends the same way), and never sees a gap. The
+// model here is a list of what each reader is owed; the Hub is driven by
+// seeded publishes, opens, closes and reads, one loop, as metal serves it.
+
+fn same(_: []const u8, _: Alloc, blob: []const u8) ?[]const u8 {
+    return blob;
+}
+
+/// How often each case was met, over every seed: a simulator that never
+/// overflowed a mailbox would prove nothing about it.
+var sim_seen: struct { frames: usize = 0, missed: usize = 0, empty: usize = 0, closed: usize = 0 } = .{};
+
+const SimReader = struct {
+    sub: *Subscriber,
+    key: usize,
+    /// Events published on its key since it opened and not yet read.
+    owed: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// The model's verdict: an event arrived while its mailbox was full.
+    overflowed: bool = false,
+    /// A slow reader reads on one turn in eight, so its mailbox fills.
+    slow: bool = false,
+};
+
+fn simRun(seed: u64) !void {
+    const keys = [_][]const u8{ "conv/1_2", "conv/1_3", "user/7" };
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    var hub = Hub.init(testing.io, testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var readers: std.ArrayListUnmanaged(SimReader) = .empty;
+    defer {
+        for (readers.items) |*rd| {
+            rd.owed.deinit(testing.allocator);
+            hub.close(rd.sub);
+        }
+        readers.deinit(testing.allocator);
+    }
+    var seq: usize = 0;
+    for (0..r.intRangeAtMost(usize, 50, 400)) |_| {
+        switch (r.uintLessThan(u8, 10)) {
+            0, 1 => if (readers.items.len < 6) {
+                const k = r.uintLessThan(usize, keys.len);
+                try readers.append(testing.allocator, .{ .sub = try hub.open(keys[k]), .key = k, .slow = r.uintLessThan(u8, 3) == 0 });
+            },
+            2 => if (readers.items.len > 0) {
+                var rd = readers.swapRemove(r.uintLessThan(usize, readers.items.len));
+                rd.owed.deinit(testing.allocator);
+                hub.close(rd.sub);
+                sim_seen.closed += 1;
+            },
+            3, 4, 5, 6 => {
+                const k = r.uintLessThan(usize, keys.len);
+                seq += 1;
+                const ev = try std.fmt.allocPrint(arena.allocator(), "{s}#{d}", .{ keys[k], seq });
+                for (readers.items) |*rd| {
+                    if (rd.key != k or rd.overflowed) continue;
+                    if (rd.owed.items.len == Subscriber.cap) rd.overflowed = true else try rd.owed.append(testing.allocator, ev);
+                }
+                hub.publish(keys[k], ev);
+            },
+            else => for (readers.items) |*rd| {
+                if (rd.slow and r.uintLessThan(u8, 8) != 0) continue;
+                for (0..r.uintAtMost(usize, 4)) |_| {
+                    const got = nextFrame(.{ .sub = rd.sub, .render = same }, arena.allocator()) catch |e| {
+                        try testing.expectEqual(error.EventsMissed, e);
+                        try testing.expect(rd.overflowed);
+                        sim_seen.missed += 1;
+                        break;
+                    };
+                    const frame = got orelse {
+                        // Nothing waiting: the model owes nothing either.
+                        try testing.expect(rd.overflowed or rd.owed.items.len == 0);
+                        sim_seen.empty += 1;
+                        break;
+                    };
+                    try testing.expect(!rd.overflowed);
+                    try testing.expect(rd.owed.items.len > 0);
+                    try testing.expectEqualStrings(rd.owed.items[0], frame);
+                    _ = rd.owed.orderedRemove(0);
+                    sim_seen.frames += 1;
+                }
+            },
+        }
+    }
+}
+
+test "bus: the mailbox contract over seeded runs (a simulator)" {
+    sim_seen = .{};
+    for (1..301) |seed| try simRun(seed);
+    try testing.expect(sim_seen.frames > 1000 and sim_seen.missed > 10 and sim_seen.empty > 100 and sim_seen.closed > 100);
 }
