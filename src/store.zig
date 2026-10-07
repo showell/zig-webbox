@@ -183,10 +183,18 @@ fn exists(io: Io, path: []const u8) bool {
 }
 
 /// A lookup that missed: the same path in another case, or null when there is
-/// no such thing in any case.
+/// no such thing in any case. Any other answer for the other spelling is the
+/// caller's: a path through a file in another case is NotDir here, as FAT,
+/// which folds case, answers it on gopher-metal.
 fn retry(io: Io, alloc: Alloc, path: []const u8) !?[]const u8 {
     const p = try resolve(io, alloc, path);
-    if (std.mem.eql(u8, p, path) or !exists(io, p)) return null;
+    if (std.mem.eql(u8, p, path)) return null;
+    // statFile, not access: zig's access answers a path through a file as
+    // FileNotFound, where statFile says NotDir.
+    _ = Io.Dir.cwd().statFile(io, p, .{}) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
     return p;
 }
 
