@@ -258,14 +258,13 @@ pub fn stat(io: Io, alloc: Alloc, path: []const u8) !Stat {
 
 /// Whether there is a file or folder at `path`, in any case.
 ///
-/// **"NO" ONLY FOR WHAT IS NOT THERE.** A path not found, or through a file,
-/// is no; any other failure is the caller's, who says what it means there.
-/// This answered no for every error once, so a disk that failed a read said
-/// a conversation was gone (chat retirement swept references to it) and an
-/// unreadable marker was no marker (gopher-metal STORE.md, open question 3).
+/// **"NO" ONLY FOR WHAT IS NOT THERE**: a path not found, through a file, or
+/// with a name too long for any file to have it. Any other failure is the
+/// caller's, who says what it means there; a disk that failed a read is not
+/// an absent file.
 pub fn has(io: Io, alloc: Alloc, path: []const u8) !bool {
     _ = stat(io, alloc, path) catch |e| switch (e) {
-        error.FileNotFound, error.NotDir => return false,
+        error.FileNotFound, error.NotDir, error.NameTooLong => return false,
         else => return e,
     };
     return true;
@@ -344,7 +343,12 @@ pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: W
     } else {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
     }
-    try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), p, io);
+    // A rename refused (onto a folder) leaves no temporary behind; one a
+    // stop interrupts does, and the next replace writes over it.
+    Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), p, io) catch |e| {
+        Io.Dir.cwd().deleteFile(io, tmp) catch {};
+        return e;
+    };
 }
 
 /// The temporary name `replace` writes beside `name`: `~` and eight hex digits
@@ -463,10 +467,10 @@ test "write, read, append, readAt, stat, list, remove" {
 
     try remove(io, a, f.p("data/chat/1_2/sessions/topic.md"));
     try remove(io, a, f.p("data/chat/1_2/sessions/topic.md")); // gone already: fine
-    try testing.expect(!has(io, a, f.p("data/chat/1_2/sessions/topic.md")));
+    try testing.expect(!try has(io, a, f.p("data/chat/1_2/sessions/topic.md")));
     try removeTree(io, a, f.p("data/chat"));
-    try testing.expect(!has(io, a, f.p("data/chat")));
-    try testing.expect(has(io, a, f.p("data/new/x.log")));
+    try testing.expect(!try has(io, a, f.p("data/chat")));
+    try testing.expect(try has(io, a, f.p("data/new/x.log")));
 }
 
 test "a name FAT refuses is refused here too, before anything is made" {
@@ -482,7 +486,7 @@ test "a name FAT refuses is refused here too, before anything is made" {
     try testing.expectError(error.BadName, append(io, a, f.p("data/" ++ "x" ** 97), "x"));
     try testing.expectError(error.BadName, makeDir(io, a, f.p("data/trailing./inner")));
     try testing.expectError(error.BadName, removeTree(io, a, f.p("data/users/   ")));
-    try testing.expect(!has(io, a, f.p("data/trailing.")));
+    try testing.expect(!try has(io, a, f.p("data/trailing.")));
 }
 
 test "replace makes the file hold exactly the data, keeps its name, and leaves no sibling" {
@@ -553,7 +557,7 @@ test "a path gopher-metal could not hold is refused, measured as it would spell 
     try write(io, a, try std.fs.path.join(a, parts[0..16]), "ok", .{});
     try testing.expectError(error.PathTooDeep, write(io, a, try std.fs.path.join(a, parts[0..17]), "no", .{}));
     try testing.expectError(error.PathTooDeep, makeDir(io, a, try std.fs.path.join(a, parts[0..17])));
-    try testing.expect(!has(io, a, try std.fs.path.join(a, parts[0..17])));
+    try testing.expect(!try has(io, a, try std.fs.path.join(a, parts[0..17])));
 
     // Under auth/ too; and not a path that only begins like a root.
     try testing.expectError(error.PathTooLong, write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/auth"), "x" ** 96, "y" ** 96, "z" ** 96 }), "no", .{}));
@@ -588,7 +592,7 @@ test "case does not tell two names apart, and the first case is kept" {
     try write(io, a, f.p("data/chat/channels/Dev/sessions/plan.md"), "one", .{});
     // Read in another case: the same file, as FAT finds it.
     try testing.expectEqualStrings("one", try read(io, a, f.p("data/chat/channels/dev/sessions/PLAN.md"), .unlimited));
-    try testing.expect(has(io, a, f.p("data/chat/CHANNELS/dev/Sessions/Plan.md")));
+    try testing.expect(try has(io, a, f.p("data/chat/CHANNELS/dev/Sessions/Plan.md")));
     // Write in another case: the same file again, kept in its first case.
     try write(io, a, f.p("data/chat/channels/DEV/sessions/Plan.md"), "two", .{});
     _ = try append(io, a, f.p("data/chat/channels/dev/sessions/PLAN.md"), "!");
@@ -604,7 +608,7 @@ test "case does not tell two names apart, and the first case is kept" {
     try testing.expectEqual(@as(usize, 1), (try list(io, a, f.p("data/chat/channels"))).len);
     // Removal in another case removes it.
     try remove(io, a, f.p("data/chat/channels/dev/sessions/PLAN.md"));
-    try testing.expect(!has(io, a, f.p("data/chat/channels/Dev/sessions/plan.md")));
+    try testing.expect(!try has(io, a, f.p("data/chat/channels/Dev/sessions/plan.md")));
     try removeTree(io, a, f.p("data/chat/channels/DEV"));
     try testing.expectEqual(@as(usize, 0), (try list(io, a, f.p("data/chat/channels"))).len);
 }
