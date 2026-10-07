@@ -257,8 +257,17 @@ pub fn stat(io: Io, alloc: Alloc, path: []const u8) !Stat {
 }
 
 /// Whether there is a file or folder at `path`, in any case.
-pub fn has(io: Io, alloc: Alloc, path: []const u8) bool {
-    _ = stat(io, alloc, path) catch return false;
+///
+/// **"NO" ONLY FOR WHAT IS NOT THERE.** A path not found, or through a file,
+/// is no; any other failure is the caller's, who says what it means there.
+/// This answered no for every error once, so a disk that failed a read said
+/// a conversation was gone (chat retirement swept references to it) and an
+/// unreadable marker was no marker (gopher-metal STORE.md, open question 3).
+pub fn has(io: Io, alloc: Alloc, path: []const u8) !bool {
+    _ = stat(io, alloc, path) catch |e| switch (e) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return e,
+    };
     return true;
 }
 

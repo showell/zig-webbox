@@ -96,7 +96,7 @@ test "fs: peek answers what next would, and writes nothing" {
 
     const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "deep", "n.txt" });
     try testing.expectEqual(@as(i64, 1), peek(io, a, path));
-    try testing.expect(!store.has(io, a, path)); // no file, and no folder for it, made
+    try testing.expect(!try store.has(io, a, path)); // no file, and no folder for it, made
     try testing.expectEqual(@as(i64, 1), peek(io, a, path));
     try testing.expectEqual(@as(i64, 1), try next(io, a, path));
     try testing.expectEqual(@as(i64, 2), peek(io, a, path));
