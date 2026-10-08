@@ -26,14 +26,7 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
     mu.lockUncancelable(io);
     defer mu.unlock(io);
 
-    var n: i64 = 0;
-    if (store.read(io, alloc, path, .limited(64))) |body| {
-        const trimmed = std.mem.trim(u8, body, " \t\r\n");
-        if (std.fmt.parseInt(i64, trimmed, 10)) |parsed| {
-            n = parsed;
-        } else |_| {}
-    } else |_| {}
-    if (n < 1) n = 1;
+    const n = try current(io, alloc, path);
 
     const out = try std.fmt.allocPrint(alloc, "{d}\n", .{n + 1});
     try store.replace(io, alloc, path, out, .{});
@@ -43,12 +36,19 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
 /// peek answers the value `next` would hand out, and writes nothing: what a
 /// page offers before anything is made (puzzles.zig, a session made on its
 /// first move). Floors at 1, as `next` does.
-pub fn peek(io: Io, alloc: Alloc, path: []const u8) i64 {
+pub fn peek(io: Io, alloc: Alloc, path: []const u8) !i64 {
     mu.lockUncancelable(io);
     defer mu.unlock(io);
-    const body = store.read(io, alloc, path, .limited(64)) catch return 1;
-    const n = std.fmt.parseInt(i64, std.mem.trim(u8, body, " \t\r\n"), 10) catch return 1;
-    return @max(n, 1);
+    return current(io, alloc, path);
+}
+
+/// The value the counter holds, floored at 1; 1 when there is no counter
+/// yet. **A COUNTER THAT CANNOT BE READ, OR DOES NOT HOLD A NUMBER, IS AN
+/// ERROR** (metal-vmm QUEUE 105): read as a new one, it handed out ids
+/// already given. Called under `mu`.
+fn current(io: Io, alloc: Alloc, path: []const u8) !i64 {
+    const body = (try store.readOrNull(io, alloc, path, .limited(64))) orelse return 1;
+    return @max(try std.fmt.parseInt(i64, std.mem.trim(u8, body, " \t\r\n"), 10), 1);
 }
 
 // ══ TESTS ════════════════════════════════════════════════════════════════════
@@ -79,9 +79,11 @@ test "fs: ids are handed out once, and survive a restart" {
     const body = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64));
     try testing.expectEqualStrings("4\n", body);
 
-    // A corrupt counter restarts rather than failing the request.
+    // A corrupt counter fails the request, and is left as it is: restarting
+    // it handed out ids already given (metal-vmm QUEUE 105).
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "not a number" });
-    try testing.expectEqual(@as(i64, 1), try next(io, a, path));
+    try testing.expect(std.meta.isError(next(io, a, path)));
+    try testing.expectEqualStrings("not a number", try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64)));
 }
 
 test "fs: peek answers what next would, and writes nothing" {
@@ -118,6 +120,7 @@ test "fs: a counter that cannot be read is an error, never 1 again (metal-vmm QU
     const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "n.txt" });
     try store.makeDir(io, a, path); // there, and unreadable
     try testing.expect(std.meta.isError(next(io, a, path)));
+    try testing.expect(std.meta.isError(peek(io, a, path)));
     // Garbled is not new either.
     const garbled = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "g.txt" });
     try store.write(io, a, garbled, "4x\n", .{});

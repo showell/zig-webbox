@@ -221,6 +221,26 @@ pub fn readOrEmpty(io: Io, alloc: Alloc, path: []const u8, limit: Io.Limit) ![]u
     };
 }
 
+/// The file's bytes, or null when there is nothing there: a path not found,
+/// through a file, or with a name too long for any file (as `has` answers
+/// no). **Any other failure is the caller's**: a disk that failed a read is
+/// not an absent file (metal-vmm QUEUE 105).
+pub fn readOrNull(io: Io, alloc: Alloc, path: []const u8, limit: Io.Limit) !?[]u8 {
+    return read(io, alloc, path, limit) catch |e| switch (e) {
+        error.FileNotFound, error.NotDir, error.NameTooLong => null,
+        else => e,
+    };
+}
+
+/// What `stat` answers, or null when there is nothing there (as
+/// `readOrNull`). Any other failure is the caller's.
+pub fn statOrNull(io: Io, alloc: Alloc, path: []const u8) !?Stat {
+    return stat(io, alloc, path) catch |e| switch (e) {
+        error.FileNotFound, error.NotDir, error.NameTooLong => null,
+        else => e,
+    };
+}
+
 /// Up to `buf.len` bytes from `offset`; how many arrived.
 pub fn readAt(io: Io, alloc: Alloc, path: []const u8, offset: u64, buf: []u8) !usize {
     var f = Io.Dir.cwd().openFile(io, path, .{}) catch |e| switch (e) {
@@ -586,6 +606,26 @@ test "a missing file is empty, and something unreadable in its place is not" {
     // because the caller is about to write over what it thinks is empty.
     try makeDir(io, a, f.p("a-directory"));
     try testing.expect(readOrEmpty(io, a, f.p("a-directory"), .unlimited) catch null == null);
+}
+
+test "nothing there is null, and something there that will not read is an error (metal-vmm QUEUE 105)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try write(io, a, f.p("a-file"), "x", .{});
+    try makeDir(io, a, f.p("a-directory"));
+    for ([_][]const u8{ "not-here", "a-file/under-a-file" }) |absent| {
+        try testing.expect((try readOrNull(io, a, f.p(absent), .unlimited)) == null);
+        try testing.expect((try statOrNull(io, a, f.p(absent))) == null);
+    }
+    try testing.expectEqualStrings("x", (try readOrNull(io, a, f.p("a-file"), .unlimited)).?);
+    try testing.expectEqual(@as(u64, 1), (try statOrNull(io, a, f.p("a-file"))).?.size);
+    try testing.expect(std.meta.isError(readOrNull(io, a, f.p("a-directory"), .unlimited)));
 }
 
 test "case does not tell two names apart, and the first case is kept" {
