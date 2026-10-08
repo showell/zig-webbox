@@ -103,3 +103,26 @@ test "fs: peek answers what next would, and writes nothing" {
     try testing.expectEqual(@as(i64, 2), peek(io, a, path));
     try testing.expectEqual(@as(i64, 2), try next(io, a, path));
 }
+
+test "fs: a counter that cannot be read is an error, never 1 again (metal-vmm QUEUE 105)" {
+    // An unreadable counter read as a fresh one: next handed out 1, then 2,
+    // ids already given (a member's account among them, users.zig).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "n.txt" });
+    try store.makeDir(io, a, path); // there, and unreadable
+    try testing.expect(std.meta.isError(next(io, a, path)));
+    // Garbled is not new either.
+    const garbled = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "g.txt" });
+    try store.write(io, a, garbled, "4x\n", .{});
+    try testing.expect(std.meta.isError(next(io, a, garbled)));
+    // Absent is the first id.
+    const absent = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "new.txt" });
+    try testing.expectEqual(@as(i64, 1), try next(io, a, absent));
+}
