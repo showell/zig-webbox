@@ -10,7 +10,7 @@
 //! here too:
 //!
 //!   - **A name FAT can hold**, or the call is refused with `error.BadName`:
-//!     1 to 96 bytes (fat16.zig's max_name), printable ASCII, none of
+//!     1 to 96 bytes (disk_fat.zig's max_name), printable ASCII, none of
 //!     `" * / : < > ? \ |`, not `.` or `..`, not ending in a dot or a space.
 //!   - **Case does not tell two names apart; it is kept for display.** A name
 //!     that differs from an existing one only in case IS that one (Steve,
@@ -54,13 +54,13 @@ const std = @import("std");
 const Io = std.Io;
 const Alloc = std.mem.Allocator;
 
-/// fat16.zig's max_name: the longest name gopher-metal reads and writes.
+/// disk_fat.zig's max_name: the longest name gopher-metal reads and writes.
 pub const max_name = 96;
 
 /// io.zig's max_path: the longest path gopher-metal holds a file by.
 pub const max_path = 256;
 
-/// fat16.zig's max_tree_depth: how deep gopher-metal removes a tree and
+/// disk_fat.zig's max_tree_depth: how deep gopher-metal removes a tree and
 /// checks a volume at boot. A path is held to it from the volume's root.
 pub const max_depth = 16;
 
@@ -351,7 +351,7 @@ pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: Wri
 ///   - stopped before the rename: `path` is the old record, whole, and the
 ///     sibling is left over (the next replace writes over it);
 ///   - the rename itself: on Linux one atomic step; on gopher-metal,
-///     fat16.rename's order, which leaves the old record or the new, whole,
+///     disk_fat.rename's order, which leaves the old record or the new, whole,
 ///     and at worst leaked clusters (the boot-time disk check reports them).
 /// A `path` that does not exist yet is made as `write` makes it. It keeps the
 /// name it has, in its case, as `write` does.
