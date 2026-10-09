@@ -10,7 +10,7 @@
 //! here too:
 //!
 //!   - **A name FAT can hold**, or the call is refused with `error.BadName`:
-//!     1 to 96 bytes (disk_fat.zig's max_name), printable ASCII, none of
+//!     1 to 96 bytes (disk_fat_dirent.zig's max_name), printable ASCII, none of
 //!     `" * / : < > ? \ |`, not `.` or `..`, not ending in a dot or a space.
 //!   - **Case does not tell two names apart; it is kept for display.** A name
 //!     that differs from an existing one only in case IS that one (Steve,
@@ -54,7 +54,7 @@ const std = @import("std");
 const Io = std.Io;
 const Alloc = std.mem.Allocator;
 
-/// disk_fat.zig's max_name: the longest name gopher-metal reads and writes.
+/// disk_fat_dirent.zig's max_name: the longest name gopher-metal reads and writes.
 pub const max_name = 96;
 
 /// io.zig's max_path: the longest path gopher-metal holds a file by.
