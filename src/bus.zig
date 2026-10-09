@@ -63,6 +63,11 @@ pub const Subscriber = struct {
     /// stream emits a keepalive (and thereby notices a vanished client on the
     /// failed write).
     pub const keepalive_s = 25;
+    /// The window next() waits, in milliseconds: `keepalive_s` unless the
+    /// server was told otherwise (`GOPHER_KEEPALIVE_MS`, `keepaliveSetting`;
+    /// metal-vmm QUEUE 137), so a test of a quiet tab need not wait 25 s.
+    /// gopher-metal's kernel has the same knob (`keepalive_ms`).
+    pub var keepalive_ms: u64 = keepalive_s * std.time.ms_per_s;
 
     pub const Next = union(enum) {
         /// An owned message — the caller must free it with the bus allocator.
@@ -119,7 +124,7 @@ pub const Subscriber = struct {
         if (self.take()) |m| return .{ .msg = m };
         const expected = self.seq.load(.acquire);
         self.io.futexWaitTimeout(u32, &self.seq.raw, expected, .{
-            .duration = .{ .raw = .fromSeconds(keepalive_s), .clock = .awake },
+            .duration = .{ .raw = .fromMilliseconds(@intCast(keepalive_ms)), .clock = .awake },
         }) catch {};
         if (self.take()) |m| return .{ .msg = m };
         return .idle;
@@ -241,8 +246,19 @@ pub const Kept = struct {
     ctx: []const u8 = "",
 };
 
+/// **THE KEEPALIVE, SET FOR TESTS** (metal-vmm QUEUE 137): `GOPHER_KEEPALIVE_MS`
+/// as the server reads it. Unset is null (the default, 25 s); a whole number
+/// of milliseconds above zero is the window; anything else is refused, and
+/// the server does not start, as for GOPHER_BIND.
+pub fn keepaliveSetting(text: ?[]const u8) error{InvalidKeepalive}!?u64 {
+    const t = std.mem.trim(u8, text orelse return null, " \t\r\n");
+    const ms = std.fmt.parseInt(u64, t, 10) catch return error.InvalidKeepalive;
+    if (ms == 0 or ms > std.math.maxInt(u32)) return error.InvalidKeepalive;
+    return ms;
+}
+
 /// The keepalive: a comment line, which a browser ignores. A stream that has
-/// sent nothing for `Subscriber.keepalive_s` sends this, and a closed tab is
+/// sent nothing for `Subscriber.keepalive_ms` sends this, and a closed tab is
 /// noticed when it cannot be written.
 pub const ping = ": ping\n\n";
 
@@ -304,7 +320,7 @@ pub fn nextFrame(k: Kept, arena: Alloc) !?[]const u8 {
 // Everything runs on std.testing.allocator, so an unfreed message, key, or
 // Subscriber fails the test — these double as a leak check on open/close/drain.
 //
-// INVARIANT the tests must respect: next() blocks for keepalive_s (25s) on an
+// INVARIANT the tests must respect: next() blocks for keepalive_ms (25s) on an
 // EMPTY subscriber. So we only ever call next() after publishing, and exactly as
 // many times as there are buffered messages; emptiness is asserted via the
 // private `count` field instead.
@@ -333,6 +349,34 @@ test "bus: a published message reaches a subscriber as an owned copy" {
     bus.publish("room", "hello");
     try expectMsg(sub, "hello");
     bus.close(sub);
+}
+
+test "bus: GOPHER_KEEPALIVE_MS governs how long a quiet stream waits before a ping, and unset leaves 25 s (metal-vmm QUEUE 137)" {
+    // The setting, read as the server reads it: unset is the default; a
+    // number is milliseconds; anything else refuses to start.
+    try testing.expectEqual(@as(?u64, null), try keepaliveSetting(null));
+    try testing.expectEqual(@as(?u64, 200), try keepaliveSetting(" 200\n"));
+    try testing.expectError(error.InvalidKeepalive, keepaliveSetting("25s"));
+    try testing.expectError(error.InvalidKeepalive, keepaliveSetting("0"));
+    try testing.expectEqual(@as(u64, 25_000), Subscriber.keepalive_ms);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var bus = Hub.init(io, testing.allocator);
+    defer bus.entries.deinit(testing.allocator);
+    const sub = try bus.open("room");
+    defer bus.close(sub);
+
+    // Set to 200 ms, an empty subscriber answers idle (a ping) no sooner
+    // than that, and long before the default.
+    Subscriber.keepalive_ms = (try keepaliveSetting("200")).?;
+    defer Subscriber.keepalive_ms = Subscriber.keepalive_s * std.time.ms_per_s;
+    const start = Io.Clock.now(.awake, io);
+    try testing.expect(sub.next() == .idle);
+    const waited_ms = @divFloor(start.durationTo(Io.Clock.now(.awake, io)).nanoseconds, std.time.ns_per_ms);
+    try testing.expect(waited_ms >= 200);
+    try testing.expect(waited_ms < 10_000);
 }
 
 test "bus: publish fans out to every subscriber on the key; other keys never see it" {
