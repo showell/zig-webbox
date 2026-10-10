@@ -226,10 +226,38 @@ pub const Bus = struct {
         return self.hub.gpa;
     }
 
-    /// Hands the stream to the host. At most once per request.
+    /// Hands the stream to the host. At most once per request. A handler
+    /// holding a subscriber keeps it through `Held.keep`; only `route` reads
+    /// `kept`, and hands it to the host as its answer (metal-vmm QUEUE 157(a)).
     pub fn keep(self: *Bus, k: Kept) void {
         std.debug.assert(self.kept == null);
         self.kept = k;
+    }
+
+    /// **A SUBSCRIBER HELD UNTIL IT IS KEPT** (metal-vmm QUEUE 157(a)): what a
+    /// stream handler opens, closed on every way out of the handler but one,
+    /// `keep`. `defer held.release()` right after; where the pair was a flag
+    /// and a `defer if (!kept)` kept by hand.
+    pub fn hold(self: *Bus, sub: *Subscriber) Held {
+        return .{ .bus = self, .sub = sub };
+    }
+};
+
+/// A subscriber a handler holds (`Bus.hold`): `keep` hands it to the host;
+/// `release`, deferred, closes it unless it was.
+pub const Held = struct {
+    bus: *Bus,
+    sub: *Subscriber,
+    kept: bool = false,
+
+    /// Hands the stream to the host, with what renders its frames.
+    pub fn keep(self: *Held, render: *const fn (ctx: []const u8, arena: Alloc, blob: []const u8) ?[]const u8, ctx: []const u8) void {
+        self.bus.keep(.{ .sub = self.sub, .render = render, .ctx = ctx });
+        self.kept = true;
+    }
+
+    pub fn release(self: *Held) void {
+        if (!self.kept) self.bus.close(self.sub);
     }
 };
 
