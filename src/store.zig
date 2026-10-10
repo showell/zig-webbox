@@ -567,8 +567,8 @@ test "a path gopher-metal could not hold is refused, measured as it would spell 
     var threaded = std.Io.Threaded.init(a, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const saved = .{ data_base, auth_base };
-    defer data_base, auth_base = saved;
+    const saved = @import("roots.zig").save(); // the bases are two of the roots (157(c))
+    defer saved.restore();
     // Roots spelled long, as a Linux host's are: the limits do not count them.
     const data = f.p("home/someone/a-long-host-path/prod/data");
     setBases(data, f.p("home/someone/a-long-host-path/prod/auth"));
@@ -667,8 +667,8 @@ test "case does not tell two names apart, and the first case is kept" {
 }
 
 test "a path with an empty part is refused under a root, as metal refuses it (metal-vmm QUEUE 156(i))" {
-    const saved = data_base;
-    defer data_base = saved;
+    const saved = @import("roots.zig").save();
+    defer saved.restore();
     data_base = "/srv/gopher/data/";
     try withinLimits("/srv/gopher/data/chat/1_2/sessions/x.md");
     for ([_][]const u8{ "/srv/gopher/data/chat//1_2/x.md", "/srv/gopher/data/chat/", "/srv/gopher/data//x" }) |bad|
