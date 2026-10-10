@@ -86,6 +86,19 @@ pub fn queryValue(target_str: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// **A REDIRECT TARGET ON THIS SITE, OR THE HOME PAGE** (`?next=`, a form's
+/// `next`): a path that starts with one slash and that no browser can read as
+/// another host. A browser reads a backslash as a slash and drops a tab or
+/// newline before it looks, so `/\evil.example` and `/\t/evil.example` are
+/// `//evil.example` to it: any backslash, any control character, or a second
+/// slash first is refused (the normalization hunt, 2026-10-10).
+pub fn internalTarget(next: []const u8) []const u8 {
+    if (next.len == 0 or next[0] != '/') return "/";
+    if (next.len > 1 and next[1] == '/') return "/";
+    for (next) |c| if (c == '\\' or c < 0x20 or c == 0x7f) return "/";
+    return next;
+}
+
 pub fn notFound(req: *std.http.Server.Request) !void {
     try req.respond("not found\n", .{ .status = .not_found });
 }
