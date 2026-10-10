@@ -87,7 +87,7 @@ pub fn setBases(data_dir: []const u8, auth_dir: []const u8) void {
 
 /// `path`'s length and depth as gopher-metal would spell it, or null when it
 /// is under neither root.
-fn metalShape(path: []const u8) ?struct { len: usize, depth: usize } {
+fn metalShape(path: []const u8) ?struct { len: usize, depth: usize, empty_part: bool } {
     for ([_]struct { ?[]const u8, []const u8 }{ .{ data_base, "data" }, .{ auth_base, "auth" } }) |pair| {
         const base = std.mem.trimEnd(u8, pair[0] orelse continue, "/");
         if (!std.mem.startsWith(u8, path, base)) continue;
@@ -96,15 +96,20 @@ fn metalShape(path: []const u8) ?struct { len: usize, depth: usize } {
         var depth: usize = 1;
         var it = std.mem.tokenizeScalar(u8, rest, '/');
         while (it.next()) |_| depth += 1;
-        return .{ .len = pair[1].len + rest.len, .depth = depth };
+        const empty_part = (rest.len > 0 and rest[rest.len - 1] == '/') or std.mem.indexOf(u8, rest, "//") != null;
+        return .{ .len = pair[1].len + rest.len, .depth = depth, .empty_part = empty_part };
     }
     return null;
 }
 
 /// Refuses a path gopher-metal could not hold: longer than max_path or
-/// deeper than max_depth, measured as it would spell it.
+/// deeper than max_depth, measured as it would spell it; or one with an
+/// empty part (a doubled or trailing slash), which metal refuses
+/// (gopher-metal `ab6dd01`) and `metalShape`'s count of parts skipped
+/// (metal-vmm QUEUE 156(i)): `BadName`, on both hosts alike.
 fn withinLimits(path: []const u8) Error!void {
     const shape = metalShape(path) orelse return;
+    if (shape.empty_part) return error.BadName;
     if (shape.len > max_path) return error.PathTooLong;
     if (shape.depth > max_depth) return error.PathTooDeep;
 }
@@ -659,4 +664,15 @@ test "case does not tell two names apart, and the first case is kept" {
     try testing.expect(!try has(io, a, f.p("data/chat/channels/Dev/sessions/plan.md")));
     try removeTree(io, a, f.p("data/chat/channels/DEV"));
     try testing.expectEqual(@as(usize, 0), (try list(io, a, f.p("data/chat/channels"))).len);
+}
+
+test "a path with an empty part is refused under a root, as metal refuses it (metal-vmm QUEUE 156(i))" {
+    const saved = data_base;
+    defer data_base = saved;
+    data_base = "/srv/gopher/data/";
+    try withinLimits("/srv/gopher/data/chat/1_2/sessions/x.md");
+    for ([_][]const u8{ "/srv/gopher/data/chat//1_2/x.md", "/srv/gopher/data/chat/", "/srv/gopher/data//x" }) |bad|
+        try std.testing.expectError(error.BadName, withinLimits(bad));
+    // Outside the roots nothing is measured.
+    try withinLimits("/tmp//x");
 }

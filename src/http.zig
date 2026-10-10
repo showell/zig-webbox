@@ -86,6 +86,45 @@ pub fn queryValue(target_str: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// **ONE FORM DECODER** (metal-vmm QUEUE 156(i)): the value of field `name`
+/// in an `a=b&c=d` form or query, `+` a space and `%XX` a byte, or null when
+/// there is no such field. A `%` that is not two hex digits, or a field sent
+/// twice, is `error.MalformedForm`, which `route` answers 400: chat's decoder
+/// took a bad escape as text and the first of two fields, while players'
+/// refused the escape as a 500.
+pub fn formField(alloc: std.mem.Allocator, body: []const u8, name: []const u8) !?[]const u8 {
+    var found: ?[]const u8 = null;
+    var it = std.mem.splitScalar(u8, body, '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (!std.mem.eql(u8, pair[0..eq], name)) continue;
+        if (found != null) return error.MalformedForm;
+        found = try formDecode(alloc, pair[eq + 1 ..]);
+    }
+    return found;
+}
+
+/// A form value decoded: `+` a space, `%XX` a byte; a `%` that is not two hex
+/// digits is `error.MalformedForm`.
+pub fn formDecode(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        switch (raw[i]) {
+            '+' => try out.append(alloc, ' '),
+            '%' => {
+                if (i + 2 >= raw.len) return error.MalformedForm;
+                const hi = std.fmt.charToDigit(raw[i + 1], 16) catch return error.MalformedForm;
+                const lo = std.fmt.charToDigit(raw[i + 2], 16) catch return error.MalformedForm;
+                try out.append(alloc, @intCast(hi * 16 + lo));
+                i += 2;
+            },
+            else => try out.append(alloc, raw[i]),
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 /// **A REDIRECT TARGET ON THIS SITE, OR THE HOME PAGE** (`?next=`, a form's
 /// `next`): a path that starts with one slash and that no browser can read as
 /// another host. A browser reads a backslash as a slash and drops a tab or
