@@ -23,8 +23,7 @@ pub const Report = *const fn (io: Io, alloc: Alloc) anyerror![]const Fact;
 
 var report: ?Report = null;
 
-/// The host calls this once, before serving. Optional: see the host contract
-/// in router.zig.
+/// `host_start.start` calls it with `Host.facts`, if the host gives any.
 pub fn provide(r: Report) void {
     report = r;
 }
@@ -50,7 +49,7 @@ pub const Log = *const fn (io: Io, alloc: Alloc) anyerror!?[]const u8;
 
 var log: ?Log = null;
 
-/// The host calls this once, before serving, if it keeps a log to show.
+/// `host_start.start` calls it with `Host.log`, if the host keeps one.
 pub fn provideLog(l: Log) void {
     log = l;
 }
