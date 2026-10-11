@@ -143,14 +143,34 @@ test "namesTag: a list, weak tags and * name it; another tag or a bare value doe
 /// new visitor there.
 pub const cookie_attributes = "HttpOnly; Secure; SameSite=Lax";
 
-/// cookie returns the value of cookie `name` from any Cookie header, OWNED, or null.
-pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !?[]const u8 {
+/// A request's cookies of one name, OWNED. **SEVERAL IS ITS OWN CASE**
+/// (metal-vmm QUEUE 162.4): a cookie set for a parent domain arrives beside
+/// a subdomain's own of the same name, and which one a browser sends first is
+/// not the site's to choose, so no caller is handed "the first".
+pub const CookieValues = union(enum) {
+    none,
+    one: []const u8,
+    several: []const []const u8,
+};
+
+/// Every value of cookie `name`, from every Cookie header.
+pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !CookieValues {
+    var found: std.ArrayList([]const u8) = .empty;
     var it = req.iterateHeaders();
     while (it.next()) |h| {
         if (!std.ascii.eqlIgnoreCase(h.name, "cookie")) continue;
-        if (parseCookieValue(h.value, name)) |v| return try alloc.dupe(u8, v);
+        var pairs = std.mem.splitScalar(u8, h.value, ';');
+        while (pairs.next()) |raw| {
+            const pair = std.mem.trim(u8, raw, " \t");
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            if (std.mem.eql(u8, pair[0..eq], name)) try found.append(alloc, try alloc.dupe(u8, pair[eq + 1 ..]));
+        }
     }
-    return null;
+    return switch (found.items.len) {
+        0 => .none,
+        1 => .{ .one = found.items[0] },
+        else => .{ .several = found.items },
+    };
 }
 
 /// parseCookieValue extracts cookie `name` from one Cookie header value
