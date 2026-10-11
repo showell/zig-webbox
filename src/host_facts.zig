@@ -14,7 +14,7 @@
 //! compute its facts fresh (uptime, free space) without keeping anything.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 
 pub const Fact = struct { label: []const u8, value: []const u8 };

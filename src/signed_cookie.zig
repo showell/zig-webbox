@@ -8,7 +8,7 @@
 //! was issued one, is the application's.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 const http = @import("http.zig");
 const signed = @import("signed.zig");

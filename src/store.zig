@@ -38,7 +38,7 @@
 //! a file that is not there ("nothing yet") and one that will not read.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 
 /// The longest name the bare-metal host reads and writes (its

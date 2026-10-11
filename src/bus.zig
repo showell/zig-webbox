@@ -33,7 +33,7 @@
 //!     on seq with a timeout, so an idle stream still wakes to send a keepalive.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 
 /// Subscriber is one open stream's mailbox: a small bounded ring of owned

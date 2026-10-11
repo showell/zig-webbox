@@ -9,7 +9,7 @@
 //! in the file, there are none, and each store keeps its development default.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Roots = @import("webbox").site.Roots;
 
 /// The data directory this process serves, for the host's facts: the

@@ -26,7 +26,7 @@
 //! `try` left a kept stream's subscriber in the Hub for ever.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const bus = @import("bus.zig");
 const Bus = bus.Bus;
 const Kept = bus.Kept;

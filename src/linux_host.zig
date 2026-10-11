@@ -21,7 +21,7 @@
 //! (keep-alive off): see handleConn.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const net = std.Io.net;
 const mem_meter = @import("webbox").mem_meter;
 const bind = @import("bind.zig");
