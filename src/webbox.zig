@@ -14,6 +14,11 @@ pub const http = @import("http.zig");
 pub const edge = @import("edge.zig");
 /// Values signed so only the site could have made them (cookies).
 pub const signed = @import("signed.zig");
+/// The site's signing secret, kept as files: load, the previous one, rotate.
+pub const secret = @import("secret.zig");
+/// A cookie whose value is signed: read back under the current or previous
+/// secret, its header, and when it is due to be signed again.
+pub const signed_cookie = @import("signed_cookie.zig");
 /// HTML escaping.
 pub const html = @import("html.zig");
 /// Keyed pub/sub for SSE streams, and where a host takes a stream over.
@@ -50,6 +55,8 @@ test {
     _ = http;
     _ = edge;
     _ = signed;
+    _ = secret;
+    _ = signed_cookie;
     _ = html;
     _ = bus;
     _ = mem_meter;
