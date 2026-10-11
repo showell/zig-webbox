@@ -1,13 +1,14 @@
-//! host_facts: what the HOST says about itself, for /admin/host.
+//! host_facts: what the HOST says about itself, for a page that shows the
+//! host's facts. Part of the `webbox` library.
 //!
-//! The route table knows the application: its version, its commit, its memory
-//! meter. It does not know the machine it runs on, and must not reach for it
-//! (router.zig's rule). But the facts an operator needs most are the host's —
+//! An application's route table knows the application: its version, its
+//! commit, its memory meter. It does not know the machine it runs on, and must
+//! not reach for it. But the facts an operator needs most are the host's —
 //! when it started, what disk the data is on and how full, what memory it has
-//! used. Linux has them from /proc and the environment; gopher-metal has them
-//! from its own volumes, clocks and counters. So each host HANDS them over, as
-//! labelled strings, and the page renders whatever it was given. A host that
-//! gives nothing still gets the application's half.
+//! used. Linux has them from /proc and the environment; the bare-metal host
+//! has them from its own volumes, clocks and counters. So each host HANDS them
+//! over, as labelled strings, and the page renders whatever it was given. A
+//! host that gives nothing still gets the application's half.
 //!
 //! The report runs per request, on that request's allocator, so a host can
 //! compute its facts fresh (uptime, free space) without keeping anything.
@@ -23,7 +24,7 @@ pub const Report = *const fn (io: Io, alloc: Alloc) anyerror![]const Fact;
 
 var report: ?Report = null;
 
-/// `host_start.start` calls it with `Host.facts`, if the host gives any.
+/// The host calls it once at startup, with its report, if it gives any.
 pub fn provide(r: Report) void {
     report = r;
 }
@@ -44,12 +45,12 @@ pub fn facts(io: Io, alloc: Alloc) ![]const Fact {
 
 /// A host's log, newest last, or null when it keeps none it can show.
 /// **SECRETS ARE THE HOST'S TO TAKE OUT, ON THE WAY IN**: the page shows
-/// what it is given, to the admin only.
+/// what it is given, and an application shows that page to its admins only.
 pub const Log = *const fn (io: Io, alloc: Alloc) anyerror!?[]const u8;
 
 var log: ?Log = null;
 
-/// `host_start.start` calls it with `Host.log`, if the host keeps one.
+/// The host calls it once at startup, with its log, if it keeps one.
 pub fn provideLog(l: Log) void {
     log = l;
 }

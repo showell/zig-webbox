@@ -1,7 +1,6 @@
-//! html: tiny HTML helpers shared across every page-rendering module. No state,
-//! no I/O — just escaping. Lives on its own (not in chat.zig) so chrome.zig and
-//! the non-chat pages (login, game, admin, …) can escape without importing the
-//! chat dispatcher.
+//! html: tiny HTML helpers for every module that renders a page. Part of the
+//! `webbox` library. No state, no I/O — just escaping, so a page can escape
+//! without importing anything else.
 
 const std = @import("std");
 const Alloc = std.mem.Allocator;

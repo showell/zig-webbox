@@ -1,5 +1,7 @@
-//! http: tiny shared helpers over std.http.Server — content-type headers and
-//! the common responses. Keeps the per-feature handlers terse.
+//! http: small helpers over std.http.Server, part of the `webbox` library:
+//! content-type headers, owned reads of the request head, forms, embedded files
+//! a browser caches, redirects and the common responses, and the two pieces a
+//! Server-Sent Events stream needs. They keep an application's handlers terse.
 
 const std = @import("std");
 const Io = std.Io;
@@ -18,21 +20,14 @@ pub const octet_ct = std.http.Header{ .name = "content-type", .value = "applicat
 
 // ── request-head accessors (the OWNING chokepoint) ───────────────────────────
 //
-// WHO CALLS WHAT, because the answers differ and the module name hides it:
-// `notFound` has two dozen callers and is genuinely everyone's; `cookie` has
-// exactly two, `users.zig` and `player.zig`, because reading a cookie is what
-// identity does and nothing else needs to; and the Server-Sent Events section at
-// the bottom has exactly one, `chat_sse.zig`. If this file is ever split, that
-// is where the cuts are.
-//
 // Reading the request BODY invalidates the std.http head strings (the zig-0.16
 // `received_head` gotcha): any borrowed slice of a header value or the target
-// silently becomes garbage afterward, which once mis-attributed an authenticated
-// post to the wrong principal. So every accessor here returns memory OWNED by the
-// caller's allocator — a head value you hold can never dangle. This module is the
-// ONLY place allowed to touch `req.head.target` / `req.iterateHeaders()` directly;
-// tools/lint_head_access.py enforces that, which is what makes the foot-gun
-// impossible to reintroduce rather than merely fixed once.
+// silently becomes garbage afterward, which can attribute an authenticated post
+// to the wrong principal. So every accessor here returns memory OWNED by the
+// caller's allocator — a head value you hold can never dangle. An application
+// that reads the head only through this module (`req.head.target` and
+// `req.iterateHeaders()` touched nowhere else) cannot make the mistake; a lint
+// holding its other files to that keeps it impossible rather than fixed once.
 
 /// header returns the value of the first request header whose name
 /// case-insensitively matches `name`, OWNED (duped into `alloc`), or null.
@@ -59,7 +54,7 @@ pub fn target(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const 
 /// - **Asked for without it, or by another** (a tab open across a deploy, a
 ///   wasm a script fetches by name): today's bytes with `no-cache`, and a
 ///   request whose `If-None-Match` names the tag is a 304 with no body.
-/// The hash is taken per request: at compile time, elm.js's 396 KB alone
+/// The hash is taken per request: at compile time, one 396 KB script alone
 /// cost two minutes.
 pub fn serveEmbedded(req: *std.http.Server.Request, body: []const u8, content_type: std.http.Header) !void {
     const hash = hashOf(body);
@@ -173,9 +168,9 @@ pub fn queryValue(target_str: []const u8, name: []const u8) ?[]const u8 {
 /// **ONE FORM DECODER** (metal-vmm QUEUE 156(i)): the value of field `name`
 /// in an `a=b&c=d` form or query, `+` a space and `%XX` a byte, or null when
 /// there is no such field. A `%` that is not two hex digits, or a field sent
-/// twice, is `error.MalformedForm`, which `route` answers 400: chat's decoder
-/// took a bad escape as text and the first of two fields, while players'
-/// refused the escape as a 500.
+/// twice, is `error.MalformedForm`: the client's mistake, which an application
+/// answers 400, never 500. One decoder, so every form on a site reads a bad
+/// escape and a repeated field the same way.
 pub fn formField(alloc: std.mem.Allocator, body: []const u8, name: []const u8) !?[]const u8 {
     var found: ?[]const u8 = null;
     var it = std.mem.splitScalar(u8, body, '&');
@@ -209,7 +204,7 @@ pub fn formDecode(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-/// **A REDIRECT TARGET ON THIS SITE, OR THE HOME PAGE** (`?next=`, a form's
+/// **A REDIRECT TARGET ON THIS SITE, OR THE SITE'S ROOT** (`?next=`, a form's
 /// `next`): a path that starts with one slash and that no browser can read as
 /// another host. A browser reads a backslash as a slash and drops a tab or
 /// newline before it looks, so `/\evil.example` and `/\t/evil.example` are
@@ -271,7 +266,7 @@ pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
     });
 }
 
-// ── Server-Sent Events — CHAT ONLY (chat_sse.zig is the sole caller) ─────────
+// ── Server-Sent Events: the head and backlog a stream handler writes ─────────
 
 /// sse_headers are the response headers for an event-stream: the content type,
 /// no-cache, and x-accel-buffering off (defeats reverse-proxy buffering so
@@ -282,12 +277,12 @@ pub const sse_headers = [_]std.http.Header{
     .{ .name = "x-accel-buffering", .value = "no" },
 };
 
-/// pushFrame sends one SSE frame live over a chunked BodyWriter. Two flushes are
-/// required and the order matters: body.writer.flush() drains the BodyWriter's
-/// own buffer into the protocol output (emitting the HTTP chunk), then
-/// body.flush() pushes that chunk out the socket. body.flush() ALONE is a no-op
-/// while bytes still sit in the writer buffer — the subtle bit that makes SSE
-/// actually stream. (Every chat SSE stream pushes its frames through here.)
+/// pushFrame sends one SSE frame live over a streaming BodyWriter (a stream
+/// opened with `.transfer_encoding = .none`: the frames are the body, unframed).
+/// Two flushes are required and the order matters: body.writer.flush() drains
+/// the BodyWriter's own buffer into the protocol output, then body.flush()
+/// pushes that out the socket. body.flush() ALONE is a no-op while bytes still
+/// sit in the writer buffer — the subtle bit that makes SSE actually stream.
 pub fn pushFrame(body: *std.http.BodyWriter, bytes: []const u8) !void {
     try body.writer.writeAll(bytes);
     try body.writer.flush();

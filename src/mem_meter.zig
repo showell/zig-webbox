@@ -1,18 +1,21 @@
 //! mem_meter: a counting allocator that wraps a child allocator and tracks the
-//! outstanding (live) bytes + allocation count for the whole process.
+//! outstanding (live) bytes + allocation count for the whole process. Part of
+//! the `webbox` library.
 //!
-//! Why this is the right place to measure: every request runs on a per-request
-//! arena that server.zig frees wholesale when the request ends (`arena.deinit()`),
-//! so a handler that forgets to `free()` *cannot* leak. The ONLY thing that can
-//! leak is state allocated on the process-lifetime base allocator — the bus, the
-//! presence map, the reading-list cache. Wrapping that base allocator therefore
-//! meters exactly the leakable surface: bytes that survive a request.
+//! Why this is the right place to measure: when every request runs on a
+//! per-request arena the host frees wholesale when the request ends
+//! (`arena.deinit()`), a handler that forgets to `free()` *cannot* leak. The
+//! ONLY thing that can leak is state allocated on the process-lifetime base
+//! allocator — a bus, an application's in-memory maps and caches. Wrapping
+//! that base allocator therefore meters exactly the leakable surface: bytes
+//! that survive a request.
 //!
-//! Read it at /debug/mem (and folded into /version, which the watchdog already
-//! polls). A real leak climbs ~linearly under a hammered endpoint; a legitimate
-//! cache fills once and plateaus — so the stress harness watches the SLOPE, not
-//! the level. This is the cheap always-on smoke detector; std.heap.DebugAllocator
-//! is the swap-in localizer (stack traces) for once the meter fingers an endpoint.
+//! An application shows the numbers where its monitor and its stress harness
+//! read them. A real leak climbs ~linearly under a hammered endpoint; a
+//! legitimate cache fills once and plateaus — so a leak detector reading the
+//! meter watches the SLOPE, not the level. This is the cheap always-on smoke
+//! detector; std.heap.DebugAllocator is the swap-in localizer (stack traces)
+//! for once the meter fingers an endpoint.
 
 const std = @import("std");
 const Alloc = std.mem.Allocator;
@@ -27,18 +30,16 @@ const Meter = struct {
 
 // Process-lifetime singleton, mirroring edge.zig's module-level counters.
 //
-// **THE CHILD HAS NO DEFAULT, AND AN ALLOCATION BEFORE init() PANICS.** It used
-// to default to std.heap.page_allocator, "so base() is valid even before init()
-// runs". But presence and reading_list capture base() at module level, so the
-// route table reaches this singleton — and a default that NAMES a host
-// allocator drags that host into everything the route table touches:
-// page_allocator is mmap, and mmap is std.posix. On a machine with no operating
-// system that is not a slower path, it is a compile error, and it was the one
-// thing standing between gopher-metal and angry-gopher's real dispatch.
+// **THE CHILD HAS NO DEFAULT, AND AN ALLOCATION BEFORE init() PANICS.** A module
+// may capture base() at module level, so an application's route table reaches
+// this singleton — and a default that NAMES a host allocator would drag that
+// host into everything the route table touches: std.heap.page_allocator is
+// mmap, and mmap is std.posix. On a machine with no operating system that is
+// not a slower path, it is a compile error.
 //
 // Capturing base() before init() is still fine — it is a pointer and a vtable,
 // and allocates nothing. Only an actual allocation needs a child, and the HOST
-// is the only thing that knows which one: server.zig names page_allocator, a
+// is the only thing that knows which one: a Linux host names page_allocator, a
 // kernel names its fixed heap. Forgetting is a host bug, so it is a loud panic
 // naming the fix rather than an OutOfMemory that reads like memory pressure.
 var meter: Meter = .{ .child = unset };
@@ -59,8 +60,8 @@ pub fn replace(child: Alloc) Alloc {
 }
 
 /// **FOR A TEST: THE METER ON `child`**, and a handle to `defer` back
-/// (`defer meter.restore()`; metal-vmm QUEUE 157(e)), where each test kept
-/// the previous child and put it back by hand.
+/// (`defer meter.restore()`; metal-vmm QUEUE 157(e)), in place of each test
+/// keeping the previous child and putting it back by hand.
 pub fn useForTest(child: Alloc) Swapped {
     return .{ .prev = replace(child) };
 }
@@ -106,8 +107,8 @@ pub fn isInitialized() bool {
 
 /// base is the metered allocator: a thin vtable over `meter`. Stable for the
 /// process (ptr + vtable never move), so modules that hold a process-lifetime
-/// allocator — presence, reading_list — can capture it directly and have their
-/// persistent allocations show up in the meter.
+/// allocator can capture it directly and have their persistent allocations
+/// show up in the meter.
 pub fn base() Alloc {
     return .{ .ptr = &meter, .vtable = &vtable };
 }
@@ -172,8 +173,8 @@ pub fn snapshot() Snapshot {
     };
 }
 
-/// snapshotJSON renders the live counters as a JSON object (owned by `a`) — the
-/// body /debug/mem returns and the value /version embeds. Mirrors edge.countsJSON.
+/// snapshotJSON renders the live counters as a JSON object (owned by `a`), for a
+/// page or a monitor to read. Mirrors edge.countsJSON.
 pub fn snapshotJSON(a: Alloc) ![]const u8 {
     const s = snapshot();
     return std.fmt.allocPrint(a,
@@ -185,7 +186,7 @@ const testing = std.testing;
 
 // Every test puts the child back the way it found it: the singleton is shared by
 // every test in this binary — and, because zig runs an imported file's tests in
-// the importer's binary, by reading_list's and router's too. "Uninitialized" is
+// the importer's binary, by every importer's tests too. "Uninitialized" is
 // itself one of the things under test, so a test anywhere that init()s without
 // restoring will trip the first test below. That is the alarm working.
 //
@@ -193,16 +194,17 @@ const testing = std.testing;
 // test may already have allocated through the meter. Only deltas are ours.
 
 test "the meter starts with NO child — nothing here names a host allocator" {
-    // This is the property that lets the route table compile freestanding. It
-    // must hold before any test has run init(), so it runs first and changes
-    // nothing. (Zig cannot assert that a call PANICS, so the panic itself is
-    // checked by reading unsetAlloc, not by a test.)
+    // This is the property that lets a route table that reaches the meter
+    // compile freestanding. It must hold before any test has run init(), so it
+    // runs first and changes nothing. (Zig cannot assert that a call PANICS,
+    // so the panic itself is checked by reading unsetAlloc, not by a test.)
     try testing.expect(!isInitialized());
     try testing.expect(meter.child.vtable == &unset_vtable);
 }
 
 test "base() can be captured before init() without allocating" {
-    // presence and reading_list do exactly this at module level.
+    // A module holding a process-lifetime allocator does exactly this at
+    // module level.
     const before = snapshot();
     const early = base();
     try testing.expect(!isInitialized());
@@ -250,8 +252,9 @@ test "meter tracks live bytes across alloc/free and nets to zero" {
 }
 
 test "over a FixedBufferAllocator — the bare-metal host's shape" {
-    // gopher-metal has no pages to map. Its base allocator is a bump allocator
-    // over a static block, and this is the meter wrapped around exactly that.
+    // The bare-metal host has no pages to map. Its base allocator is a bump
+    // allocator over a static block, and this is the meter wrapped around
+    // exactly that.
     var block: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&block);
     const prev = replace(fba.allocator());

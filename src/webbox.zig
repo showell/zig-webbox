@@ -1,10 +1,8 @@
 //! **THE `webbox` LIBRARY** (a web server in a box): what an application
-//! built on this server imports, as one module (build.zig's `webbox`;
-//! dog-park is the first such application).
+//! built on it imports, as one module.
 //!
-//! Its files import std and one another, and nothing else of angry-gopher's:
-//! ops/check_zig holds every file named here to that, so an application gets
-//! these files and only these.
+//! Its files import std and one another, and nothing of any application's,
+//! so an application gets these files and only these.
 
 /// Request and response helpers: bodies, forms, cookies, embedded files.
 pub const http = @import("http.zig");
@@ -18,7 +16,7 @@ pub const html = @import("html.zig");
 pub const bus = @import("bus.zig");
 /// The counting allocator under everything long-lived: live bytes, for leaks.
 pub const mem_meter = @import("mem_meter.zig");
-/// What the host says about itself (/admin/host's host half).
+/// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
 /// Every file an application keeps, through one seam, under FAT's rules on
 /// every host.

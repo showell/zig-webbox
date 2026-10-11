@@ -1,14 +1,15 @@
-//! edge: the one policy for incoming data at the server's edges.
+//! edge: the one policy for incoming data at the server's edges. Part of the
+//! `webbox` library.
 //!
-//! THREAT MODEL (read this first). Prod ships a Debug build (ops/deploy), so
-//! zig's bounds and integer-overflow checks are ON (Debug's safety checks are a
-//! superset of ReleaseSafe's; gopher-metal ships ReleaseSafe): a classic C-style buffer overflow — write
-//! past a buffer, corrupt adjacent memory, keep running — cannot happen. If we
-//! ever index/copy out of bounds we PANIC (clean crash, systemd restarts). So
-//! the realistic "overflow" attack here is a panic-as-DoS: feed input that
-//! drives an edge past a fixed buffer and kill the worker. The defence is to
-//! BOUND every edge so oversized/malformed input is rejected gracefully —
-//! reaching neither the panic nor a silent truncation.
+//! THREAT MODEL (read this first). It assumes a build with zig's runtime safety
+//! on (Debug, whose checks are a superset of ReleaseSafe's, or ReleaseSafe), so
+//! the bounds and integer-overflow checks are ON: a classic C-style overflow
+//! — write past a buffer, corrupt adjacent memory, keep running — cannot
+//! happen. An out-of-bounds index or copy PANICS (a clean crash, which the
+//! host restarts). So the realistic "overflow" attack is a panic-as-DoS: feed
+//! input that drives an edge past a fixed buffer and kill the worker. The
+//! defence is to BOUND every edge so oversized/malformed input is rejected
+//! gracefully — reaching neither the panic nor a silent truncation.
 //!
 //! POLICY (four rules):
 //!   1. Every edge has an explicit, named byte/count bound (no inline magic).
@@ -16,27 +17,26 @@
 //!      The status is fixed by category (statusFor): 431 header, 413 body size,
 //!      400 malformed. The human message stays caller-specific (it's UX).
 //!   3. Every rejection is OBSERVABLE: a process-wide atomic counter per kind.
-//!   4. Tests assert the counter moved (see stress_test.py's edge-policy job).
+//!   4. An application's tests assert the counter moved.
 //!
-//! The counters are exposed in GET /version (home.zig), so the watchdog — which
-//! already polls /version every minute — surfaces a climbing reject counter in
-//! watchdog-status.txt for free: "someone is probing us" becomes an ssh-readable
-//! signal. Counters are in-memory and reset on restart; they're a probe signal,
-//! not accounting.
+//! An application shows the counters where an operator or a monitor looks
+//! (`countsJSON` for a machine, `countsText` for a person), so a climbing
+//! count says "someone is probing us". Counters are in-memory and reset on
+//! restart; they're a probe signal, not accounting.
 //!
-//! This module has NO dependencies but std (it's compiled into every harness),
-//! and it is the single home for the reject responses that used to be ad-hoc
-//! strings smeared across the handlers.
+//! This module has NO dependencies but std (so any harness can compile it in),
+//! and it is the single home for reject responses: no handler spells its own
+//! status for an edge-bound rejection.
 
 const std = @import("std");
 const Alloc = std.mem.Allocator;
 const Request = std.http.Server.Request;
 
 /// RejectKind is the closed set of edge-bound rejections. Each maps to a fixed
-/// HTTP status (statusFor). Add a kind here and it appears in /version's
-/// `rejects` object automatically (countsJSON iterates the enum).
+/// HTTP status (statusFor). Add a kind here and it appears in countsJSON and
+/// countsText automatically (both iterate the enum).
 pub const RejectKind = enum {
-    header_too_large, // request head exceeded the 16 KB read buffer
+    header_too_large, // request head exceeded the host's read buffer
     body_too_large, // request body (or an uploaded image) exceeded its cap
     body_unreadable, // body framing was malformed / unreadable
     malformed_markdown, // hostile / absurdly over-formatted markdown
@@ -72,15 +72,15 @@ pub fn reject(req: *Request, kind: RejectKind, msg: []const u8) !void {
 }
 
 /// count records a rejection WITHOUT sending a response — for paths that already
-/// have their own observable side effect (e.g. the markdown preview endpoint,
-/// which still returns the visible malformed_html placeholder) or where the
-/// connection is being closed raw (the oversize-header path in server.zig).
+/// have their own observable side effect (e.g. an endpoint that still answers,
+/// with a visible placeholder) or where the connection is being closed raw (a
+/// host refusing an oversized head before any route sees it).
 pub fn count(kind: RejectKind) void {
     bump(kind);
 }
 
 /// countsText renders the counters that are not zero, for a person:
-/// `body_too_large 3, malformed_markdown 1`, or `none`.
+/// `body_too_large 3, header_too_large 1`, or `none`.
 pub fn countsText(alloc: Alloc) ![]u8 {
     var b: std.ArrayList(u8) = .empty;
     inline for (@typeInfo(RejectKind).@"enum".fields, 0..) |f, i| {
@@ -95,7 +95,7 @@ pub fn countsText(alloc: Alloc) ![]u8 {
 }
 
 /// countsJSON renders the counters as a JSON object keyed by kind name, e.g.
-/// {"header_too_large":0,"body_too_large":3,...}. Embedded in /version.
+/// {"header_too_large":0,"body_too_large":3,...}.
 pub fn countsJSON(alloc: Alloc) ![]u8 {
     var b: std.ArrayList(u8) = .empty;
     try b.append(alloc, '{');

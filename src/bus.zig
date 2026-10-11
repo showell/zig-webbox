@@ -1,26 +1,25 @@
 //! bus: a keyed pub/sub fan-out for SSE streams, and the seam where a HOST
-//! takes a stream over.
+//! takes a stream over. Part of the `webbox` library.
 //!
 //! **THE APPLICATION DESCRIBES A STREAM; THE HOST KEEPS IT.** A stream handler
 //! writes its headers and backlog, then records a `Kept` — its subscriber, and
 //! how to render an event for this viewer — on its request's `Bus` and returns.
 //! The host serves what was kept: on Linux, `serveKept` blocks on the
-//! connection's own task exactly as the handler's loop used to; on a machine
-//! with one loop, `nextFrame` renders the next event that has arrived — when
-//! the host has somewhere to put it — and the host moves on. The application
-//! is one source for both.
+//! connection's own task, running the loop the handler would otherwise run;
+//! on a machine with one loop, `nextFrame` renders the next event that has
+//! arrived — when the host has somewhere to put it — and the host moves on.
+//! The application is one source for both.
 //!
 //! `Hub` is the shared registry (one per process). `Bus` is a small
 //! per-request handle over it, which is what makes "the stream this request
 //! kept" a field rather than a global — requests run concurrently on Linux.
 //! Each key maps to a set of Subscribers (one
 //! per open tab); `publish` is best-effort (a full subscriber drops the event,
-//! since every stream using this is live-only — a missed event is re-derived on
-//! reload). It drives chat's live streams (chat_sse.zig); it was prototyped on a
-//! standalone concurrency spike (since removed) before chat was ported.
+//! since a stream on the bus is live-only — a missed event is re-derived when
+//! the browser reconnects).
 //!
 //! Specialized to owned-`[]u8` messages.
-//! When chat needs typed events it becomes `Bus(comptime T)`; the
+//! When an application needs typed events it becomes `Bus(comptime T)`; the
 //! shape doesn't change.
 //!
 //! Synchronization (all io-aware, std.Io primitives — work across the thread
@@ -43,7 +42,7 @@ const Alloc = std.mem.Allocator;
 /// (under bus.mutex), no publisher can reference it, so destroy is race-free.
 pub const Subscriber = struct {
     io: Io,
-    /// SERVER-lifetime allocator (named `gpa`, like presence's): the ring outlives
+    /// SERVER-lifetime allocator (named `gpa`): the ring outlives
     /// any one request, so `push` DUPES each message into it. Never the request arena.
     gpa: Alloc,
     mutex: Io.Mutex = .init,
@@ -64,9 +63,8 @@ pub const Subscriber = struct {
     /// failed write).
     pub const keepalive_s = 25;
     /// The window next() waits, in milliseconds: `keepalive_s` unless the
-    /// server was told otherwise (`GOPHER_KEEPALIVE_MS`, `keepaliveSetting`;
-    /// metal-vmm QUEUE 137), so a test of a quiet tab need not wait 25 s.
-    /// gopher-metal's kernel has the same knob (`keepalive_ms`).
+    /// host sets it from a setting it reads (`keepaliveSetting`; metal-vmm
+    /// QUEUE 137), so a test of a quiet tab need not wait 25 s.
     pub var keepalive_ms: u64 = keepalive_s * std.time.ms_per_s;
 
     pub const Next = union(enum) {
@@ -200,9 +198,9 @@ pub const Bus = struct {
     /// The stream this request handed to the host, if it did.
     kept: ?Kept = null,
     /// The address the connection came from, as text (`203.0.113.7`,
-    /// `2001:db8::1`), if the host knows it: the host sets it before `route`.
-    /// What one address may make and write is bounded by it
-    /// (game_limits.zig); with none, those bounds do not apply.
+    /// `2001:db8::1`), if the host knows it: the host sets it before the
+    /// application sees the request. An application bounds what one address
+    /// may make and write by it; with none, such bounds do not apply.
     peer: ?[]const u8 = null,
 
     pub fn of(hub: *Hub) Bus {
@@ -227,8 +225,9 @@ pub const Bus = struct {
     }
 
     /// Hands the stream to the host. At most once per request. A handler
-    /// holding a subscriber keeps it through `Held.keep`; only `route` reads
-    /// `kept`, and hands it to the host as its answer (metal-vmm QUEUE 157(a)).
+    /// holding a subscriber keeps it through `Held.keep`; only the
+    /// application's dispatch reads `kept`, and hands it to the host as its
+    /// answer.
     pub fn keep(self: *Bus, k: Kept) void {
         std.debug.assert(self.kept == null);
         self.kept = k;
@@ -236,8 +235,8 @@ pub const Bus = struct {
 
     /// **A SUBSCRIBER HELD UNTIL IT IS KEPT** (metal-vmm QUEUE 157(a)): what a
     /// stream handler opens, closed on every way out of the handler but one,
-    /// `keep`. `defer held.release()` right after; where the pair was a flag
-    /// and a `defer if (!kept)` kept by hand.
+    /// `keep`. `defer held.release()` right after, in place of a flag and a
+    /// `defer if (!kept)` kept by hand.
     pub fn hold(self: *Bus, sub: *Subscriber) Held {
         return .{ .bus = self, .sub = sub };
     }
@@ -274,10 +273,11 @@ pub const Kept = struct {
     ctx: []const u8 = "",
 };
 
-/// **THE KEEPALIVE, SET FOR TESTS** (metal-vmm QUEUE 137): `GOPHER_KEEPALIVE_MS`
-/// as the server reads it. Unset is null (the default, 25 s); a whole number
-/// of milliseconds above zero is the window; anything else is refused, and
-/// the server does not start, as for GOPHER_BIND.
+/// **THE KEEPALIVE, SET FOR TESTS** (metal-vmm QUEUE 137): the text of the
+/// setting the host reads for it (on Linux, an environment variable), or null
+/// when unset. Unset is null (the default, 25 s); a whole number of
+/// milliseconds above zero is the window; anything else is refused, and the
+/// host does not start.
 pub fn keepaliveSetting(text: ?[]const u8) error{InvalidKeepalive}!?u64 {
     const t = std.mem.trim(u8, text orelse return null, " \t\r\n");
     const ms = std.fmt.parseInt(u64, t, 10) catch return error.InvalidKeepalive;
@@ -298,14 +298,14 @@ pub fn drop(hub: *Hub, k: Kept) void {
 }
 
 /// **FOR A HOST WITH A TASK PER CONNECTION.** Serves a kept stream until its
-/// client goes away — the loop the stream handlers used to run themselves.
+/// client goes away — the loop a stream handler would otherwise run itself.
 pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
     defer drop(hub, k);
     while (true) {
         // **A MAILBOX THAT OVERFLOWED ENDS THE STREAM**, as `nextFrame` ends it
         // on a host with one loop: the browser reconnects and resumes from
-        // its cursor. Carrying on would show this viewer a conversation with
-        // a hole in it and no sign of one, which metal never did.
+        // its cursor. Carrying on would show this viewer a stream with a
+        // hole in it and no sign of one, which a host with one loop never does.
         if (k.sub.missed) return;
         switch (k.sub.next()) {
             .msg => |blob| {
@@ -591,13 +591,14 @@ test "bus: serveKept writes each frame, and a write that fails ends the stream a
 
 // ── the mailbox contract, over seeded runs ──────────────────────────────────
 //
-// **THE CONTRACT BOTH HOSTS SERVE** (gopher-metal HOST.md, "Live streams"):
+// **THE CONTRACT BOTH KINDS OF HOST SERVE**:
 // a reader sees exactly the events published on its key since it opened, in
 // the order they were published, nothing from another key and nothing
 // skipped; a reader whose mailbox was full when an event arrived ends with
 // `EventsMissed` (serveKept ends the same way), and never sees a gap. The
 // model here is a list of what each reader is owed; the Hub is driven by
-// seeded publishes, opens, closes and reads, one loop, as metal serves it.
+// seeded publishes, opens, closes and reads, one loop, as a host with one
+// loop serves it.
 
 fn same(_: []const u8, _: Alloc, blob: []const u8) ?[]const u8 {
     return blob;
