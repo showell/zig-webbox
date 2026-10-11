@@ -50,23 +50,66 @@ pub fn target(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const 
     return alloc.dupe(u8, req.head.target);
 }
 
-/// **AN EMBEDDED FILE THE BROWSER KEEPS, AND ASKS ABOUT ON EACH USE** (metal-vmm
-/// QUEUE 158): `Cache-Control: no-cache` and an `ETag` of its bytes, and a
-/// request whose `If-None-Match` names that tag is answered 304 with no body.
-/// A changed file is a new tag at the next build, so a browser has it on its
-/// next load and a page names its scripts with no version. The tag is hashed
-/// per request: at compile time, elm.js's 396 KB alone cost two minutes.
+/// **AN EMBEDDED FILE THE BROWSER KEEPS** (metal-vmm QUEUE 158; Steve,
+/// 2026-10-11). Its `ETag` is a hash of its bytes, and a page names it by that
+/// hash (`hashedSrc`: `path?h=<hash>`).
+/// - **Asked for by its hash:** `Cache-Control: public, max-age=31536000,
+///   immutable`. The browser never asks for those bytes again; a changed file
+///   is a new hash, so the next page names a new URL, fetched once.
+/// - **Asked for without it, or by another** (a tab open across a deploy, a
+///   wasm a script fetches by name): today's bytes with `no-cache`, and a
+///   request whose `If-None-Match` names the tag is a 304 with no body.
+/// The hash is taken per request: at compile time, elm.js's 396 KB alone
+/// cost two minutes.
 pub fn serveEmbedded(req: *std.http.Server.Request, body: []const u8, content_type: std.http.Header) !void {
-    var buf: [18]u8 = undefined;
-    const tag = std.fmt.bufPrint(&buf, "\"{x:0>16}\"", .{std.hash.Wyhash.hash(0, body)}) catch unreachable;
+    const hash = hashOf(body);
+    var buf: [hash.len + 2]u8 = undefined;
+    const tag = std.fmt.bufPrint(&buf, "\"{s}\"", .{&hash}) catch unreachable;
     const etag = std.http.Header{ .name = "etag", .value = tag };
-    const no_cache = std.http.Header{ .name = "cache-control", .value = "no-cache" };
+    const cache = std.http.Header{ .name = "cache-control", .value = if (askedHash(req.head.target, &hash)) "public, max-age=31536000, immutable" else "no-cache" };
     var it = req.iterateHeaders();
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "if-none-match") and namesTag(h.value, tag))
-            return req.respond("", .{ .status = .not_modified, .extra_headers = &.{ etag, no_cache } });
+            return req.respond("", .{ .status = .not_modified, .extra_headers = &.{ etag, cache } });
     }
-    return req.respond(body, .{ .extra_headers = &.{ content_type, etag, no_cache } });
+    return req.respond(body, .{ .extra_headers = &.{ content_type, etag, cache } });
+}
+
+/// An embedded file's hash, as its ETag and its URL name it.
+fn hashOf(body: []const u8) [16]u8 {
+    var out: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&out, "{x:0>16}", .{std.hash.Wyhash.hash(0, body)}) catch unreachable;
+    return out;
+}
+
+/// **A PAGE NAMES AN EMBEDDED FILE BY ITS BYTES**: `path?h=<hash>`, the URL
+/// `serveEmbedded` answers as immutable.
+pub fn hashedSrc(alloc: std.mem.Allocator, path: []const u8, body: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "{s}?h={s}", .{ path, &hashOf(body) });
+}
+
+/// `<script src="path?h=<hash>"></script>`.
+pub fn scriptTag(alloc: std.mem.Allocator, path: []const u8, body: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "<script src=\"{s}\"></script>", .{try hashedSrc(alloc, path, body)});
+}
+
+/// Whether `target`'s query has `h=` naming `hash`.
+fn askedHash(target_: []const u8, hash: []const u8) bool {
+    const q = std.mem.indexOfScalar(u8, target_, '?') orelse return false;
+    var params = std.mem.splitScalar(u8, target_[q + 1 ..], '&');
+    while (params.next()) |p| {
+        if (std.mem.startsWith(u8, p, "h=") and std.mem.eql(u8, p[2..], hash)) return true;
+    }
+    return false;
+}
+
+test "askedHash: the query's h names the hash, or it does not" {
+    try std.testing.expect(askedHash("/a.js?h=00ff", "00ff"));
+    try std.testing.expect(askedHash("/a.js?x=1&h=00ff", "00ff"));
+    try std.testing.expect(!askedHash("/a.js?h=00f", "00ff"));
+    try std.testing.expect(!askedHash("/a.js?hh=00ff", "00ff"));
+    try std.testing.expect(!askedHash("/a.js", "00ff"));
+    try std.testing.expect(!askedHash("/a.js?v=zig", "00ff"));
 }
 
 /// Whether an `If-None-Match` value names `tag`: a list of tags, each
