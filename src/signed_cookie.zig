@@ -15,8 +15,12 @@ const signed = @import("signed.zig");
 const site_secret = @import("site_secret.zig");
 
 pub const Cookie = struct {
-    /// The cookie's name.
+    /// The cookie's name (`http.host_prefix` and a name, for any cookie set
+    /// now).
     name: []const u8,
+    /// The name it had before, read when a request has none of `name`; one
+    /// read so is due to be signed again, under `name` (`needsRenewal`).
+    legacy_name: ?[]const u8 = null,
     /// Its signing rules; `kind.lifetime_secs` is also its Max-Age.
     kind: signed.Kind,
 };
@@ -32,6 +36,8 @@ pub const Verified = struct {
     id: []const u8,
     issued: i64,
     by: enum { current, previous },
+    /// Read under the cookie's legacy name.
+    legacy: bool = false,
 };
 
 /// What a request's cookie says, each case named, so a caller decides on
@@ -59,7 +65,11 @@ pub const Invalid = enum {
 /// after a change of secret, with the previous one while it is still taken.
 pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Reading {
     var one: [1][]const u8 = undefined;
-    const values: []const []const u8 = switch (try http.cookie(req, alloc, c.name)) {
+    const named: http.Named = if (c.legacy_name) |old|
+        try http.cookieOrLegacy(req, alloc, c.name, old)
+    else
+        .{ .values = try http.cookie(req, alloc, c.name), .legacy = false };
+    const values: []const []const u8 = switch (named.values) {
         .none => return .none,
         .one => |v| blk: {
             one[0] = v;
@@ -79,7 +89,11 @@ pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secr
     };
     return switch (found) {
         .nothing_yet => .{ .invalid = .does_not_verify },
-        .one => |v| .{ .verified = v },
+        .one => |v| blk: {
+            var under = v;
+            under.legacy = named.legacy;
+            break :blk .{ .verified = under };
+        },
     };
 }
 
@@ -96,7 +110,7 @@ fn verifyEither(c: Cookie, current: []const u8, prev: ?[]const u8, value: []cons
 /// its life. Nothing else re-signs a valid cookie, so without this one active
 /// all its life is lost at its end.
 pub fn needsRenewal(c: Cookie, v: Verified, now: i64) bool {
-    return v.by == .previous or now -| v.issued > @divTrunc(c.kind.lifetime_secs, 2);
+    return v.legacy or v.by == .previous or now -| v.issued > @divTrunc(c.kind.lifetime_secs, 2);
 }
 
 /// The Set-Cookie header for `id`, signed now with the secret in
@@ -210,4 +224,25 @@ test "signed_cookie: of two cookies of one name, the one that verifies is read, 
     }) |lines| {
         try std.testing.expectEqualStrings("7", (try rig.reading(c, lines, 5000)).verified.id);
     }
+}
+
+test "signed_cookie: the legacy name is read only when the new one is absent, and is due to move (metal-vmm QUEUE 167.5)" {
+    var rig: Rig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    const c: Cookie = .{ .name = "__Host-device", .legacy_name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .validId = digits } };
+    const a = rig.arena.allocator();
+    const seven = try rig.signedFor(c, "7", 5000);
+    const eight = try rig.signedFor(c, "8", 5000);
+    // Only the old name: read, and due to be signed again under the new.
+    const old = (try rig.reading(c, &.{try std.fmt.allocPrint(a, "device={s}", .{seven})}, 5000)).verified;
+    try std.testing.expectEqualStrings("7", old.id);
+    try std.testing.expect(old.legacy and needsRenewal(c, old, 5000));
+    // The new name: read, the old one beside it ignored, however valid (a
+    // sibling's plant under the old name names no one else).
+    const now = (try rig.reading(c, &.{try std.fmt.allocPrint(a, "device={s}; __Host-device={s}", .{ eight, seven })}, 5000)).verified;
+    try std.testing.expectEqualStrings("7", now.id);
+    try std.testing.expect(!now.legacy and !needsRenewal(c, now, 5000));
+    // Issued under the new name.
+    try std.testing.expect(std.mem.startsWith(u8, try header(c, a, seven), "__Host-device="));
 }
