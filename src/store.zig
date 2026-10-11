@@ -389,6 +389,37 @@ pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: W
     };
 }
 
+/// **MAKES `path` HOLD `data` ONLY IF NOTHING IS THERE, WHOLE OR NOT AT
+/// ALL.** Written to a temporary sibling with a name of its own (`~`, eight
+/// random hex digits, `.new`, so two callers at once never share one), then
+/// renamed into place without replacing: of two callers at once, one makes
+/// `path` and the other is told `error.PathAlreadyExists`, its temporary
+/// removed. A stop part-way leaves only the temporary. Something already at
+/// `path`, in any case, is `error.PathAlreadyExists` as well.
+///
+/// **LINUX ONLY FOR NOW**: the bare-metal host's io has a rename that
+/// replaces and none that does not, so a program that calls this does not
+/// build there. Nothing the bare-metal host serves calls it (site_secret's
+/// `create`, for a new site's first secret, is its one caller).
+pub fn createNew(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
+    const p = try forWrite(io, alloc, path);
+    const dir = std.fs.path.dirname(p);
+    if (dir) |d| try makeDir(io, alloc, d);
+    var r: [4]u8 = undefined;
+    io.random(&r);
+    const tmp_name = try std.fmt.allocPrint(alloc, "~{x:0>8}.new", .{std.mem.readInt(u32, &r, .little)});
+    const tmp = if (dir) |d| try std.fs.path.join(alloc, &.{ d, tmp_name }) else tmp_name;
+    if (opts.private) {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @enumFromInt(0o600), .exclusive = true } });
+    } else {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .exclusive = true } });
+    }
+    Io.Dir.cwd().renamePreserve(tmp, Io.Dir.cwd(), p, io) catch |e| {
+        Io.Dir.cwd().deleteFile(io, tmp) catch {};
+        return e;
+    };
+}
+
 /// The temporary name `replace` writes beside `name`: `~` and eight hex digits
 /// of a hash of the name, then `.tmp`. Thirteen bytes whatever the name's
 /// length, so it fits where the name does, and one per name, so replaces of
@@ -680,4 +711,23 @@ test "a path with an empty part is refused under a root, as metal refuses it (me
         try std.testing.expectError(error.BadName, withinLimits(bad));
     // Outside the roots nothing is measured.
     try withinLimits("/tmp//x");
+}
+
+test "fs: createNew makes a file once, whole; one there, in any case, is PathAlreadyExists, and no temporary is left" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "deep" });
+    const path = try std.fs.path.join(a, &.{ dir, "Secret" });
+    try createNew(io, a, path, "first", .{});
+    try std.testing.expectError(error.PathAlreadyExists, createNew(io, a, path, "second", .{}));
+    try std.testing.expectError(error.PathAlreadyExists, createNew(io, a, try std.fs.path.join(a, &.{ dir, "SECRET" }), "third", .{}));
+    try std.testing.expectEqualStrings("first", try read(io, a, path, .limited(64)));
+    const left = try list(io, a, dir);
+    try std.testing.expectEqual(@as(usize, 1), left.len);
 }

@@ -56,12 +56,18 @@ pub fn rotate(io: Io, alloc: Alloc, dir: []const u8, previous_days: i64) !void {
 
 /// **THE FIRST SECRET**, made once, when a site is set up. Refused
 /// (`error.SecretExists`) when the folder has one already, whatever it holds:
-/// only `rotate` replaces a secret.
+/// only `rotate` replaces a secret. **ONE, HOWEVER MANY START AT ONCE**
+/// (metal-vmm QUEUE 162.3): made whole beside the name and renamed onto it
+/// without replacing (store.createNew), so of two processes setting up
+/// together one makes the secret and the other is refused, where a check
+/// and then a write let both write and the last one's win.
 pub fn create(io: Io, alloc: Alloc, dir: []const u8) !void {
     const path = try std.fs.path.join(alloc, &.{ dir, current_name });
-    if (try store.has(io, alloc, path)) return error.SecretExists;
     const hex = fresh(io);
-    try store.write(io, alloc, path, &hex, .{ .private = true });
+    store.createNew(io, alloc, path, &hex, .{ .private = true }) catch |e| switch (e) {
+        error.PathAlreadyExists => return error.SecretExists,
+        else => return e,
+    };
 }
 
 /// 32 random bytes as 64 hex digits.
@@ -94,4 +100,43 @@ test "create makes the first secret once, and refuses a second; rotate then repl
     try std.testing.expect(!std.mem.eql(u8, first, second));
     const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     try std.testing.expectEqualStrings(first, (try previous(io, a, dir, now)).?);
+}
+
+test "two processes setting up at once make one secret: every other is told SecretExists (metal-vmm QUEUE 162.3)" {
+    // A check and then a write: two that both checked before either wrote
+    // both wrote, and the last one's secret silently replaced the first's.
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (0..20) |round| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/round{d}", .{ &tmp.sub_path, round });
+        const Racer = struct {
+            made: std.atomic.Value(u32) = .init(0),
+            refused: std.atomic.Value(u32) = .init(0),
+            go: std.atomic.Value(bool) = .init(false),
+            fn run(self: *@This(), racer_io: Io, d: []const u8) void {
+                var own = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                defer own.deinit();
+                while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
+                if (create(racer_io, own.allocator(), d)) {
+                    _ = self.made.fetchAdd(1, .monotonic);
+                } else |e| if (e == error.SecretExists) {
+                    _ = self.refused.fetchAdd(1, .monotonic);
+                }
+            }
+        };
+        var racer: Racer = .{};
+        var threads: [8]std.Thread = undefined;
+        for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Racer.run, .{ &racer, io, dir });
+        racer.go.store(true, .release);
+        for (threads) |t| t.join();
+        try std.testing.expectEqual(@as(u32, 1), racer.made.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 7), racer.refused.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 64), (try load(io, a, dir)).?.len);
+    }
 }
