@@ -688,3 +688,25 @@ test "bus: the mailbox contract over seeded runs (a simulator)" {
     for (1..301) |seed| try simRun(seed);
     try testing.expect(sim_seen.frames > 1000 and sim_seen.missed > 10 and sim_seen.empty > 100 and sim_seen.closed > 100);
 }
+
+test "a held subscriber is closed on every way out but keep, and a kept one is not (metal-vmm QUEUE 157(a), its review)" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+    var b = Bus.of(&hub);
+    {
+        var held = b.hold(try b.open("k"));
+        defer held.release();
+        // The handler fails before it keeps: release closes it.
+    }
+    try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
+    {
+        var held = b.hold(try b.open("k"));
+        defer held.release();
+        held.keep(undefined, "");
+    }
+    try testing.expectEqual(@as(usize, 1), hub.entries.items.len);
+    drop(&hub, b.kept.?);
+    try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
+}
