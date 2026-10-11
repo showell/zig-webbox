@@ -278,11 +278,23 @@ test "pathUnder: the prefix itself, or the prefix and a '/', and nothing else" {
     try std.testing.expectEqualStrings("/a.js", pathOf("/a.js"));
 }
 
+/// **A REFUSAL NEVER SAYS "SEND IT"** (metal-vmm QUEUE 166): std's `respond`
+/// answers a pending `Expect: 100-continue` before anything else, so a
+/// client refused without its body being read was told to send it first,
+/// and began an upload into a connection about to close. Every refusal here
+/// (and edge.reject) declines it instead. A body already read has had its
+/// expectation answered, and std cleared it then.
+pub fn declineExpectation(req: *std.http.Server.Request) void {
+    req.head.expect = null;
+}
+
 pub fn notFound(req: *std.http.Server.Request) !void {
+    declineExpectation(req);
     try req.respond("not found\n", .{ .status = .not_found });
 }
 
 pub fn methodNotAllowed(req: *std.http.Server.Request) !void {
+    declineExpectation(req);
     try req.respond("method not allowed\n", .{ .status = .method_not_allowed });
 }
 
@@ -342,6 +354,7 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
 
 /// redirect sends a 303 See Other to `location`.
 pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
+    declineExpectation(req);
     try req.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = location }},

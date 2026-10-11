@@ -73,6 +73,8 @@ pub fn statusFor(kind: RejectKind) std.http.Status {
 /// edge-bound rejection flows through.
 pub fn reject(req: *Request, kind: RejectKind, msg: []const u8) !void {
     bump(kind);
+    // Refused: never told to send its body first (http.declineExpectation).
+    req.head.expect = null;
     try req.respond(msg, .{ .status = statusFor(kind) });
 }
 

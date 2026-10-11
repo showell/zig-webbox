@@ -309,9 +309,6 @@ const Raced = union(enum) { read: void, timer: void };
 /// client may be gone.
 fn refuse(req: *std.http.Server.Request, kind: edge.RejectKind, msg: []const u8) void {
     req.head.keep_alive = false;
-    // A client waiting on `100-continue` is refused, never told to send
-    // (std's `respond` answers the expectation first while it is set).
-    req.head.expect = null;
     edge.reject(req, kind, msg) catch {};
 }
 
@@ -499,9 +496,15 @@ const TestSite = struct {
     pub fn bodyLimit(target: []const u8) u64 {
         if (std.mem.eql(u8, target, "/tiny")) return 4;
         if (std.mem.eql(u8, target, "/upload")) return 4 * body_rule.before_turn_most;
+        if (std.mem.eql(u8, target, "/refuses")) return 4 * body_rule.before_turn_most;
         return 64 * 1024;
     }
     pub fn route(req: *std.http.Server.Request, _: Io, alloc: std.mem.Allocator, _: *bus.Bus) !?bus.Kept {
+        // A handler that refuses an upload without reading it.
+        if (std.mem.eql(u8, try http.target(req, alloc), "/refuses")) {
+            try http.redirect(req, "/login");
+            return null;
+        }
         if (req.head.method == .POST) {
             const cap = bodyLimit(try http.target(req, alloc));
             const got = (try http.readLimitedBody(req, alloc, cap)) orelse return null;
@@ -751,4 +754,17 @@ test "linux_host: a body already whole when its read starts leaves no task runni
         defer std.testing.allocator.free(got);
         try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n5"));
     }
+}
+
+test "linux_host: a body refused in the turn without being read is never told to send (metal-vmm QUEUE 166)" {
+    const head = "POST /refuses HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n";
+    const got = try exchange(head);
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 303"));
+    // And one read in the turn is told, once (then late: nothing came).
+    deadline_for_test_ms = 300;
+    defer deadline_for_test_ms = null;
+    const told = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n");
+    defer std.testing.allocator.free(told);
+    try std.testing.expect(std.mem.startsWith(u8, told, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 408"));
 }
