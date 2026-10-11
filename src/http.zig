@@ -18,6 +18,10 @@ pub const svg_ct = std.http.Header{ .name = "content-type", .value = "image/svg+
 pub const wasm_ct = std.http.Header{ .name = "content-type", .value = "application/wasm" };
 pub const octet_ct = std.http.Header{ .name = "content-type", .value = "application/octet-stream" };
 
+/// The request line and headers together, the most a host reads before
+/// answering 431.
+pub const head_bytes = 16 * 1024;
+
 // ── request-head accessors (the OWNING chokepoint) ───────────────────────────
 //
 // Reading the request BODY invalidates the std.http head strings (the zig-0.16

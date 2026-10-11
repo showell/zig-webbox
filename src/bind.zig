@@ -1,9 +1,9 @@
-//! bind: the address the server listens on, from GOPHER_BIND.
+//! bind: the address a Linux host listens on, from its bind setting (the
+//! application names the variable; angry-gopher's is GOPHER_BIND). Part of
+//! the `webbox` library, and host-only: it names a socket address.
 //!
-//! The default is every interface: prod's firewall keeps 9001 private, and
-//! Caddy reaches it on localhost. With GOPHER_BIND=127.0.0.1 the server
-//! answers on loopback only, which is how a rehearsal on real data is run
-//! without anything outside the machine reaching it.
+//! The default is every interface. With `127.0.0.1` the server answers on
+//! loopback only, so nothing outside the machine reaches it.
 //!
 //! **A BIND THAT WILL NOT PARSE IS AN ERROR, NOT THE DEFAULT.** Whoever set
 //! it meant fewer interfaces than all, and falling back to every one would
@@ -14,9 +14,9 @@ const net = std.Io.net;
 
 pub const default = "0.0.0.0";
 
-/// The address to listen on: `raw` (GOPHER_BIND's value, or null when it is
-/// unset) on `port`. BadBindAddress when it is not an IP address; the caller
-/// says so (server.zig), so a test of the refusal prints nothing.
+/// The address to listen on: `raw` (the bind setting's value, or null when it
+/// is unset) on `port`. BadBindAddress when it is not an IP address; the
+/// caller says so (linux_host.zig), so a test of the refusal prints nothing.
 pub fn address(raw: ?[]const u8, port: u16) !net.IpAddress {
     const host = std.mem.trim(u8, raw orelse default, " \t\r\n");
     return net.IpAddress.parse(host, port) catch error.BadBindAddress;
