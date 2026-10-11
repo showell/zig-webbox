@@ -112,3 +112,17 @@ test "forward's frame: a blob as one data frame, verbatim" {
     defer arena.deinit();
     try testing.expectEqualStrings("data: {\"x\":1}\n\n", renderForward("", arena.allocator(), "{\"x\":1}").?);
 }
+
+test "push: a frame is on the connection the moment push returns, not left in a buffer" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var reader: std.Io.Reader = .fixed("GET /s HTTP/1.1\r\nHost: x\r\n\r\n");
+    var server = std.http.Server.init(&reader, &out.writer);
+    var req = try server.receiveHead();
+    var hbuf: [4096]u8 = undefined;
+    var body = try respond(&req, &hbuf);
+    try push(&body, "data: one\n\n");
+    try testing.expect(std.mem.endsWith(u8, out.written(), "data: one\n\n"));
+    try push(&body, "data: two\n\n");
+    try testing.expect(std.mem.endsWith(u8, out.written(), "data: one\n\ndata: two\n\n"));
+}
