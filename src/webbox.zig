@@ -23,6 +23,9 @@ pub const signed_cookie = @import("signed_cookie.zig");
 pub const html = @import("html.zig");
 /// Keyed pub/sub for SSE streams, and where a host takes a stream over.
 pub const bus = @import("bus.zig");
+/// Server-Sent Events: open a stream, push frames, forward a key's blobs,
+/// and where a reconnecting stream resumes.
+pub const sse = @import("sse.zig");
 /// The counting allocator under everything long-lived: live bytes, for leaks.
 pub const mem_meter = @import("mem_meter.zig");
 /// What the host says about itself, for a page that shows the host's facts.
@@ -59,6 +62,7 @@ test {
     _ = signed_cookie;
     _ = html;
     _ = bus;
+    _ = sse;
     _ = mem_meter;
     _ = host_facts;
     _ = store;

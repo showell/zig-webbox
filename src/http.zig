@@ -1,7 +1,7 @@
 //! http: small helpers over std.http.Server, part of the `webbox` library:
 //! content-type headers, owned reads of the request head, forms, embedded files
-//! a browser caches, redirects and the common responses, and the two pieces a
-//! Server-Sent Events stream needs. They keep an application's handlers terse.
+//! a browser caches, redirects and the common responses (an event stream's are
+//! sse.zig's). They keep an application's handlers terse.
 
 const std = @import("std");
 const Io = std.Io;
@@ -294,29 +294,6 @@ pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = location }},
     });
-}
-
-// ── Server-Sent Events: the head and backlog a stream handler writes ─────────
-
-/// sse_headers are the response headers for an event-stream: the content type,
-/// no-cache, and x-accel-buffering off (defeats reverse-proxy buffering so
-/// frames arrive live).
-pub const sse_headers = [_]std.http.Header{
-    .{ .name = "content-type", .value = "text/event-stream" },
-    .{ .name = "cache-control", .value = "no-cache" },
-    .{ .name = "x-accel-buffering", .value = "no" },
-};
-
-/// pushFrame sends one SSE frame live over a streaming BodyWriter (a stream
-/// opened with `.transfer_encoding = .none`: the frames are the body, unframed).
-/// Two flushes are required and the order matters: body.writer.flush() drains
-/// the BodyWriter's own buffer into the protocol output, then body.flush()
-/// pushes that out the socket. body.flush() ALONE is a no-op while bytes still
-/// sit in the writer buffer — the subtle bit that makes SSE actually stream.
-pub fn pushFrame(body: *std.http.BodyWriter, bytes: []const u8) !void {
-    try body.writer.writeAll(bytes);
-    try body.writer.flush();
-    try body.flush();
 }
 
 const testing = std.testing;
