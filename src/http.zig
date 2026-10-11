@@ -154,6 +154,24 @@ pub const CookieValues = union(enum) {
     several: []const []const u8,
 };
 
+/// **EVERY SIGNED COOKIE IS A `__Host-` ONE** (metal-vmm QUEUE 167.5): a
+/// browser keeps a cookie of this prefix only when it is Secure, has
+/// `Path=/` and no `Domain`, so a sibling subdomain cannot plant one for
+/// this site (one it set for `Domain=lynrummy.com` sat beside the site's own,
+/// and with two that verify naming no one, kept its victim logged out).
+pub const host_prefix = "__Host-";
+
+/// A cookie read under its name, or, when the request has none of that name,
+/// under the name it had before (`legacy`): the migration read. `legacy` in
+/// the answer says which it was, so the caller can move it to the new name.
+pub const Named = struct { values: CookieValues, legacy: bool };
+
+pub fn cookieOrLegacy(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8, legacy: []const u8) !Named {
+    const now = try cookie(req, alloc, name);
+    if (now != .none) return .{ .values = now, .legacy = false };
+    return .{ .values = try cookie(req, alloc, legacy), .legacy = true };
+}
+
 /// Every value of cookie `name`, from every Cookie header.
 pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !CookieValues {
     var found: std.ArrayList([]const u8) = .empty;
