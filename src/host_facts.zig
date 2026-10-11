@@ -1,4 +1,4 @@
-//! host_status: what the HOST says about itself, for /admin/host.
+//! host_facts: what the HOST says about itself, for /admin/host.
 //!
 //! The route table knows the application: its version, its commit, its memory
 //! meter. It does not know the machine it runs on, and must not reach for it
