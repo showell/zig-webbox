@@ -343,7 +343,21 @@ pub fn methodNotAllowed(req: *std.http.Server.Request) !void {
 /// response, hangs forever. A browser form post always sends Content-Length (0
 /// for an empty form), so this only bites a malformed/handcrafted client; we
 /// treat it as the empty body it spec'ly is rather than hang. (Steve, 2026-06-19.)
+/// **THE BODY A HOST READ BEFORE THE TURN, HANDED OVER AS IT IS** (metal-vmm
+/// QUEUE 170.5): set by the host just before the route runs (one route at a
+/// time) and cleared after, so `readLimitedBody` returns it without a second
+/// copy: an upload is in memory once.
+pub var held_body: ?[]u8 = null;
+
 pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, max: usize) !?[]u8 {
+    if (held_body) |b| {
+        held_body = null;
+        if (b.len > max) {
+            try edge.reject(req, .body_too_large, "request body too large\n");
+            return null;
+        }
+        return b;
+    }
     if (req.head.content_length == null and req.head.transfer_encoding == .none) {
         return try alloc.alloc(u8, 0);
     }
@@ -480,6 +494,21 @@ test "cookieOrLegacy: the legacy name is read before its end date and never afte
     try testing.expect(before.legacy and before.values == .one);
     const after = try cookieOrLegacy(&req, a, "__Host-old", "old", legacy_names_until_unix);
     try testing.expect(!after.legacy and after.values == .none);
+}
+
+test "readLimitedBody: a body the host holds is handed over as it is, no copy, its cap still kept (metal-vmm QUEUE 170.5)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var held = "hello".*;
+    held_body = &held;
+    var status: []const u8 = "";
+    const got = (try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello", 64, &status)).?;
+    try testing.expectEqual(@as([*]u8, &held), got.ptr);
+    try testing.expect(held_body == null);
+    held_body = &held;
+    try testing.expect(try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello", 4, &status) == null);
+    try testing.expectEqualStrings("413", status);
 }
 
 /// `raw` received through a read buffer of `head_bytes`, as a host reads it.

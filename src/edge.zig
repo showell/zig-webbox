@@ -44,6 +44,8 @@ pub const RejectKind = enum {
     no_deadline, // the host could not arm a body's deadline, so did not read it
     uploads_busy, // every upload slot held (or the uploader's own) past the wait (body.zig)
     body_length_required, // an upload without a Content-Length (body.zig)
+    body_expectation_failed, // an Expect other than 100-continue (body.zig)
+    upload_replaced, // an upload its human's newer one took the place of (body.zig)
     malformed_markdown, // hostile / absurdly over-formatted markdown
     malformed_multipart, // a multipart upload we couldn't parse a file out of
 };
@@ -68,6 +70,8 @@ pub fn statusFor(kind: RejectKind) std.http.Status {
         .body_unreadable, .body_framed_twice, .malformed_markdown, .malformed_multipart => .bad_request, // 400
         .no_deadline, .uploads_busy => .service_unavailable, // 503
         .body_length_required => .length_required, // 411
+        .body_expectation_failed => .expectation_failed, // 417
+        .upload_replaced => .conflict, // 409
     };
 }
 

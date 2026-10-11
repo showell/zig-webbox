@@ -54,6 +54,18 @@ pub const upload_slots = 3;
 /// 503 that says the uploads are busy.
 pub const slot_wait_ms: u64 = 30_000;
 
+/// **A STALLED UPLOAD GIVES ITS SLOT BACK** (metal-vmm QUEUE 170.1): one with
+/// no byte for this long is a dropped phone (no FIN, no RST), a 408, its slot
+/// free. A real slow link (65 KB/s) sends a segment many times a second.
+/// And a human's new upload takes over their own old one at once (`Slots`):
+/// the page uploads one at a time, so a second is a retry.
+pub const upload_stall_ms: u64 = 30_000;
+
+/// **SMALL BODIES BEING READ, AT MOST THIS MUCH AT ONCE** (170.3), counted as
+/// bytes arrive, not as a Content-Length promises: a silent stranger with a
+/// 1 MiB Content-Length holds nothing. Past it a host says it is busy (503).
+pub const small_budget: u64 = 64 << 20;
+
 /// The longest a small body may take to arrive, sized from `bytes`, the most
 /// it can be.
 pub fn smallMs(bytes: u64) u64 {
@@ -81,6 +93,9 @@ pub const Refusal = enum {
     too_large,
     /// Both Content-Length and Transfer-Encoding: 400.
     framed_twice,
+    /// An `Expect` other than `100-continue`, which no host meets: 417,
+    /// from the head (metal-vmm QUEUE 170.4), never after a body is read.
+    expectation_failed,
     /// An upload without a Content-Length (chunked): 411. An upload's
     /// memory is its length, known before a slot is given, so three slots
     /// are three lengths at most (a browser's upload always says one).
@@ -130,6 +145,7 @@ pub fn plan(head: *const Head, cap: u64) Plan {
         .refused => |r| return .{ .refused = r },
         .framing => |f| f,
     };
+    if (f != .none) if (head.expect) |e| if (!std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .refused = .expectation_failed };
     const bytes = switch (f) {
         .none => return .none,
         .length => |n| if (n > cap) return .{ .refused = .too_large } else n,
@@ -160,6 +176,12 @@ pub const Slots = struct {
             return .{ .slot = i };
         };
         return .all_busy;
+    }
+
+    /// The slot `who` holds, if any: their new upload takes it over.
+    pub fn heldBy(self: *const Slots, who: u64) ?usize {
+        for (self.held, 0..) |h, i| if (h == who) return i;
+        return null;
     }
 
     pub fn giveBack(self: *Slots, slot: usize) void {
@@ -280,6 +302,12 @@ test "plan: a route's cap past before_turn_most makes an upload, of five minutes
     try testing.expectEqual(Refusal.length_required, plan(&h, 4 * before_turn_most).refused);
     h = try headOf("GET / HTTP/1.1\r\nContent-Length: 10\r\n\r\n");
     try testing.expect(plan(&h, 500) == .none);
+    // An expectation no host meets: refused from the head, small or upload.
+    h = try headOf("POST / HTTP/1.1\r\nExpect: tea\r\nContent-Length: 10\r\n\r\n");
+    try testing.expectEqual(Refusal.expectation_failed, plan(&h, 500).refused);
+    try testing.expectEqual(Refusal.expectation_failed, plan(&h, 4 * before_turn_most).refused);
+    h = try headOf("POST / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 10\r\n\r\n");
+    try testing.expect(plan(&h, 500) == .small);
 }
 
 test "deadlines: a small body has ten seconds and its bytes at 64 KiB/s; no overflow" {
@@ -301,6 +329,8 @@ test "slots: three a host, one a human, given back" {
     try testing.expectEqual(Slots.Taken{ .slot = 2 }, slots.take(keyOf("3")));
     try testing.expectEqual(Slots.Taken.all_busy, slots.take(keyOf("4")));
     try testing.expectEqual(@as(usize, 3), slots.inUse());
+    try testing.expectEqual(@as(?usize, 2), slots.heldBy(keyOf("3")));
+    try testing.expectEqual(@as(?usize, null), slots.heldBy(keyOf("4")));
     slots.giveBack(1);
     try testing.expectEqual(Slots.Taken{ .slot = 1 }, slots.take(keyOf("4")));
     slots.giveBack(0);

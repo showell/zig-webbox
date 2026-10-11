@@ -142,6 +142,56 @@ pub fn Server(comptime S: type) type {
             }
         }
 
+        /// The body of `req` read whole into memory before the turn, by the
+        /// rule (body.zig), or the refusal to answer instead. An upload is
+        /// read once its uploader is known (a stranger's never) and holds a
+        /// slot; a small one is charged to the small budget as it arrives.
+        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, stream: net.Stream, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
+            const cap = S.bodyLimit(try http.target(req, arena));
+            const read: body_rule.Read, const upload = switch (body_rule.plan(&req.head, cap)) {
+                .none => return null,
+                .refused => |r| return switch (r) {
+                    .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
+                    .framed_twice => .{ .kind = .body_framed_twice, .msg = "request body framed twice\n" },
+                    .length_required => .{ .kind = .body_length_required, .msg = "an upload says its length\n" },
+                    .expectation_failed => .{ .kind = .body_expectation_failed, .msg = "only 100-continue is met\n" },
+                },
+                .small => |r| .{ r, false },
+                .upload => |r| .{ r, true },
+            };
+            var progress: Progress = .{ .stream = stream, .io = io };
+            if (upload) {
+                const who = (try S.uploader(req, io, arena)) orelse {
+                    try neverRead(req, arena);
+                    return null;
+                };
+                slot.* = takeSlot(io, body_rule.keyOf(who), &progress) orelse
+                    return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" };
+            }
+            const began = Io.Clock.now(.awake, io);
+            const length = req.head.content_length orelse 0;
+            const got = try readWhole(io, arena, req, read, upload, &progress, charged);
+            if (upload) {
+                // **THE LOG SAYS AN UPLOAD'S SIZE AND ITS TIME** (169),
+                // whole or not, so a slow link is read, not inferred.
+                const ms = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began.nanoseconds, std.time.ns_per_ms);
+                if (!@import("builtin").is_test) std.debug.print("{s}: an upload of {d} bytes: {t}, {d} received, after {d} ms\n", .{ host_name, length, got, progress.received.load(.acquire), ms });
+            }
+            return switch (got) {
+                .whole => |b| blk: {
+                    held.* = b;
+                    break :blk null;
+                },
+                .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
+                .unreadable => .{ .kind = .body_unreadable, .msg = "read body\n" },
+                .too_slow => .{ .kind = .body_too_slow, .msg = "request body too slow\n" },
+                .stalled => .{ .kind = .body_too_slow, .msg = "the upload stalled\n" },
+                .replaced => .{ .kind = .upload_replaced, .msg = "a newer upload took this one's place\n" },
+                .busy => .{ .kind = .uploads_busy, .msg = "busy; try again in a minute\n" },
+                .no_deadline => .{ .kind = .no_deadline, .msg = "busy; try again\n" },
+            };
+        }
+
         /// serveConn is the per-connection task body. It returns void
         /// (swallowing all errors) so it coerces to the Cancelable!void that
         /// Io.Group requires.
@@ -185,52 +235,36 @@ pub fn Server(comptime S: type) type {
                 else => return e,
             };
             // **THE TURN NEVER WAITS ON THE NETWORK** (webbox's body.zig,
-            // metal-vmm QUEUE 169): every body is read whole, here, before
-            // the turn. A small one within its deadline; an upload once its
-            // uploader is known and has a slot, within five minutes. A
-            // stranger's upload is never read, and its route refuses it.
+            // metal-vmm QUEUE 169, 170): every body is read whole, here,
+            // before the turn. A small one within its deadline; an upload
+            // once its uploader is known and has a slot, within five
+            // minutes and never stalled for long. A stranger's upload is
+            // never read, and its route refuses it.
             var slot: ?usize = null;
             defer if (slot) |i| giveBackSlot(io, i);
-            const cap = S.bodyLimit(try http.target(&req, arena.allocator()));
-            switch (body_rule.plan(&req.head, cap)) {
-                .none => {},
-                .refused => |r| return switch (r) {
-                    .too_large => refuse(&req, .body_too_large, "request body too large\n"),
-                    .framed_twice => refuse(&req, .body_framed_twice, "request body framed twice\n"),
-                    .length_required => refuse(&req, .body_length_required, "an upload says its length\n"),
-                },
-                .small => |read| switch (try readBodyBeforeTurn(io, arena.allocator(), &req, stream, read)) {
-                    .in_memory => {},
-                    .too_large => return refuse(&req, .body_too_large, "request body too large\n"),
-                    .unreadable => return refuse(&req, .body_unreadable, "read body\n"),
-                    .too_slow => return refuse(&req, .body_too_slow, "request body too slow\n"),
-                    .no_deadline => return refuse(&req, .no_deadline, "busy; try again\n"),
-                },
-                .upload => |read| if (try S.uploader(&req, io, arena.allocator())) |who| {
-                    slot = takeSlot(io, body_rule.keyOf(who)) orelse
-                        return refuse(&req, .uploads_busy, "Uploads are busy; try again in a minute.\n");
-                    const began = Io.Clock.now(.awake, io);
-                    const length = req.head.content_length orelse 0;
-                    const got = try readBodyBeforeTurn(io, arena.allocator(), &req, stream, read);
-                    // **THE LOG SAYS AN UPLOAD'S SIZE AND ITS TIME** (169),
-                    // whole or not, so a slow link is read, not inferred.
-                    const ms = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began.nanoseconds, std.time.ns_per_ms);
-                    if (!@import("builtin").is_test) std.debug.print("{s}: an upload of {d} bytes: {t} after {d} ms\n", .{ host_name, length, got, ms });
-                    switch (got) {
-                        .in_memory => {},
-                        .too_large => return refuse(&req, .body_too_large, "request body too large\n"),
-                        .unreadable => return refuse(&req, .body_unreadable, "read body\n"),
-                        .too_slow => return refuse(&req, .body_too_slow, "request body too slow\n"),
-                        .no_deadline => return refuse(&req, .no_deadline, "busy; try again\n"),
-                    }
-                } else try neverRead(&req, arena.allocator()),
-            }
+            var held_body: ?[]u8 = null;
+            var charged: u64 = 0;
+            defer unchargeSmall(io, charged);
+            // **AN ERROR BEFORE THE TURN IS ANSWERED** (170.6): a 500, as
+            // one in the turn is, never a close with no answer.
+            const refusal = bodyBeforeTurn(io, arena.allocator(), &req, stream, &slot, &held_body, &charged) catch |e| {
+                std.debug.print("{s}: before the turn: {s}\n", .{ host_name, @errorName(e) });
+                req.head.keep_alive = false;
+                req.head.expect = null;
+                req.respond("The server failed before it could answer.\n", .{ .status = .internal_server_error, .keep_alive = false }) catch {};
+                return;
+            };
+            if (refusal) |r| return refuse(&req, r.kind, r.msg);
             req.head.keep_alive = false; // force `connection: close` without touching each handler
             var b = bus.Bus.of(hub);
             var peer_buf: [64]u8 = undefined;
             b.peer = peerText(&peer_buf, stream.socket.address);
             turn.lockUncancelable(io);
+            // The body read before the turn, handed to the handler's read
+            // as it is (170.5: an upload in memory once, not twice).
+            http.held_body = held_body;
             const routed = S.route(&req, io, arena.allocator(), &b);
+            http.held_body = null;
             turn.unlock(io);
             // A stream the handler kept is route's answer, served here, on
             // this connection's own task, until its client goes away; on an
@@ -253,61 +287,109 @@ fn busy(io: Io, stream: net.Stream) void {
 /// by setting this, in milliseconds, for every body.
 pub var deadline_for_test_ms: ?u64 = null;
 
-const BodyRead = enum { in_memory, too_large, unreadable, too_slow, no_deadline };
+/// A test shortens these, in milliseconds.
+pub var stall_for_test_ms: ?u64 = null;
+pub var small_budget_for_test: ?u64 = null;
+
+const Refusal = struct { kind: edge.RejectKind, msg: []const u8 };
+
+/// How a body's read before the turn ended.
+const Got = union(enum) {
+    whole: []u8,
+    too_large,
+    unreadable,
+    /// Past its deadline.
+    too_slow,
+    /// An upload with no byte for `body.upload_stall_ms`: a dropped phone.
+    stalled,
+    /// An upload its human's newer one took the place of.
+    replaced,
+    /// The small budget is spent.
+    busy,
+    no_deadline,
+};
+
+/// What a read before the turn has received, and what ended it from
+/// outside: its deadline, a stall, or its human's newer upload (170.1).
+const Progress = struct {
+    received: std.atomic.Value(u64) = .init(0),
+    ended_by: std.atomic.Value(Ended) = .init(.nothing),
+    stream: net.Stream,
+    io: Io,
+
+    const Ended = enum(u8) { nothing, deadline, stalled, replaced };
+
+    /// Ended from outside, once: the socket stops reading, which ends the read.
+    fn end(self: *Progress, why: Ended) void {
+        if (self.ended_by.cmpxchgStrong(.nothing, why, .acq_rel, .acquire) == null)
+            self.stream.shutdown(self.io, .recv) catch {};
+    }
+};
 
 /// The request's body read into `arena`, before the turn, and the request
 /// left to its handler as if it had not been: the head copied out of the
 /// read buffer (a body read reuses it), the body served from memory under
-/// the head's own framing, now a plain Content-Length.
-fn readBodyBeforeTurn(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, stream: net.Stream, plan: body_rule.Read) !BodyRead {
+/// a plain Content-Length (and handed over as it is: `http.held_body`).
+fn readWhole(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, plan: body_rule.Read, upload: bool, progress: *Progress, charged: *u64) !Got {
     const head = try arena.dupe(u8, req.head_buffer);
-    var whole: Whole = .{ .most = plan.bytes };
+    var whole: Whole = .{ .most = plan.bytes, .progress = progress, .small = !upload, .charged = charged };
     {
-        // The read and a timer, whichever ends first: past the deadline the
-        // socket is shut, which ends the read. **EVERY TASK IS AWAITED BEFORE
-        // THIS FRAME ENDS** (metal-vmm QUEUE 167.1): `cancelDiscard` waits for
-        // both, however the race went, and only then is the read's state
-        // looked at, once nothing else can write it.
+        // The read and its watchdog, whichever ends first. **EVERY TASK IS
+        // AWAITED BEFORE THIS FRAME ENDS** (metal-vmm QUEUE 167.1):
+        // `cancelDiscard` waits for both, however the race went, and only
+        // then is the read's state looked at.
         var buffer: [2]Raced = undefined;
         var race: Io.Select(Raced) = .init(io, &buffer);
         race.concurrent(.read, Whole.read, .{ &whole, req, arena }) catch return .no_deadline;
-        race.concurrent(.timer, timer, .{ io, deadline_for_test_ms orelse plan.deadline_ms }) catch {
+        const stall: ?u64 = if (upload) stall_for_test_ms orelse body_rule.upload_stall_ms else null;
+        race.concurrent(.watch, watch, .{ io, progress, deadline_for_test_ms orelse plan.deadline_ms, stall }) catch {
             // No deadline to read under: the read is ended, not left to run.
-            stream.shutdown(io, .recv) catch {};
+            progress.end(.deadline);
             race.cancelDiscard();
             return .no_deadline;
         };
-        const first = race.await() catch |e| {
-            stream.shutdown(io, .recv) catch {};
+        _ = race.await() catch |e| {
+            progress.end(.deadline);
             race.cancelDiscard();
             return e;
         };
-        if (first == .timer) stream.shutdown(io, .recv) catch {};
         race.cancelDiscard();
-        // A body that came whole as the timer ended is taken.
-        if (first == .timer and whole.state != .read) whole.state = .too_slow;
     }
-    const got = switch (whole.state) {
-        .read => |b| b,
+    // **A READ IS NAMED BY HOW IT ENDED** (170.7): whole is whole, whatever
+    // fired beside it; one ended from outside by why; else its own end (too
+    // large, unreadable, the budget), never a 408 for one that was not late.
+    const own: Got = switch (whole.state) {
+        .read => |b| .{ .whole = b },
         .reading => unreachable, // both tasks are done
-        .too_large => return .too_large,
-        .unreadable => return .unreadable,
-        .too_slow => return .too_slow,
+        .too_large => .too_large,
+        .busy => .busy,
+        .unreadable => .unreadable,
+    };
+    // An unreadable end is the shut socket's when something outside shut it.
+    const got: Got = if (own != .unreadable) own else switch (progress.ended_by.load(.acquire)) {
+        .nothing => .unreadable,
+        .deadline => .too_slow,
+        .stalled => .stalled,
+        .replaced => .replaced,
+    };
+    const body = switch (got) {
+        .whole => |b| b,
+        else => return got,
     };
     // The head again, from its copy; the body, from memory.
     req.head_buffer = head;
     req.head = std.http.Server.Request.Head.parse(head) catch return error.HttpHeadersInvalid;
     req.head.transfer_encoding = .none;
-    req.head.content_length = got.len;
+    req.head.content_length = body.len;
     req.head.expect = null;
     const from_memory = try arena.create(std.Io.Reader);
-    from_memory.* = .fixed(got);
+    from_memory.* = .fixed(body);
     req.server.reader.in = from_memory;
     req.server.reader.state = .received_head;
-    return .in_memory;
+    return got;
 }
 
-const Raced = union(enum) { read: void, timer: void };
+const Raced = union(enum) { read: void, watch: void };
 
 /// A request refused before the turn, its connection closed after: what of
 /// its body is unread stays unread. The answer is best-effort, as the
@@ -317,13 +399,31 @@ fn refuse(req: *std.http.Server.Request, kind: edge.RejectKind, msg: []const u8)
     edge.reject(req, kind, msg) catch {};
 }
 
-fn timer(io: Io, ms: u64) void {
-    sleepMs(io, ms) catch {};
-}
-
 fn sleepMs(io: Io, ms: u64) Io.Cancelable!void {
     const capped: i64 = @intCast(@min(ms, std.math.maxInt(i64)));
     try Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(capped) }, io);
+}
+
+/// The read's watchdog: past `deadline_ms`, or (an upload) with nothing
+/// received for `stall_ms`, it ends the read; ended from outside (a newer
+/// upload), it is done. Cancelled when the read ends first.
+fn watch(io: Io, progress: *Progress, deadline_ms: u64, stall_ms: ?u64) void {
+    const tick: u64 = @min(250, @max(1, deadline_ms / 4));
+    var waited: u64 = 0;
+    var quiet: u64 = 0;
+    var seen = progress.received.load(.acquire);
+    while (true) {
+        sleepMs(io, tick) catch return;
+        waited += tick;
+        if (progress.ended_by.load(.acquire) != .nothing) return;
+        if (waited >= deadline_ms) return progress.end(.deadline);
+        const now = progress.received.load(.acquire);
+        if (now != seen) {
+            seen = now;
+            quiet = 0;
+        } else quiet += tick;
+        if (stall_ms) |most| if (quiet >= most) return progress.end(.stalled);
+    }
 }
 
 /// **A STRANGER'S UPLOAD IS NEVER READ** (body.zig): its route sees an empty
@@ -336,22 +436,31 @@ fn neverRead(req: *std.http.Server.Request, arena: std.mem.Allocator) !void {
     req.head.expect = null;
 }
 
-/// The host's upload slots (body.zig), and their lock: connections take and
-/// give back from their own tasks.
+/// The host's upload slots (body.zig), who reads in each, and their lock:
+/// connections take and give back from their own tasks.
 var slots: body_rule.Slots = .{};
+var slot_readers: [body_rule.upload_slots]?*Progress = @splat(null);
 var slots_lock: Io.Mutex = .init;
 
 /// How long an uploader waits for a slot; a test shortens it.
 pub var slot_wait_for_test_ms: ?u64 = null;
 
 /// A slot for `who`, waiting on this connection's own task for one to come
-/// free, at most `body.slot_wait_ms`; null past that.
-fn takeSlot(io: Io, who: u64) ?usize {
+/// free, at most `body.slot_wait_ms`; null past that. **A HUMAN'S NEW UPLOAD
+/// TAKES OVER THEIR OLD ONE** (170.1): the page uploads one at a time, so a
+/// second is a retry, its first most likely a dropped phone's; the first is
+/// ended (409), its slot given back, and taken here.
+fn takeSlot(io: Io, who: u64, progress: *Progress) ?usize {
     const most = slot_wait_for_test_ms orelse body_rule.slot_wait_ms;
     var waited: u64 = 0;
     while (true) : (waited += 50) {
         slots_lock.lockUncancelable(io);
         const taken = slots.take(who);
+        switch (taken) {
+            .slot => |i| slot_readers[i] = progress,
+            .human_has_one => if (slots.heldBy(who)) |i| if (slot_readers[i]) |old| old.end(.replaced),
+            .all_busy => {},
+        }
         slots_lock.unlock(io);
         switch (taken) {
             .slot => |i| return i,
@@ -365,31 +474,70 @@ fn giveBackSlot(io: Io, i: usize) void {
     slots_lock.lockUncancelable(io);
     defer slots_lock.unlock(io);
     slots.giveBack(i);
+    slot_readers[i] = null;
 }
 
-/// A body being read whole, and how its read ended.
+/// Small bodies' bytes held now, against `body.small_budget` (170.3).
+var small_held: u64 = 0;
+var small_lock: Io.Mutex = .init;
+
+fn chargeSmall(io: Io, n: u64) bool {
+    small_lock.lockUncancelable(io);
+    defer small_lock.unlock(io);
+    const budget = small_budget_for_test orelse body_rule.small_budget;
+    if (small_held + n > budget) return false;
+    small_held += n;
+    return true;
+}
+
+fn unchargeSmall(io: Io, n: u64) void {
+    if (n == 0) return;
+    small_lock.lockUncancelable(io);
+    defer small_lock.unlock(io);
+    small_held -= n;
+}
+
+/// A body being read whole, a few KiB a read so its progress is seen, and
+/// how its read ended.
 const Whole = struct {
-    /// The most it may be (the route's cap, or its Content-Length).
+    /// The most it may be (its Content-Length, or the route's cap).
     most: u64,
-    state: union(enum) { reading, read: []u8, too_large, unreadable, too_slow } = .reading,
+    progress: *Progress,
+    /// A small body, charged to the small budget as its bytes arrive.
+    small: bool,
+    charged: *u64,
+    state: union(enum) { reading, read: []u8, too_large, unreadable, busy } = .reading,
 
     fn read(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) void {
+        self.state = self.readAll(req, arena) catch .unreadable;
+    }
+
+    fn readAll(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) !@FieldType(Whole, "state") {
         var transfer: [4096]u8 = undefined;
-        const r = req.readerExpectContinue(&transfer) catch {
-            self.state = .unreadable;
-            return;
-        };
-        const limit: usize = @intCast(@min(self.most, std.math.maxInt(usize) - 1));
         const declared = req.head.content_length;
-        self.state = if (r.allocRemaining(arena, .limited(limit + 1))) |b| .{ .read = b } else |e| switch (e) {
-            error.StreamTooLong => .too_large,
-            else => .unreadable,
-        };
+        const r = try req.readerExpectContinue(&transfer);
+        // A Content-Length body has its memory once, exactly; a chunked one
+        // (small only) grows as it comes.
+        var list: std.ArrayList(u8) = .empty;
+        if (declared) |n| try list.ensureTotalCapacityPrecise(arena, @intCast(n));
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const room = if (declared) |n| @min(chunk.len, n - list.items.len) else chunk.len;
+            if (room == 0) break;
+            const got = r.readSliceShort(chunk[0..room]) catch return .unreadable;
+            if (got == 0) break;
+            if (list.items.len + got > self.most) return .too_large;
+            if (self.small) {
+                if (!chargeSmall(self.progress.io, got)) return .busy;
+                self.charged.* += got;
+            }
+            try list.appendSlice(arena, chunk[0..got]);
+            _ = self.progress.received.fetchAdd(got, .acq_rel);
+        }
         // std ends a Content-Length body at the connection's end, short and
         // silent: that is no body (http.readLimitedBody says why).
-        if (declared) |n| if (self.state == .read and self.state.read.len != n) {
-            self.state = .unreadable;
-        };
+        if (declared) |n| if (list.items.len != n) return .unreadable;
+        return .{ .read = list.items };
     }
 };
 
@@ -539,7 +687,9 @@ const TestSite = struct {
         return 64 * 1024;
     }
     pub fn uploader(req: *std.http.Server.Request, _: Io, alloc: std.mem.Allocator) !?[]const u8 {
-        return http.header(req, alloc, "x-who");
+        const who = try http.header(req, alloc, "x-who");
+        if (who) |w| if (std.mem.eql(u8, w, "boom")) return error.StoreUnreadable;
+        return who;
     }
     pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, _: *bus.Bus) !?bus.Kept {
         if (std.mem.eql(u8, try http.target(req, alloc), "/upload") and try uploader(req, io, alloc) == null) {
@@ -802,23 +952,62 @@ test "linux_host: a stranger's upload is never read: its route refuses it at onc
     try std.testing.expectEqual(@as(usize, 0), slots.inUse());
 }
 
-test "linux_host: one upload slot a human: a second from the same human waits while slots are free, then is told uploads are busy (metal-vmm QUEUE 169)" {
-    slot_wait_for_test_ms = 200;
-    defer slot_wait_for_test_ms = null;
+test "linux_host: a human's new upload takes over their stalled one: the old is told 409, the new is read whole (metal-vmm QUEUE 170.1)" {
     var bench: Bench = undefined;
     try bench.init();
     defer bench.deinit();
     const io = bench.threaded.io();
+    // A dropped phone: half an upload, then nothing, and no FIN.
     var first = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
+    try first.listen(io);
     Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
     try std.testing.expectEqual(@as(usize, 1), slots.inUse());
-    var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
+    // The retry, from the same human.
+    var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\n0123456789");
     try again.listen(io);
-    const told = again.answer.within(io, 2000);
+    const done = again.answer.within(io, 2000);
+    const old_told = first.answer.within(io, 2000);
     again.end(io);
     first.end(io);
-    try std.testing.expect(told);
-    try std.testing.expect(std.mem.startsWith(u8, again.answer.got(), "HTTP/1.1 503"));
+    try std.testing.expect(done and old_told);
+    try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
+    try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
+    try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+}
+
+test "linux_host: an upload with no byte for the stall time gives its slot back, a 408 (metal-vmm QUEUE 170.1)" {
+    stall_for_test_ms = 200;
+    defer stall_for_test_ms = null;
+    const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 2000000\r\n\r\nxxxx");
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 408"));
+    try std.testing.expect(std.mem.indexOf(u8, got, "stalled") != null);
+    try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+}
+
+test "linux_host: small bodies are held to a budget, charged as they arrive: past it, 503 (metal-vmm QUEUE 170.3)" {
+    small_budget_for_test = 8;
+    defer small_budget_for_test = null;
+    const over = try exchange("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\n123456789");
+    defer std.testing.allocator.free(over);
+    try std.testing.expect(std.mem.startsWith(u8, over, "HTTP/1.1 503"));
+    // What was charged is given back: the next fits.
+    const fits = try exchange("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\n12345678");
+    defer std.testing.allocator.free(fits);
+    try std.testing.expect(std.mem.endsWith(u8, fits, "\r\n\r\n8"));
+    try std.testing.expectEqual(@as(u64, 0), small_held);
+}
+
+test "linux_host: an Expect other than 100-continue is refused from the head, 417 (metal-vmm QUEUE 170.4)" {
+    const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nExpect: tea\r\nContent-Length: 10\r\n\r\n");
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 417"));
+}
+
+test "linux_host: an error before the turn is answered 500, never a close with no answer (metal-vmm QUEUE 170.6)" {
+    const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: boom\r\nContent-Length: 10\r\n\r\n");
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 500"));
 }
 
 test "linux_host: a chunked upload is refused, 411: an upload's memory is its length (metal-vmm QUEUE 169)" {
