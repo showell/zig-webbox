@@ -81,6 +81,10 @@ pub const Refusal = enum {
     too_large,
     /// Both Content-Length and Transfer-Encoding: 400.
     framed_twice,
+    /// An upload without a Content-Length (chunked): 411. An upload's
+    /// memory is its length, known before a slot is given, so three slots
+    /// are three lengths at most (a browser's upload always says one).
+    length_required,
 };
 
 pub const Framed = union(enum) { framing: Framing, refused: Refusal };
@@ -129,7 +133,7 @@ pub fn plan(head: *const Head, cap: u64) Plan {
     const bytes = switch (f) {
         .none => return .none,
         .length => |n| if (n > cap) return .{ .refused = .too_large } else n,
-        .chunked => cap,
+        .chunked => if (cap > before_turn_most) return .{ .refused = .length_required } else cap,
     };
     if (cap <= before_turn_most) return .{ .small = .{ .bytes = bytes, .deadline_ms = smallMs(bytes) } };
     return .{ .upload = .{ .bytes = bytes, .deadline_ms = upload_ms } };
@@ -187,24 +191,41 @@ pub const ChunkedEnd = union(enum) {
 };
 
 pub fn chunkedEnd(bytes: []const u8) ChunkedEnd {
-    var at: usize = 0;
-    while (true) {
-        var cp: std.http.ChunkParser = .init;
-        at += cp.feed(bytes[at..]);
-        switch (cp.state) {
-            .invalid => return .malformed,
-            .data => {},
-            else => return .partial,
-        }
-        if (cp.chunk_len == 0) return trailersEnd(bytes, at);
-        // The chunk, then exactly "\r\n" (std's `.rn`).
-        const after = std.math.add(u64, at, cp.chunk_len) catch return .malformed;
-        if (after + 2 > bytes.len) return .partial;
-        const n: usize = @intCast(after);
-        if (bytes[n] != '\r' or bytes[n + 1] != '\n') return .malformed;
-        at = n + 2;
-    }
+    var scan: ChunkedScan = .{};
+    return scan.end(bytes);
 }
+
+/// **A CHUNKED BODY READ ONCE, AS IT COMES** (169's cold review): the offset
+/// of the first chunk not yet whole, kept between calls, so a host that asks
+/// again as bytes arrive parses each chunk once, not the whole body each
+/// time (a body of a million one-byte chunks asked of on every pass stalled
+/// the one loop).
+pub const ChunkedScan = struct {
+    /// Where the next chunk's size line begins.
+    at: usize = 0,
+
+    /// How far `bytes` (the body so far, from its first chunk's size, the
+    /// same bytes as before and more) has come.
+    pub fn end(self: *ChunkedScan, bytes: []const u8) ChunkedEnd {
+        while (true) {
+            var at = self.at;
+            var cp: std.http.ChunkParser = .init;
+            at += cp.feed(bytes[at..]);
+            switch (cp.state) {
+                .invalid => return .malformed,
+                .data => {},
+                else => return .partial,
+            }
+            if (cp.chunk_len == 0) return trailersEnd(bytes, at);
+            // The chunk, then exactly "\r\n" (std's `.rn`).
+            const after = std.math.add(u64, at, cp.chunk_len) catch return .malformed;
+            if (after + 2 > bytes.len) return .partial;
+            const n: usize = @intCast(after);
+            if (bytes[n] != '\r' or bytes[n + 1] != '\n') return .malformed;
+            self.at = n + 2;
+        }
+    }
+};
 
 /// After the last chunk: "\r\n", or trailer lines ended by an empty one.
 fn trailersEnd(bytes: []const u8, at: usize) ChunkedEnd {
@@ -254,6 +275,8 @@ test "plan: a route's cap past before_turn_most makes an upload, of five minutes
     try testing.expect(plan(&h, before_turn_most) == .small);
     h = try headOf("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
     try testing.expectEqual(@as(u64, 500), plan(&h, 500).small.bytes);
+    // A chunked upload says no length: refused, 411.
+    try testing.expectEqual(Refusal.length_required, plan(&h, 4 * before_turn_most).refused);
     h = try headOf("GET / HTTP/1.1\r\nContent-Length: 10\r\n\r\n");
     try testing.expect(plan(&h, 500) == .none);
 }
@@ -323,4 +346,15 @@ test "chunkedEnd agrees with std's reader on what it reads whole" {
         // std consumed exactly what chunkedEnd says ends the body.
         try testing.expectEqual(@as(usize, 0), in.bufferedLen());
     }
+}
+
+test "a chunked scan asked again as bytes come agrees with one asked once, and parses each chunk once" {
+    const body = "3\r\nhel\r\n2;x=y\r\nlo\r\n1\r\n!\r\n0\r\nX-T: 1\r\n\r\n";
+    var scan: ChunkedScan = .{};
+    for (0..body.len + 1) |n| {
+        try testing.expectEqual(chunkedEnd(body[0..n]), scan.end(body[0..n]));
+    }
+    // The scan stopped at the last chunk's size line: the three before it
+    // are never parsed again.
+    try testing.expectEqual(@as(usize, "3\r\nhel\r\n2;x=y\r\nlo\r\n1\r\n!\r\n".len), scan.at);
 }

@@ -197,6 +197,7 @@ pub fn Server(comptime S: type) type {
                 .refused => |r| return switch (r) {
                     .too_large => refuse(&req, .body_too_large, "request body too large\n"),
                     .framed_twice => refuse(&req, .body_framed_twice, "request body framed twice\n"),
+                    .length_required => refuse(&req, .body_length_required, "an upload says its length\n"),
                 },
                 .small => |read| switch (try readBodyBeforeTurn(io, arena.allocator(), &req, stream, read)) {
                     .in_memory => {},
@@ -209,18 +210,20 @@ pub fn Server(comptime S: type) type {
                     slot = takeSlot(io, body_rule.keyOf(who)) orelse
                         return refuse(&req, .uploads_busy, "Uploads are busy; try again in a minute.\n");
                     const began = Io.Clock.now(.awake, io);
-                    switch (try readBodyBeforeTurn(io, arena.allocator(), &req, stream, read)) {
+                    const length = req.head.content_length orelse 0;
+                    const got = try readBodyBeforeTurn(io, arena.allocator(), &req, stream, read);
+                    // **THE LOG SAYS AN UPLOAD'S SIZE AND ITS TIME** (169),
+                    // whole or not, so a slow link is read, not inferred.
+                    const ms = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began.nanoseconds, std.time.ns_per_ms);
+                    if (!@import("builtin").is_test) std.debug.print("{s}: an upload of {d} bytes: {t} after {d} ms\n", .{ host_name, length, got, ms });
+                    switch (got) {
                         .in_memory => {},
                         .too_large => return refuse(&req, .body_too_large, "request body too large\n"),
                         .unreadable => return refuse(&req, .body_unreadable, "read body\n"),
                         .too_slow => return refuse(&req, .body_too_slow, "request body too slow\n"),
                         .no_deadline => return refuse(&req, .no_deadline, "busy; try again\n"),
                     }
-                    // **THE LOG SAYS AN UPLOAD'S SIZE AND ITS TIME** (169),
-                    // so a slow link is read, not inferred.
-                    const ms = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began.nanoseconds, std.time.ns_per_ms);
-                    std.debug.print("{s}: an upload of {d} bytes arrived in {d} ms\n", .{ host_name, req.head.content_length orelse 0, ms });
-                } else neverRead(&req),
+                } else try neverRead(&req, arena.allocator()),
             }
             req.head.keep_alive = false; // force `connection: close` without touching each handler
             var b = bus.Bus.of(hub);
@@ -326,12 +329,10 @@ fn sleepMs(io: Io, ms: u64) Io.Cancelable!void {
 /// **A STRANGER'S UPLOAD IS NEVER READ** (body.zig): its route sees an empty
 /// body under the head's own framing, so a read of it fails (400), and the
 /// route refuses a stranger before reading anyway. Never told to send it.
-fn neverRead(req: *std.http.Server.Request) void {
-    const empty = struct {
-        var reader: std.Io.Reader = .fixed("");
-    };
-    empty.reader = .fixed("");
-    req.server.reader.in = &empty.reader;
+fn neverRead(req: *std.http.Server.Request, arena: std.mem.Allocator) !void {
+    const empty = try arena.create(std.Io.Reader);
+    empty.* = .fixed("");
+    req.server.reader.in = empty;
     req.head.expect = null;
 }
 
@@ -801,7 +802,32 @@ test "linux_host: a stranger's upload is never read: its route refuses it at onc
     try std.testing.expectEqual(@as(usize, 0), slots.inUse());
 }
 
-test "linux_host: three upload slots, one a human: a fourth uploader, or a second from the same human, waits, then is told uploads are busy (metal-vmm QUEUE 169)" {
+test "linux_host: one upload slot a human: a second from the same human waits while slots are free, then is told uploads are busy (metal-vmm QUEUE 169)" {
+    slot_wait_for_test_ms = 200;
+    defer slot_wait_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var first = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
+    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
+    try std.testing.expectEqual(@as(usize, 1), slots.inUse());
+    var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
+    try again.listen(io);
+    const told = again.answer.within(io, 2000);
+    again.end(io);
+    first.end(io);
+    try std.testing.expect(told);
+    try std.testing.expect(std.mem.startsWith(u8, again.answer.got(), "HTTP/1.1 503"));
+}
+
+test "linux_host: a chunked upload is refused, 411: an upload's memory is its length (metal-vmm QUEUE 169)" {
+    const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nTransfer-Encoding: chunked\r\n\r\n");
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 411"));
+}
+
+test "linux_host: three upload slots: a fourth uploader waits, then is told uploads are busy (metal-vmm QUEUE 169)" {
     slot_wait_for_test_ms = 200;
     defer slot_wait_for_test_ms = null;
     var bench: Bench = undefined;
@@ -816,7 +842,7 @@ test "linux_host: three upload slots, one a human: a fourth uploader, or a secon
     }
     Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
     try std.testing.expectEqual(@as(usize, 3), slots.inUse());
-    for ([_][]const u8{ "dee", "ann" }) |who| {
+    for ([_][]const u8{"dee"}) |who| {
         const head = try std.fmt.allocPrint(std.testing.allocator, "POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: {s}\r\nContent-Length: 10\r\n\r\nxx", .{who});
         defer std.testing.allocator.free(head);
         var late = try bench.client(head);

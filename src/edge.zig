@@ -43,6 +43,7 @@ pub const RejectKind = enum {
     body_framed_twice, // both Content-Length and Transfer-Encoding (RFC 9112 §6.1)
     no_deadline, // the host could not arm a body's deadline, so did not read it
     uploads_busy, // every upload slot held (or the uploader's own) past the wait (body.zig)
+    body_length_required, // an upload without a Content-Length (body.zig)
     malformed_markdown, // hostile / absurdly over-formatted markdown
     malformed_multipart, // a multipart upload we couldn't parse a file out of
 };
@@ -66,6 +67,7 @@ pub fn statusFor(kind: RejectKind) std.http.Status {
         .body_too_slow => .request_timeout, // 408
         .body_unreadable, .body_framed_twice, .malformed_markdown, .malformed_multipart => .bad_request, // 400
         .no_deadline, .uploads_busy => .service_unavailable, // 503
+        .body_length_required => .length_required, // 411
     };
 }
 
