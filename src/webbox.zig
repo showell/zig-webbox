@@ -4,6 +4,9 @@
 //! Its files import std and one another, and nothing of any application's,
 //! so an application gets these files and only these.
 
+/// An application made servable: `Site(App)` is everything a host calls
+/// around the application's own route table.
+pub const site = @import("site.zig");
 /// Request and response helpers: bodies, forms, cookies, embedded files.
 pub const http = @import("http.zig");
 /// The one policy for incoming data at the server's edges.
@@ -30,6 +33,7 @@ pub const client_address = @import("client_address.zig");
 pub const free_space = @import("free_space.zig");
 
 test {
+    _ = site;
     _ = http;
     _ = edge;
     _ = signed;
