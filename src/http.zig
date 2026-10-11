@@ -355,3 +355,68 @@ test "head value must be owned: a clobbered source buffer corrupts the borrow, n
     try testing.expectEqualStrings("deadbee0", owned); // the owned copy is intact
     try testing.expect(!std.mem.eql(u8, borrowed, owned)); // the borrow is now garbage
 }
+
+test "formDecode: a %XX that ends the value is a byte, a %X that ends it is malformed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("aA", try formDecode(a, "a%41"));
+    try testing.expectError(error.MalformedForm, formDecode(a, "a%4"));
+    try testing.expectEqualStrings("A", try formDecode(a, "%41"));
+    try testing.expectError(error.MalformedForm, formDecode(a, "%4"));
+    try testing.expectError(error.MalformedForm, formDecode(a, "%"));
+}
+
+/// The status line's code of a response written to `out`.
+fn statusOf(out: []const u8) []const u8 {
+    return if (out.len >= 12) out[9..12] else "";
+}
+
+/// `raw` received as a request, its body read with `readLimitedBody(max)`:
+/// the body, or null and the status it was answered with.
+fn readBodyOf(a: std.mem.Allocator, raw: []const u8, max: usize, status: *[]const u8) !?[]u8 {
+    var reader: std.Io.Reader = .fixed(raw);
+    var out: std.Io.Writer.Allocating = .init(a);
+    var server = std.http.Server.init(&reader, &out.writer);
+    var req = try server.receiveHead();
+    req.head.keep_alive = false;
+    const got = try readLimitedBody(&req, a, max);
+    try out.writer.flush();
+    status.* = statusOf(out.written());
+    return got;
+}
+
+test "readLimitedBody: a body of exactly the limit is read, one byte more is refused 413" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const max = 8;
+    var status: []const u8 = "";
+    const at = try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\n" ++ "b" ** max, max, &status);
+    try testing.expectEqualStrings("b" ** max, at.?);
+    try testing.expect(try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\n" ++ "b" ** (max + 1), max, &status) == null);
+    try testing.expectEqualStrings("413", status);
+    // Chunked, the same edge: the length is not stated, the bytes are counted.
+    const chunked = "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try testing.expectEqualStrings("b" ** max, (try readBodyOf(a, chunked ++ "8\r\n" ++ "b" ** max ++ "\r\n0\r\n\r\n", max, &status)).?);
+    try testing.expect(try readBodyOf(a, chunked ++ "9\r\n" ++ "b" ** (max + 1) ++ "\r\n0\r\n\r\n", max, &status) == null);
+    try testing.expectEqualStrings("413", status);
+}
+
+/// `raw` received through a read buffer of `head_bytes`, as a host reads it.
+fn receiveThroughHostBuffer(raw: []const u8) !void {
+    var src: std.Io.Reader = .fixed(raw);
+    var buf: [head_bytes]u8 = undefined;
+    var limited = src.limited(.unlimited, &buf);
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+    var server = std.http.Server.init(&limited.interface, &discard.writer);
+    _ = try server.receiveHead();
+}
+
+test "head_bytes: a request head of exactly head_bytes is received, one byte more is oversize (431)" {
+    const start = "GET / HTTP/1.1\r\nHost: x\r\nX-Pad: ";
+    const end = "\r\n\r\n";
+    const pad = "p" ** (head_bytes - start.len - end.len);
+    try receiveThroughHostBuffer(start ++ pad ++ end);
+    try testing.expectError(error.HttpHeadersOversize, receiveThroughHostBuffer(start ++ pad ++ "p" ++ end));
+}

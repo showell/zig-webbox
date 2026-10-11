@@ -116,3 +116,19 @@ test "signed: a MAC of any other length names no one, and never runs past its bu
     try testing.expect(verify(kind, secret, "42.1000.", 1000) == null);
     try testing.expect(verify(kind, secret, try std.fmt.allocPrint(a, "42.1000.{s}", .{"A" ** 400}), 1000) == null);
 }
+
+test "signed: a value names its id exactly at its lifetime and skew, and not one second past either" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = "a secret of thirty-two bytes or more, for signed's test";
+    const kind: Kind = .{ .label = "k\n", .lifetime_secs = 100, .skew_secs = 5, .validId = anyDigits };
+    const issued: i64 = 1000;
+    const v = try sign(a, kind, secret, "42", issued);
+    // The lifetime's end: the last second it names its id, and the first it does not.
+    try testing.expectEqualStrings("42", verify(kind, secret, v, issued + kind.lifetime_secs).?);
+    try testing.expect(verify(kind, secret, v, issued + kind.lifetime_secs + 1) == null);
+    // The skew's end: a clock this far behind the signer's still reads it, one more does not.
+    try testing.expectEqualStrings("42", verify(kind, secret, v, issued - kind.skew_secs).?);
+    try testing.expect(verify(kind, secret, v, issued - kind.skew_secs - 1) == null);
+}
