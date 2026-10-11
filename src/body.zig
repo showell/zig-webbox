@@ -1,67 +1,71 @@
 //! body: **WHEN A REQUEST'S BODY IS READ, AND HOW LONG IT MAY TAKE** (metal-vmm
-//! QUEUE 166 and 167). Part of the `webbox` library. One rule for every host,
-//! said here once: Linux's (linux_host.zig) and the bare-metal kernel's
-//! (gopher-metal's probe/gopher.zig) both read it.
+//! QUEUE 166, 167, and 169, which redid 166). Part of the `webbox` library.
+//! One rule for every host, said here once: Linux's (linux_host.zig) and the
+//! bare-metal kernel's (gopher-metal's probe/gopher.zig) both read it.
 //!
-//! The application handles one request at a time (the turn), so a body read
-//! inside the turn holds every other request up while it arrives. The rule:
+//! The application handles one request at a time (the turn). **THE TURN
+//! NEVER WAITS ON THE NETWORK**: every body is in memory before its request
+//! takes the turn, so a slow link holds up nobody but itself. The rule:
 //!
 //!   1. **The route says its cap, from the head** (a site's `bodyLimit`). A
 //!      Content-Length past it is refused before a byte is read; a chunked
 //!      body past it, when it passes. Both framings at once is a 400 (RFC
 //!      9112 §6.1: a sender must not, and a server may refuse).
-//!   2. **A body that fits the host's room is read before the turn, whole**,
-//!      holding only its own connection, for at most `beforeTurnMs`. The
-//!      room is what the host can hold for a body it has not started: a
-//!      connection's buffer on metal, `before_turn_most` on Linux.
-//!   3. **One that does not is read in the turn, under one deadline for the
-//!      whole body** (`inTurnMs`, from the turn's start), never one a read.
-//!      Past it the read fails, the handler's `http.readLimitedBody` answers
-//!      408 (it asks `lateInTurn`), and the connection closes.
-//!   4. **Both deadlines are sized from the body**: a base, and its bytes at
-//!      `floor_bytes_per_s`. A sender slower than the floor fails; that is the
-//!      line. What a slow sender costs others is its in-turn deadline, at most.
-//!   5. The host answers `100-continue` only for a body this plan reads (a
-//!      refused one gets its refusal instead), then waits as for any other.
-//!   6. A deadline the host cannot arm is a 503, never a read without one.
+//!   2. **A small body** (a route whose cap is at most `before_turn_most`)
+//!      is read whole before the turn within `smallMs`: ten seconds and its
+//!      bytes at the slowest link seen in production, 64 KiB/s.
+//!   3. **An upload** (a route whose cap is past it) is read whole into
+//!      memory before the turn, within `upload_ms`, five minutes (the page
+//!      waits as long). It needs one of `upload_slots` slots, three a host,
+//!      at most one a human, so memory holds at most three uploads; and **who
+//!      is asking is checked first** (a site's `uploader`, from the head), so
+//!      a stranger never holds a slot: their body is never read, and the
+//!      route refuses them. An uploader with no slot free waits on its own
+//!      connection, holding no one else, for `slot_wait_ms`; then a 503.
+//!   4. The host answers `100-continue` only for a body this plan reads (a
+//!      refused one gets its refusal instead), then reads it as any other.
+//!   5. A deadline the host cannot arm is a 503, never a read without one.
+//!   6. A host logs each upload's size and how long it took to arrive.
 
 const std = @import("std");
 const Head = std.http.Server.Request.Head;
 
-/// The slowest a body may arrive, in bytes a second: about 8 Mbit/s. 40 MB
-/// at 20 Mbit/s takes 16 s and is allowed 40 s.
-pub const floor_bytes_per_s: u64 = 1 << 20;
-
-/// What a body read before the turn is allowed besides its bytes at the floor.
-/// Long, because it holds up nobody but its own connection.
-pub const before_turn_base_ms: u64 = 10_000;
-
-/// What a body read in the turn is allowed besides its bytes at the floor.
-/// Short, because it holds up every other request.
-pub const in_turn_base_ms: u64 = 2_000;
-
-/// The most a Linux host holds for a body before the turn: the largest cap of
-/// any ordinary route (angry-gopher's doc). A route with a larger cap (the
-/// upload) is read in the turn.
+/// The largest body read before the turn without an upload slot: the largest
+/// cap of any ordinary route (angry-gopher's doc). A route with a larger cap
+/// is an upload.
 pub const before_turn_most: u64 = 1 << 20;
 
-/// The longest a body read before the turn may take, sized from `bytes`, the
-/// most it can be.
-pub fn beforeTurnMs(bytes: u64) u64 {
-    return before_turn_base_ms + atFloorMs(bytes);
+/// A small body's time besides its bytes at the slow link.
+pub const small_base_ms: u64 = 10_000;
+
+/// The slowest link a small body is sized for: a 1.8 MB photo from India
+/// arrived at ~65 KB/s (metal-vmm QUEUE 169). A 1 MiB doc has 26 s.
+pub const slow_link_bytes_per_s: u64 = 64 * 1024;
+
+/// How long an upload may take to arrive, whole, from its slot: five
+/// minutes, as long as the page waits (angry-gopher `fd2c7ab`).
+pub const upload_ms: u64 = 5 * 60 * 1000;
+
+/// How many uploads a host reads at once, at most one a human: memory holds
+/// at most this many upload caps.
+pub const upload_slots = 3;
+
+/// How long an uploader waits for a slot, on its own connection, before a
+/// 503 that says the uploads are busy.
+pub const slot_wait_ms: u64 = 30_000;
+
+/// The longest a small body may take to arrive, sized from `bytes`, the most
+/// it can be.
+pub fn smallMs(bytes: u64) u64 {
+    const at_link = (@as(u128, bytes) * 1000 + slow_link_bytes_per_s - 1) / slow_link_bytes_per_s;
+    return small_base_ms + @as(u64, @intCast(@min(at_link, std.math.maxInt(u64) / 2)));
 }
 
-/// The longest a body read in the turn may take from the turn's start, sized
-/// from `bytes`, the most it can be.
-pub fn inTurnMs(bytes: u64) u64 {
-    return in_turn_base_ms + atFloorMs(bytes);
-}
-
-/// `bytes` at the floor, in milliseconds rounded up; held well below u64's
-/// largest, so a base added to it cannot overflow.
-fn atFloorMs(bytes: u64) u64 {
-    const ms = (@as(u128, bytes) * 1000 + floor_bytes_per_s - 1) / floor_bytes_per_s;
-    return @intCast(@min(ms, std.math.maxInt(u64) / 2));
+/// The most bytes of a chunked body's framing and data a host keeps for a
+/// body of at most `cap`: its data, and a quarter again for chunk sizes and
+/// line ends (a sender of tiny chunks past that is refused, 413).
+pub fn chunkedRawMost(cap: u64) u64 {
+    return cap +| cap / 4 +| 4096;
 }
 
 /// How a request's head says its body is framed.
@@ -91,19 +95,23 @@ pub fn framing(head: *const Head) Framed {
     return .{ .framing = .none };
 }
 
-/// When a body is read.
+/// When a body is read: always before the turn.
 pub const Plan = union(enum) {
     none,
     refused: Refusal,
-    /// Whole, before the turn, within `deadline_ms` of its head.
-    before_turn: Read,
-    /// In the turn, within `deadline_ms` of the turn's start.
-    in_turn: Read,
-    /// A chunked body whose cap is past the room: waited for before the turn
-    /// while it can still end in the room (`before`), and read in the turn
-    /// (`in_turn`) once it cannot. A host that keeps no partial body before
-    /// the turn (Linux) reads it in the turn.
-    chunked_as_far_as_room: struct { before: Read, in_turn: Read },
+    /// A small body: read whole, within `deadline_ms` of its head.
+    small: Read,
+    /// An upload: read whole into memory once its uploader is known and has
+    /// a slot, within `deadline_ms` of the slot.
+    upload: Read,
+
+    /// The read, for either kind.
+    pub fn read(self: Plan) ?Read {
+        return switch (self) {
+            .small, .upload => |r| r,
+            .none, .refused => null,
+        };
+    }
 };
 
 pub const Read = struct {
@@ -112,28 +120,59 @@ pub const Read = struct {
     deadline_ms: u64,
 };
 
-/// The plan for a body under `head`, given its route's cap and the host's
-/// room for a body before the turn.
-pub fn plan(head: *const Head, cap: u64, room: u64) Plan {
+/// The plan for a body under `head`, given its route's cap.
+pub fn plan(head: *const Head, cap: u64) Plan {
     const f = switch (framing(head)) {
         .refused => |r| return .{ .refused = r },
         .framing => |f| f,
     };
-    switch (f) {
+    const bytes = switch (f) {
         .none => return .none,
-        .length => |n| {
-            if (n > cap) return .{ .refused = .too_large };
-            if (n <= room) return .{ .before_turn = .{ .bytes = n, .deadline_ms = beforeTurnMs(n) } };
-            return .{ .in_turn = .{ .bytes = n, .deadline_ms = inTurnMs(n) } };
-        },
-        .chunked => {
-            if (cap <= room) return .{ .before_turn = .{ .bytes = cap, .deadline_ms = beforeTurnMs(cap) } };
-            return .{ .chunked_as_far_as_room = .{
-                .before = .{ .bytes = room, .deadline_ms = beforeTurnMs(room) },
-                .in_turn = .{ .bytes = cap, .deadline_ms = inTurnMs(cap) },
-            } };
-        },
+        .length => |n| if (n > cap) return .{ .refused = .too_large } else n,
+        .chunked => cap,
+    };
+    if (cap <= before_turn_most) return .{ .small = .{ .bytes = bytes, .deadline_ms = smallMs(bytes) } };
+    return .{ .upload = .{ .bytes = bytes, .deadline_ms = upload_ms } };
+}
+
+/// **THE UPLOAD SLOTS**: three a host, at most one a human. A human is named
+/// by a key the host makes of the site's `uploader` (`keyOf`). Pure; a host
+/// that takes from more than one thread holds its own lock around it.
+pub const Slots = struct {
+    held: [upload_slots]?u64 = @splat(null),
+
+    pub const Taken = union(enum) {
+        slot: usize,
+        /// Every slot is held: wait.
+        all_busy,
+        /// This human holds one already: wait.
+        human_has_one,
+    };
+
+    pub fn take(self: *Slots, who: u64) Taken {
+        for (self.held) |h| if (h == who) return .human_has_one;
+        for (&self.held, 0..) |*h, i| if (h.* == null) {
+            h.* = who;
+            return .{ .slot = i };
+        };
+        return .all_busy;
     }
+
+    pub fn giveBack(self: *Slots, slot: usize) void {
+        std.debug.assert(self.held[slot] != null);
+        self.held[slot] = null;
+    }
+
+    pub fn inUse(self: *const Slots) usize {
+        var n: usize = 0;
+        for (self.held) |h| n += @intFromBool(h != null);
+        return n;
+    }
+};
+
+/// The slot key of an uploader as the site names them.
+pub fn keyOf(uploader: []const u8) u64 {
+    return std.hash.Wyhash.hash(0x5107, uploader);
 }
 
 /// How far a chunked body in `bytes` (from its first chunk's size) has come,
@@ -177,16 +216,6 @@ fn trailersEnd(bytes: []const u8, at: usize) ChunkedEnd {
     return .{ .whole = at + 2 + n };
 }
 
-/// **THE TURN'S BODY RAN PAST ITS DEADLINE.** Set by the host when the
-/// in-turn deadline passes (its read is ended then), read by
-/// `http.readLimitedBody` to answer 408 rather than 400, and cleared by the
-/// host as each turn starts. One for the process: only one turn runs at once.
-pub var late_in_turn: std.atomic.Value(bool) = .init(false);
-
-pub fn lateInTurn() bool {
-    return late_in_turn.load(.acquire);
-}
-
 // ── tests ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -208,36 +237,50 @@ test "framing: a method without a body has none; both framings are refused" {
 
 test "plan: past the cap is refused, unread; the cap itself is read" {
     var h = try headOf("POST / HTTP/1.1\r\nContent-Length: 101\r\n\r\n");
-    try testing.expectEqual(Refusal.too_large, plan(&h, 100, 1000).refused);
+    try testing.expectEqual(Refusal.too_large, plan(&h, 100).refused);
     h = try headOf("POST / HTTP/1.1\r\nContent-Length: 100\r\n\r\n");
-    try testing.expectEqual(@as(u64, 100), plan(&h, 100, 1000).before_turn.bytes);
+    try testing.expectEqual(@as(u64, 100), plan(&h, 100).small.bytes);
 }
 
-test "plan: a body that fits the room is read before the turn, one past it in the turn" {
-    var h = try headOf("POST / HTTP/1.1\r\nContent-Length: 1000\r\n\r\n");
-    try testing.expect(plan(&h, 1 << 20, 1000) == .before_turn);
-    h = try headOf("POST / HTTP/1.1\r\nContent-Length: 1001\r\n\r\n");
-    const p = plan(&h, 1 << 20, 1000).in_turn;
-    try testing.expectEqual(@as(u64, 1001), p.bytes);
-    try testing.expectEqual(in_turn_base_ms + 1, p.deadline_ms);
+test "plan: a route's cap past before_turn_most makes an upload, of five minutes; one at it, a small body" {
+    var h = try headOf("POST / HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n");
+    const up = plan(&h, 4 * before_turn_most).upload;
+    try testing.expectEqual(@as(u64, 2_000_000), up.bytes);
+    try testing.expectEqual(upload_ms, up.deadline_ms);
+    h = try headOf("POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n");
+    // Small even with a small Content-Length on an upload route: it is the
+    // route's cap that says.
+    try testing.expect(plan(&h, before_turn_most + 1) == .upload);
+    try testing.expect(plan(&h, before_turn_most) == .small);
+    h = try headOf("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+    try testing.expectEqual(@as(u64, 500), plan(&h, 500).small.bytes);
+    h = try headOf("GET / HTTP/1.1\r\nContent-Length: 10\r\n\r\n");
+    try testing.expect(plan(&h, 500) == .none);
 }
 
-test "plan: chunked is sized by the cap; past the room it is waited for as far as the room" {
-    var h = try headOf("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
-    try testing.expectEqual(@as(u64, 500), plan(&h, 500, 1000).before_turn.bytes);
-    const p = plan(&h, 4000, 1000).chunked_as_far_as_room;
-    try testing.expectEqual(@as(u64, 1000), p.before.bytes);
-    try testing.expectEqual(@as(u64, 4000), p.in_turn.bytes);
+test "deadlines: a small body has ten seconds and its bytes at 64 KiB/s; no overflow" {
+    try testing.expectEqual(@as(u64, 10_000), smallMs(0));
+    try testing.expectEqual(@as(u64, 10_016), smallMs(1024));
+    try testing.expectEqual(@as(u64, 26_000), smallMs(1 << 20));
+    _ = smallMs(std.math.maxInt(u64));
+    try testing.expectEqual(@as(u64, 300_000), upload_ms);
+    try testing.expectEqual(@as(u64, 5000 + 1250 + 4096), chunkedRawMost(5000));
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), chunkedRawMost(std.math.maxInt(u64)));
 }
 
-test "deadlines: a base and the bytes at the floor, rounded up" {
-    try testing.expectEqual(@as(u64, 10_000), beforeTurnMs(0));
-    try testing.expectEqual(@as(u64, 2_001), inTurnMs(1));
-    try testing.expectEqual(@as(u64, 3_000), inTurnMs(1 << 20));
-    // The largest upload angry-gopher takes (101 MiB): about 103 s.
-    try testing.expectEqual(@as(u64, 103_000), inTurnMs(101 << 20));
-    // No overflow at the largest Content-Length.
-    _ = inTurnMs(std.math.maxInt(u64));
+test "slots: three a host, one a human, given back" {
+    var slots: Slots = .{};
+    const ann = keyOf("1");
+    try testing.expectEqual(Slots.Taken{ .slot = 0 }, slots.take(ann));
+    try testing.expectEqual(Slots.Taken.human_has_one, slots.take(ann));
+    try testing.expectEqual(Slots.Taken{ .slot = 1 }, slots.take(keyOf("2")));
+    try testing.expectEqual(Slots.Taken{ .slot = 2 }, slots.take(keyOf("3")));
+    try testing.expectEqual(Slots.Taken.all_busy, slots.take(keyOf("4")));
+    try testing.expectEqual(@as(usize, 3), slots.inUse());
+    slots.giveBack(1);
+    try testing.expectEqual(Slots.Taken{ .slot = 1 }, slots.take(keyOf("4")));
+    slots.giveBack(0);
+    try testing.expectEqual(Slots.Taken{ .slot = 0 }, slots.take(ann));
 }
 
 test "chunkedEnd: whole, partial at every cut, trailers, and malformed" {

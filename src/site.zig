@@ -68,8 +68,10 @@ pub const Host = struct {
 ///     process allocator) for whatever must live as long as the process;
 ///   - `StartReport`: what its setup did, for the host to say in its log;
 ///   - `bodyLimit(path) u64`: the most any handler on that path reads of a
-///     request's body, which the host reads it by (body.zig: before the turn
-///     or in it, and how long it may take).
+///     request's body, which the host reads it by (body.zig);
+///   - and, if any route's cap is past `body.before_turn_most` (an upload),
+///     `uploader(req, io, alloc) !?[]const u8`: who is asking, from the head
+///     alone, or null for a stranger, whose upload is never read (body.zig).
 pub fn Site(comptime App: type) type {
     inline for (.{
         .{ "routes", "routes(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, bus: *Bus) !void" },
@@ -110,6 +112,14 @@ pub fn Site(comptime App: type) type {
         /// (body.zig's `plan`).
         pub fn bodyLimit(target: []const u8) u64 {
             return App.bodyLimit(pathOf(target));
+        }
+
+        /// Who is asking to upload, from the head (body.zig): the
+        /// application's name for them, or null for a stranger, and for
+        /// everyone on a site that takes no uploads.
+        pub fn uploader(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator) !?[]const u8 {
+            if (!@hasDecl(App, "uploader")) return null;
+            return App.uploader(req, io, alloc);
         }
 
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
