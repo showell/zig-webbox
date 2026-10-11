@@ -1,16 +1,17 @@
-//! store: every file the application keeps, through one seam.
+//! store: every file an application keeps, through one seam. Part of the
+//! `webbox` library.
 //!
-//! The application's data lives under its roots (data/, auth/) as named files
-//! in folders. This module is the only way to reach them, so the rules of the
-//! disk the data may end up on are kept in one place:
+//! An application's data lives under two roots, `data/` and `auth/` (secrets),
+//! as named files in folders. This module is the only way to reach them, so
+//! the rules of the disk the data may end up on are kept in one place:
 //!
-//! **THE RULES ARE FAT'S, ON EVERY HOST.** On gopher-metal the data is a FAT
-//! volume. On Linux it is not, and a Linux that allowed what FAT refuses would
-//! hide the difference until the data moved. So the Store keeps FAT's rules
-//! here too:
+//! **THE RULES ARE FAT'S, ON EVERY HOST.** On the bare-metal host the data is a
+//! FAT volume. On Linux it is not, and a Linux that allowed what FAT refuses
+//! would hide the difference until the data moved. So the Store keeps FAT's
+//! rules here too:
 //!
 //!   - **A name FAT can hold**, or the call is refused with `error.BadName`:
-//!     1 to 96 bytes (disk_fat_dirent.zig's max_name), printable ASCII, none of
+//!     1 to 96 bytes (`max_name`), printable ASCII, none of
 //!     `" * / : < > ? \ |`, not `.` or `..`, not ending in a dot or a space.
 //!   - **Case does not tell two names apart; it is kept for display.** A name
 //!     that differs from an existing one only in case IS that one (Steve,
@@ -19,33 +20,17 @@
 //!     it was given.
 //!
 //! The rules apply to the names a call would CREATE and to the names it looks
-//! up. The roots themselves (configured paths, such as prod's
-//! /home/steve/AngryGopher/prod) are the host's and are not checked: a path
-//! that exists is taken as it is, and only a name that is not found is looked
-//! for in another case.
+//! up. The roots themselves (configured paths, often absolute and long on
+//! Linux) are the host's and are not checked: a path that exists is taken as
+//! it is, and only a name that is not found is looked for in another case.
 //!
 //! **A FOLDER HOLDS AT MOST 65,536 ENTRIES ON FAT** (the spec's 2 MiB; a long
-//! name takes 2 to 4 of them). gopher-metal refuses to grow a folder past it:
-//! the write that needed the room fails as a full disk would
+//! name takes 2 to 4 of them). The bare-metal host refuses to grow a folder
+//! past it: the write that needed the room fails as a full disk would
 //! (`error.NoSpaceLeft`). Linux has no such limit, and this Store does not
-//! count entries on every write, so at that bound the two hosts would
-//! differ. What the application's folders can reach (gopher-metal QUEUE item
-//! 68; prod's counts from 2026-10-02):
-//!
-//!   - `data/players`: one folder per player, two entries each, so about
-//!     32,000 players. **Nothing bounds it** but game_limits' 5 new players
-//!     an address an hour. Prod: 19.
-//!   - `data/lynrummy`: one folder per player who has played. Prod: 5.
-//!   - a player's `sessions` folders: at most 500 (game_limits). Prod's
-//!     largest: 65.
-//!   - a conversation's `sessions`: a topic is about five files of 2-4
-//!     entries each, so a few thousand topics. A topic's uploads: about
-//!     16,000. Prod's largest folder of all: 70 entries.
-//!
-//! So prod is a few hundred times inside every one of them. The players
-//! folder is the one that grows without a bound of its own; when it nears
-//! the limit, the fix is a fan-out (`data/players/<first digit>/p...`),
-//! not a bigger folder.
+//! count entries on every write, so at that bound the two hosts would differ.
+//! An application says how far its folders can grow, and fans a folder out
+//! before it nears the bound.
 //!
 //! **AN ERROR IS NOT AN EMPTY FILE.** `readOrEmpty` says the difference between
 //! a file that is not there ("nothing yet") and one that will not read.
@@ -54,39 +39,57 @@ const std = @import("std");
 const Io = std.Io;
 const Alloc = std.mem.Allocator;
 
-/// disk_fat_dirent.zig's max_name: the longest name gopher-metal reads and writes.
+/// The longest name the bare-metal host reads and writes (its
+/// disk_fat_dirent.zig's max_name).
 pub const max_name = 96;
 
-/// io.zig's max_path: the longest path gopher-metal holds a file by.
+/// The longest path the bare-metal host holds a file by (its io.zig's max_path).
 pub const max_path = 256;
 
-/// disk_fat.zig's max_tree_depth: how deep gopher-metal removes a tree and
-/// checks a volume at boot. A path is held to it from the volume's root.
+/// How deep the bare-metal host removes a tree and checks a volume at boot
+/// (its disk_fat.zig's max_tree_depth). A path is held to it from the
+/// volume's root.
 pub const max_depth = 16;
 
 pub const Error = error{ BadName, PathTooLong, PathTooDeep };
 
-// ── the paths gopher-metal would hold ───────────────────────────────────────
+// ── the paths the bare-metal host would hold ─────────────────────────────────
 //
-// **FAT'S PATH LIMITS, ON EVERY HOST, MEASURED AS GOPHER-METAL SPELLS THE
-// PATH.** There the data is `data/...` and `auth/...` on the volume; on Linux
-// the same files are under configured roots, often absolute and long. So a
-// path under a root is measured as if the root were spelled `data` or `auth`:
-// what gopher-metal would be asked to hold. A path under neither root (a
-// test's temporary folder, the site's own files) is not measured.
+// **FAT'S PATH LIMITS, ON EVERY HOST, MEASURED AS THE BARE-METAL HOST SPELLS
+// THE PATH.** There the data is `data/...` and `auth/...` on the volume; on
+// Linux the same files are under configured roots, often absolute and long.
+// So a path under a root is measured as if the root were spelled `data` or
+// `auth`: what the bare-metal host would be asked to hold. A path under
+// neither root (a test's temporary folder, the site's own files) is not
+// measured.
 
-/// The two roots roots.point sets, as this host spells them; null until then.
+/// The two roots, as this host spells them; null until the host sets them.
 pub var data_base: ?[]const u8 = null;
 pub var auth_base: ?[]const u8 = null;
 
-/// Called by roots.point, with the same two directories.
+/// The host's two directories, set as it starts.
 pub fn setBases(data_dir: []const u8, auth_dir: []const u8) void {
     data_base = data_dir;
     auth_base = auth_dir;
 }
 
-/// `path`'s length and depth as gopher-metal would spell it, or null when it
-/// is under neither root.
+/// The two roots as they were, to put back (`defer saved.restore()`): for a
+/// test that moves them.
+pub const Bases = struct {
+    data: ?[]const u8,
+    auth: ?[]const u8,
+    pub fn restore(self: Bases) void {
+        data_base = self.data;
+        auth_base = self.auth;
+    }
+};
+
+pub fn saveBases() Bases {
+    return .{ .data = data_base, .auth = auth_base };
+}
+
+/// `path`'s length and depth as the bare-metal host would spell it, or null
+/// when it is under neither root.
 fn metalShape(path: []const u8) ?struct { len: usize, depth: usize, empty_part: bool } {
     for ([_]struct { ?[]const u8, []const u8 }{ .{ data_base, "data" }, .{ auth_base, "auth" } }) |pair| {
         const base = std.mem.trimEnd(u8, pair[0] orelse continue, "/");
@@ -102,10 +105,10 @@ fn metalShape(path: []const u8) ?struct { len: usize, depth: usize, empty_part: 
     return null;
 }
 
-/// Refuses a path gopher-metal could not hold: longer than max_path or
+/// Refuses a path the bare-metal host could not hold: longer than max_path or
 /// deeper than max_depth, measured as it would spell it; or one with an
 /// empty part (a doubled or trailing slash), which metal refuses
-/// (gopher-metal `ab6dd01`) and `metalShape`'s count of parts skipped
+/// (the bare-metal host's `ab6dd01`) and `metalShape`'s count of parts skipped
 /// (metal-vmm QUEUE 156(i)): `BadName`, on both hosts alike.
 fn withinLimits(path: []const u8) Error!void {
     const shape = metalShape(path) orelse return;
@@ -114,7 +117,7 @@ fn withinLimits(path: []const u8) Error!void {
     if (shape.depth > max_depth) return error.PathTooDeep;
 }
 
-/// Whether FAT, as gopher-metal holds it, can store `name`.
+/// Whether FAT, as the bare-metal host holds it, can store `name`.
 pub fn fatName(name: []const u8) bool {
     if (name.len == 0 or name.len > max_name) return false;
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
@@ -190,7 +193,7 @@ fn exists(io: Io, path: []const u8) bool {
 /// A lookup that missed: the same path in another case, or null when there is
 /// no such thing in any case. Any other answer for the other spelling is the
 /// caller's: a path through a file in another case is NotDir here, as FAT,
-/// which folds case, answers it on gopher-metal.
+/// which folds case, answers it on the bare-metal host.
 fn retry(io: Io, alloc: Alloc, path: []const u8) !?[]const u8 {
     const p = try resolve(io, alloc, path);
     if (std.mem.eql(u8, p, path)) return null;
@@ -269,7 +272,7 @@ pub const Stat = struct {
 };
 
 /// The host's kind of entry as ours. **`anytype`, on purpose**: std.Io and
-/// gopher-metal's io name the type differently, and both have these tags.
+/// the bare-metal host's io name the type differently, and both have these tags.
 fn kindOf(k: anytype) Kind {
     return switch (k) {
         .file => .file,
@@ -331,7 +334,7 @@ pub fn list(io: Io, alloc: Alloc, dir_path: []const u8) ![]Entry {
 
 pub const WriteOptions = struct {
     /// Readable by this user only, where the host has permissions (Linux).
-    /// FAT has none: on gopher-metal the volume is the boundary.
+    /// FAT has none: on the bare-metal host the volume is the boundary.
     private: bool = false,
 };
 
@@ -339,8 +342,8 @@ pub const WriteOptions = struct {
 pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
     const p = try forWrite(io, alloc, path);
     if (std.fs.path.dirname(p)) |d| try makeDir(io, alloc, d);
-    // The flags are spelled in place, not named: std.Io and gopher-metal's io
-    // call their type differently.
+    // The flags are spelled in place, not named: std.Io and the bare-metal
+    // host's io call their type differently.
     if (opts.private) {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data, .flags = .{ .permissions = @enumFromInt(0o600) } });
     } else {
@@ -349,13 +352,13 @@ pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: Wri
 }
 
 /// **MAKES `path` HOLD EXACTLY `data`, SO THAT NO STOP LOSES IT.** `write`
-/// empties the file and then fills it (on gopher-metal it removes the entry
-/// and writes a new one), so a machine that stops between the two has lost
-/// the record. This writes `data` to a sibling with a temporary name first,
+/// empties the file and then fills it (on the bare-metal host it removes
+/// the entry and writes a new one), so a machine that stops between the two
+/// has lost the record. This writes `data` to a sibling with a temporary name first,
 /// then renames it over `path`:
 ///   - stopped before the rename: `path` is the old record, whole, and the
 ///     sibling is left over (the next replace writes over it);
-///   - the rename itself: on Linux one atomic step; on gopher-metal,
+///   - the rename itself: on Linux one atomic step; on the bare-metal host,
 ///     disk_fat.rename's order, which leaves the old record or the new, whole,
 ///     and at worst leaked clusters (the boot-time disk check reports them).
 /// A `path` that does not exist yet is made as `write` makes it. It keeps the
@@ -559,7 +562,7 @@ test "replace makes the file hold exactly the data, keeps its name, and leaves n
     try testing.expect(fatName(try siblingName(a, "x" ** 96)));
 }
 
-test "a path gopher-metal could not hold is refused, measured as it would spell it" {
+test "a path the bare-metal host could not hold is refused, measured as it would spell it" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -567,7 +570,7 @@ test "a path gopher-metal could not hold is refused, measured as it would spell 
     var threaded = std.Io.Threaded.init(a, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const saved = @import("roots.zig").save(); // the bases are two of the roots (157(c))
+    const saved = saveBases();
     defer saved.restore();
     // Roots spelled long, as a Linux host's are: the limits do not count them.
     const data = f.p("home/someone/a-long-host-path/prod/data");
@@ -667,7 +670,7 @@ test "case does not tell two names apart, and the first case is kept" {
 }
 
 test "a path with an empty part is refused under a root, as metal refuses it (metal-vmm QUEUE 156(i))" {
-    const saved = @import("roots.zig").save();
+    const saved = saveBases();
     defer saved.restore();
     data_base = "/srv/gopher/data/";
     try withinLimits("/srv/gopher/data/chat/1_2/sessions/x.md");

@@ -1,10 +1,6 @@
-//! counter: a number in a file, bumped under a lock.
-//!
-//! Three unrelated things need one — the game store's session ids, the account
-//! store's user ids, and the player store's player ids — and it used to live in
-//! the game store, which is why two identity modules imported a module full of
-//! Lyn Rummy boards to get at twenty lines. It is its own thing now, so nobody
-//! takes the game store along for the ride.
+//! counter: a number in a file, bumped under a lock. Part of the `webbox`
+//! library: how an application hands out ids (sessions, accounts, players),
+//! each exactly once.
 //!
 //! The file holds the NEXT value. `next()` returns the current one and writes
 //! the successor, so an id is handed out exactly once. A missing or unparseable
@@ -34,8 +30,8 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
 }
 
 /// peek answers the value `next` would hand out, and writes nothing: what a
-/// page offers before anything is made (puzzles.zig, a session made on its
-/// first move). Floors at 1, as `next` does.
+/// page offers before anything is made (a session made only by its first
+/// move). Floors at 1, as `next` does.
 pub fn peek(io: Io, alloc: Alloc, path: []const u8) !i64 {
     mu.lockUncancelable(io);
     defer mu.unlock(io);

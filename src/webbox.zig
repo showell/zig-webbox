@@ -20,6 +20,11 @@ pub const bus = @import("bus.zig");
 pub const mem_meter = @import("mem_meter.zig");
 /// What the host says about itself (/admin/host's host half).
 pub const host_facts = @import("host_facts.zig");
+/// Every file an application keeps, through one seam, under FAT's rules on
+/// every host.
+pub const store = @import("store.zig");
+/// A number in a file, bumped under a lock: ids handed out exactly once.
+pub const counter = @import("counter.zig");
 
 test {
     _ = http;
@@ -29,4 +34,6 @@ test {
     _ = bus;
     _ = mem_meter;
     _ = host_facts;
+    _ = store;
+    _ = counter;
 }
