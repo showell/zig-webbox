@@ -56,6 +56,10 @@ pub fn verify(kind: Kind, secret: []const u8, value: []const u8, now_unix: i64) 
     if (now_unix -| n > kind.lifetime_secs or n -| now_unix > kind.skew_secs) return null;
     var want: [HmacSha256.mac_length]u8 = undefined;
     mac(kind, secret, id, issued, &want);
+    // **A MAC OF ANY OTHER LENGTH IS NO ONE'S**, said before it is decoded:
+    // decode writes as many bytes as the text holds, and a client's text a
+    // character longer ran past `got`.
+    if ((b64.Decoder.calcSizeForSlice(m64) catch return null) != HmacSha256.mac_length) return null;
     var got: [HmacSha256.mac_length]u8 = undefined;
     b64.Decoder.decode(&got, m64) catch return null;
     if (!std.crypto.timing_safe.eql([HmacSha256.mac_length]u8, want, got)) return null;
@@ -93,4 +97,22 @@ test "signed: a value names its id for its lifetime, under its own kind and secr
     try testing.expect(verify(other, secret, v, 1000) == null); // another kind's
     try testing.expect(verify(kind, secret, try sign(a, kind, secret, "4x", 1000), 1000) == null); // not an id it carries
     try testing.expectEqual(@as(i64, 1000), issuedOf(v));
+}
+
+test "signed: a MAC of any other length names no one, and never runs past its buffer" {
+    // A MAC one character long, or short, decoded into the 32 bytes as it
+    // came: a client's cookie of 44 characters wrote a 33rd, an index out of
+    // bounds (a panic in a safe build, past the buffer in a fast one).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = "a secret of thirty-two bytes or more, for signed's test";
+    const kind: Kind = .{ .label = "k\n", .lifetime_secs = 100, .skew_secs = 5, .validId = anyDigits };
+    const v = try sign(a, kind, secret, "42", 1000);
+    for ([_][]const u8{ "A", "AA", "AAAA", "AAAAAAAAAAA", "AAAAAAAAAAAA" }) |more| {
+        try testing.expect(verify(kind, secret, try std.fmt.allocPrint(a, "{s}{s}", .{ v, more }), 1000) == null);
+    }
+    try testing.expect(verify(kind, secret, v[0 .. v.len - 1], 1000) == null);
+    try testing.expect(verify(kind, secret, "42.1000.", 1000) == null);
+    try testing.expect(verify(kind, secret, try std.fmt.allocPrint(a, "42.1000.{s}", .{"A" ** 400}), 1000) == null);
 }
