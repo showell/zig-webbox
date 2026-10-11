@@ -237,6 +237,16 @@ pub fn Server(comptime S: type) type {
                     sw.interface.flush() catch {};
                     return;
                 },
+                // **A HEAD THAT IS NOT HTTP IS A 400, COUNTED** (edge.zig's
+                // rule, metal-vmm QUEUE 172): it was closed with no answer
+                // and no counter. Best-effort, as the 431.
+                error.HttpHeadersInvalid => {
+                    edge.count(.head_malformed);
+                    sw.interface.writeAll("HTTP/1.1 400 Bad Request\r\n" ++
+                        "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
+                    sw.interface.flush() catch {};
+                    return;
+                },
                 else => return e,
             };
             // **THE TURN NEVER WAITS ON THE NETWORK** (webbox's body.zig,
@@ -549,7 +559,12 @@ const Whole = struct {
     state: union(enum) { reading, read: []u8, too_large, unreadable, busy } = .reading,
 
     fn read(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) void {
-        self.state = self.readAll(req, arena) catch .unreadable;
+        // Memory that runs out is the host's busy (503, the client may try
+        // again), never the client's unreadable body (metal-vmm QUEUE 172).
+        self.state = self.readAll(req, arena) catch |e| switch (e) {
+            error.OutOfMemory => .busy,
+            else => .unreadable,
+        };
     }
 
     fn readAll(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) !@FieldType(Whole, "state") {
@@ -985,6 +1000,42 @@ test "linux_host: an upload never finished is a 408 at its deadline (metal-vmm Q
     const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 2000000\r\n\r\nxxxx");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 408"));
+}
+
+test "linux_host: a head that is not HTTP is answered 400 and counted, never closed with no answer (metal-vmm QUEUE 172)" {
+    for ([_][]const u8{
+        "NOT HTTP AT ALL\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: twelve\r\n\r\n",
+    }) |raw| {
+        const before = edge.countOf(.head_malformed);
+        const got = try exchange(raw);
+        defer std.testing.allocator.free(got);
+        errdefer std.debug.print("got: {s}\n", .{got});
+        try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 400"));
+        try std.testing.expectEqual(before + 1, edge.countOf(.head_malformed));
+    }
+}
+
+test "linux_host: a body read out of memory is the host's busy (503), never the client's unreadable (400) (metal-vmm QUEUE 172)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    const peer = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const ours = try bench.listener.accept(io);
+    defer ours.close(io);
+    var progress: Progress = .{ .stream = ours, .io = io };
+    var reader: std.Io.Reader = .fixed("POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 2000000\r\n\r\nxxxx");
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var server = std.http.Server.init(&reader, &out);
+    var req = try server.receiveHead();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var charged: u64 = 0;
+    var whole: Whole = .{ .most = 2_000_000, .progress = &progress, .small = false, .charged = &charged };
+    whole.read(&req, failing.allocator());
+    try std.testing.expect(whole.state == .busy);
 }
 
 test "linux_host: a stranger's upload is never read: its route refuses it at once, never told to send (metal-vmm QUEUE 169)" {

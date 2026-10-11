@@ -37,6 +37,7 @@ const Request = std.http.Server.Request;
 /// countsText automatically (both iterate the enum).
 pub const RejectKind = enum {
     header_too_large, // request head exceeded the host's read buffer
+    head_malformed, // a request head that is not HTTP (metal-vmm QUEUE 172)
     body_too_large, // request body (or an uploaded image) exceeded its cap
     body_unreadable, // body framing was malformed / unreadable
     body_too_slow, // a body not whole within the host's deadline (body.zig)
@@ -67,7 +68,7 @@ pub fn statusFor(kind: RejectKind) std.http.Status {
         .header_too_large => .request_header_fields_too_large, // 431
         .body_too_large => .payload_too_large, // 413
         .body_too_slow => .request_timeout, // 408
-        .body_unreadable, .body_framed_twice, .malformed_markdown, .malformed_multipart => .bad_request, // 400
+        .head_malformed, .body_unreadable, .body_framed_twice, .malformed_markdown, .malformed_multipart => .bad_request, // 400
         .no_deadline, .uploads_busy => .service_unavailable, // 503
         .body_length_required => .length_required, // 411
         .body_expectation_failed => .expectation_failed, // 417
@@ -89,6 +90,11 @@ pub fn reject(req: *Request, kind: RejectKind, msg: []const u8) !void {
 /// have their own observable side effect (e.g. an endpoint that still answers,
 /// with a visible placeholder) or where the connection is being closed raw (a
 /// host refusing an oversized head before any route sees it).
+/// How many of `kind` have been counted.
+pub fn countOf(kind: RejectKind) u64 {
+    return counters[@intFromEnum(kind)].load(.monotonic);
+}
+
 pub fn count(kind: RejectKind) void {
     bump(kind);
 }

@@ -381,7 +381,10 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
             try edge.reject(req, .body_too_large, "request body too large\n");
             return null;
         },
-        else => {
+        // Memory that runs out is the server's (a 500 the host logs), never
+        // the client's malformed body (metal-vmm QUEUE 172).
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ReadFailed => {
             try edge.reject(req, .body_unreadable, "read body\n");
             return null;
         },
@@ -539,4 +542,15 @@ test "head_bytes: a request head of exactly head_bytes is received, one byte mor
     const pad = "p" ** (head_bytes - start.len - end.len);
     try receiveThroughHostBuffer(start ++ pad ++ end);
     try testing.expectError(error.HttpHeadersOversize, receiveThroughHostBuffer(start ++ pad ++ "p" ++ end));
+}
+
+test "readLimitedBody: memory that runs out is the server's error, never the client's 400 'read body' (metal-vmm QUEUE 172)" {
+    var reader: std.Io.Reader = .fixed("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+    var out_buf: [512]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var server = std.http.Server.init(&reader, &out);
+    var req = try server.receiveHead();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, readLimitedBody(&req, failing.allocator(), 100));
+    try std.testing.expectEqual(@as(usize, 0), out.end);
 }
