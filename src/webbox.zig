@@ -23,6 +23,11 @@ pub const host_facts = @import("host_facts.zig");
 pub const store = @import("store.zig");
 /// A number in a file, bumped under a lock: ids handed out exactly once.
 pub const counter = @import("counter.zig");
+/// Which address a request comes from: the connection's, or behind a trusted
+/// reverse proxy, the one it names.
+pub const client_address = @import("client_address.zig");
+/// The data volume's free space, as the host reports it.
+pub const free_space = @import("free_space.zig");
 
 test {
     _ = http;
@@ -34,4 +39,6 @@ test {
     _ = host_facts;
     _ = store;
     _ = counter;
+    _ = client_address;
+    _ = free_space;
 }

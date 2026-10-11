@@ -217,6 +217,32 @@ pub fn internalTarget(next: []const u8) []const u8 {
     return next;
 }
 
+/// **THE TAIL OF `path` UNDER `prefix`**, when `path` is exactly `prefix` or
+/// `prefix` followed by '/'; null otherwise, so "/drivingX" is not under
+/// "/driving". The tail keeps its leading '/' (or is empty).
+pub fn pathUnder(path: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    const tail = path[prefix.len..];
+    if (tail.len == 0 or tail[0] == '/') return tail;
+    return null;
+}
+
+/// A request target's path: up to the first '?' (e.g. /driving/blitter.js
+/// from /driving/blitter.js?h=…).
+pub fn pathOf(target_: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, target_, '?')) |q| return target_[0..q];
+    return target_;
+}
+
+test "pathUnder: the prefix itself, or the prefix and a '/', and nothing else" {
+    try std.testing.expectEqualStrings("", pathUnder("/driving", "/driving").?);
+    try std.testing.expectEqualStrings("/app.js", pathUnder("/driving/app.js", "/driving").?);
+    try std.testing.expect(pathUnder("/drivingX", "/driving") == null);
+    try std.testing.expect(pathUnder("/chat", "/driving") == null);
+    try std.testing.expectEqualStrings("/a.js", pathOf("/a.js?h=00ff"));
+    try std.testing.expectEqualStrings("/a.js", pathOf("/a.js"));
+}
+
 pub fn notFound(req: *std.http.Server.Request) !void {
     try req.respond("not found\n", .{ .status = .not_found });
 }
