@@ -60,7 +60,9 @@ pub const Host = struct {
 };
 
 /// `App` declares, each required:
-///   - `routes(req, io, alloc, bus) !void`: its route table;
+///   - `routes(req, io, alloc, bus) !void`: its route table (`bus` is the
+///     request's handle on the pub/sub, and carries the connection's
+///     address, `bus.peer`);
 ///   - `setup(io, base, roots: ?Roots) !StartReport`: what it does once,
 ///     before its first request, in its own order, with `base` (the metered
 ///     process allocator) for whatever must live as long as the process;

@@ -3,9 +3,10 @@
 //! each exactly once.
 //!
 //! The file holds the NEXT value. `next()` returns the current one and writes
-//! the successor, so an id is handed out exactly once. A missing or unparseable
-//! file reads as 1: a fresh counter and a corrupt one both start over rather
-//! than failing a request, and ids are only ever unique-per-file, never dense.
+//! the successor, so an id is handed out exactly once. A missing file reads as
+//! 1 (a fresh counter); one that will not parse is an error, never 1 again,
+//! which would hand out ids already given (metal-vmm QUEUE 105). Ids are only
+//! ever unique-per-file, never dense.
 
 const std = @import("std");
 const Io = std.Io;

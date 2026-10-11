@@ -5,7 +5,9 @@
 //! as named files in folders. This module is the only way to reach them, so
 //! the rules of the disk the data may end up on are kept in one place:
 //!
-//! **THE RULES ARE FAT'S, ON EVERY HOST.** On the bare-metal host the data is a
+//! **THE RULES ARE FAT'S, ON EVERY HOST** (for a path under the host's roots:
+//! one under neither, as with no roots in a development run, is not
+//! measured). On the bare-metal host the data is a
 //! FAT volume. On Linux it is not, and a Linux that allowed what FAT refuses
 //! would hide the difference until the data moved. So the Store keeps FAT's
 //! rules here too:

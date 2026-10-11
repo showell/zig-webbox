@@ -6,9 +6,9 @@
 //!   _session_secret.previous-until  until when (Unix seconds) the previous
 //!                                   one is still taken
 //!
-//! Each call names the folder; nothing here is kept between calls. Nothing
-//! makes a first secret: an application seeds one, and only `rotate`
-//! replaces one that exists.
+//! Each call names the folder; nothing here is kept between calls. `create`
+//! makes the first secret, once, when a site is set up (angry-gopher's was
+//! seeded on disk by hand, before `create`); only `rotate` replaces one.
 
 const std = @import("std");
 const Io = std.Io;
@@ -50,8 +50,48 @@ pub fn rotate(io: Io, alloc: Alloc, dir: []const u8, previous_days: i64) !void {
     const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     try store.replace(io, alloc, try std.fs.path.join(alloc, &.{ dir, previous_name }), current, .{ .private = true });
     try store.replace(io, alloc, try std.fs.path.join(alloc, &.{ dir, previous_until_name }), try std.fmt.allocPrint(alloc, "{d}\n", .{now + previous_days * 24 * 60 * 60}), .{});
+    const hex = fresh(io);
+    try store.replace(io, alloc, try std.fs.path.join(alloc, &.{ dir, current_name }), &hex, .{ .private = true });
+}
+
+/// **THE FIRST SECRET**, made once, when a site is set up. Refused
+/// (`error.SecretExists`) when the folder has one already, whatever it holds:
+/// only `rotate` replaces a secret.
+pub fn create(io: Io, alloc: Alloc, dir: []const u8) !void {
+    const path = try std.fs.path.join(alloc, &.{ dir, current_name });
+    if (try store.has(io, alloc, path)) return error.SecretExists;
+    const hex = fresh(io);
+    try store.write(io, alloc, path, &hex, .{ .private = true });
+}
+
+/// 32 random bytes as 64 hex digits.
+fn fresh(io: Io) [64]u8 {
     var b: [32]u8 = undefined;
     io.random(b[0..]);
-    const hex = std.fmt.bytesToHex(b, .lower);
-    try store.replace(io, alloc, try std.fs.path.join(alloc, &.{ dir, current_name }), &hex, .{ .private = true });
+    return std.fmt.bytesToHex(b, .lower);
+}
+
+test "create makes the first secret once, and refuses a second; rotate then replaces it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+
+    try std.testing.expect((try load(io, a, dir)) == null);
+    try create(io, a, dir);
+    const first = (try load(io, a, dir)).?;
+    try std.testing.expectEqual(@as(usize, 64), first.len);
+    try std.testing.expectError(error.SecretExists, create(io, a, dir));
+    try std.testing.expectEqualStrings(first, (try load(io, a, dir)).?);
+
+    try rotate(io, a, dir, 1);
+    const second = (try load(io, a, dir)).?;
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
+    try std.testing.expectEqualStrings(first, (try previous(io, a, dir, now)).?);
 }

@@ -21,7 +21,9 @@ pub const site_secret = @import("site_secret.zig");
 pub const signed_cookie = @import("signed_cookie.zig");
 /// HTML escaping.
 pub const html = @import("html.zig");
-/// Keyed pub/sub for SSE streams, and where a host takes a stream over.
+/// Keyed pub/sub for SSE streams, and where a host takes a stream over. A
+/// request's `Bus` also carries the connection's address (`peer`, for
+/// client_address.resolve).
 pub const bus = @import("bus.zig");
 /// Server-Sent Events: open a stream, push frames, forward a key's blobs,
 /// and where a reconnecting stream resumes.

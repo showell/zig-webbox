@@ -24,9 +24,10 @@
 //!
 //! Synchronization (all io-aware, std.Io primitives — work across the thread
 //! pool the server runs connections on):
-//!   - Bus.mutex guards the subscriber registry. Lock order: bus.mutex → sub.mutex
-//!     (publish takes bus.mutex, then each sub.mutex). close/open take only
-//!     bus.mutex; next() takes only sub.mutex. No cycle, no deadlock.
+//!   - Hub.mutex guards the subscriber registry. Lock order: hub.mutex →
+//!     sub.mutex (publish takes hub.mutex, then each sub.mutex). close/open
+//!     take only hub.mutex; next() takes only sub.mutex. No cycle, no
+//!     deadlock.
 //!   - Each Subscriber has its own mutex (guards the ring) + an atomic `seq`
 //!     futex (the wakeup edge). push() bumps seq + futexWake; next() futexWaits
 //!     on seq with a timeout, so an idle stream still wakes to send a keepalive.
@@ -36,10 +37,11 @@ const Io = std.Io;
 const Alloc = std.mem.Allocator;
 
 /// Subscriber is one open stream's mailbox: a small bounded ring of owned
-/// messages, drained by the stream's handler via `next()`. The handler owns the
-/// Subscriber's lifetime — it calls Bus.open to create it and (via defer)
-/// Bus.close to remove + destroy it. After close removes it from the registry
-/// (under bus.mutex), no publisher can reference it, so destroy is race-free.
+/// messages, drained via `next()` by whoever serves the stream. A handler
+/// opens it (Bus.open) and holds it (`Held`, whose release closes it), until
+/// it keeps it for the host (`Kept`), which then serves it and closes it
+/// (`drop`). After close removes it from the registry (under hub.mutex), no
+/// publisher can reference it, so destroy is race-free.
 pub const Subscriber = struct {
     io: Io,
     /// SERVER-lifetime allocator (named `gpa`): the ring outlives
