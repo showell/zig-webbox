@@ -23,7 +23,7 @@ pub const Cookie = struct {
 
 /// The Set-Cookie header value for a signed `value`.
 pub fn header(c: Cookie, alloc: Alloc, value: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "{s}={s}; Path=/; Max-Age={d}; HttpOnly; SameSite=Lax", .{ c.name, value, c.kind.lifetime_secs });
+    return std.fmt.allocPrint(alloc, "{s}={s}; Path=/; Max-Age={d}; " ++ http.cookie_attributes, .{ c.name, value, c.kind.lifetime_secs });
 }
 
 /// A value that verified: the id it names, when it was signed, and with
@@ -92,7 +92,7 @@ test "signed_cookie: the header carries the name, the value and the lifetime; it
     const c: Cookie = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 100, .skew_secs = 5, .validId = any.id } };
     const h = try header(c, std.testing.allocator, "7.1000.mac");
     defer std.testing.allocator.free(h);
-    try std.testing.expectEqualStrings("device=7.1000.mac; Path=/; Max-Age=100; HttpOnly; SameSite=Lax", h);
+    try std.testing.expectEqualStrings("device=7.1000.mac; Path=/; Max-Age=100; HttpOnly; Secure; SameSite=Lax", h);
     try std.testing.expect(!needsRenewal(c, .{ .id = "7", .issued = 1000, .by = .current }, 1050));
     try std.testing.expect(needsRenewal(c, .{ .id = "7", .issued = 1000, .by = .current }, 1051));
     try std.testing.expect(needsRenewal(c, .{ .id = "7", .issued = 1000, .by = .previous }, 1000));

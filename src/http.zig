@@ -133,6 +133,16 @@ test "namesTag: a list, weak tags and * name it; another tag or a bare value doe
     try std.testing.expect(!namesTag("", "\"ab\""));
 }
 
+/// **WHAT EVERY COOKIE A SITE SETS SAYS ABOUT ITSELF** (metal-vmm QUEUE
+/// 162.2), after its `Path` and `Max-Age`: kept from scripts, sent only over
+/// HTTPS, and not on another site's requests. Behind Caddy the application
+/// sees plain http, and that is fine: `Secure` is for the browser, which
+/// speaks HTTPS to Caddy. On `http://localhost` during development, Chrome
+/// and Firefox treat the page as secure and keep and send the cookie; a
+/// browser that does not (older Safari) drops it, and each page load is a
+/// new visitor there.
+pub const cookie_attributes = "HttpOnly; Secure; SameSite=Lax";
+
 /// cookie returns the value of cookie `name` from any Cookie header, OWNED, or null.
 pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !?[]const u8 {
     var it = req.iterateHeaders();
