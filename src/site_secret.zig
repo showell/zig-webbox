@@ -1,4 +1,4 @@
-//! secret: the site's signing secret, kept as files in a folder (the
+//! site_secret: the site's signing secret, kept as files in a folder (the
 //! application's secrets folder, `auth/`). Part of the `webbox` library.
 //!
 //!   _session_secret                 the secret: at least 32 bytes
@@ -28,12 +28,12 @@ pub fn load(io: Io, alloc: Alloc, dir: []const u8) !?[]const u8 {
 }
 
 /// The secret before the last change, while values signed with it are still
-/// taken (`previous-until`); null past that, or when there is none.
-pub fn previous(io: Io, alloc: Alloc, dir: []const u8) !?[]const u8 {
+/// taken at `now` (Unix seconds; `previous-until`); null past that, or when
+/// there is none.
+pub fn previous(io: Io, alloc: Alloc, dir: []const u8, now: i64) !?[]const u8 {
     const until_path = try std.fs.path.join(alloc, &.{ dir, previous_until_name });
     const raw = (try store.readOrNull(io, alloc, until_path, .limited(64))) orelse return null;
     const until = std.fmt.parseInt(i64, std.mem.trim(u8, raw, " \t\r\n"), 10) catch return null;
-    const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     if (now >= until) return null;
     const path = try std.fs.path.join(alloc, &.{ dir, previous_name });
     const b = (try store.readOrNull(io, alloc, path, .unlimited)) orelse return null;
