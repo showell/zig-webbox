@@ -219,7 +219,8 @@ pub const ChunkedScan = struct {
             if (cp.chunk_len == 0) return trailersEnd(bytes, at);
             // The chunk, then exactly "\r\n" (std's `.rn`).
             const after = std.math.add(u64, at, cp.chunk_len) catch return .malformed;
-            if (after + 2 > bytes.len) return .partial;
+            const with_rn = std.math.add(u64, after, 2) catch return .malformed;
+            if (with_rn > bytes.len) return .partial;
             const n: usize = @intCast(after);
             if (bytes[n] != '\r' or bytes[n + 1] != '\n') return .malformed;
             self.at = n + 2;
@@ -318,6 +319,10 @@ test "chunkedEnd: whole, partial at every cut, trailers, and malformed" {
     // A chunk size near u64's largest neither overflows nor reads past the
     // end: no cap is that large, so it is refused.
     try testing.expectEqual(ChunkedEnd.malformed, chunkedEnd("ffffffffffffffff\r\nab"));
+    // A size whose chunk ends just short of u64's end: the chunk's end fits,
+    // the "\r\n" after it does not (a client's request panicked the kernel).
+    try testing.expectEqual(ChunkedEnd.malformed, chunkedEnd("ffffffffffffffec\r\nab"));
+    try testing.expectEqual(ChunkedEnd.malformed, chunkedEnd("fffffffffffffffd\r\n"));
     try testing.expectEqual(ChunkedEnd.partial, chunkedEnd("fffffff\r\nab"));
 }
 
