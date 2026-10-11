@@ -1,5 +1,5 @@
 //! signed: a value that names an id, signed so that only the site could have
-//! made it. Part of the `gopher` library (gopher.zig): it imports std only.
+//! made it. Part of the `webbox` library (webbox.zig): it imports std only.
 //!
 //!     <id>.<issued>.<mac>     mac = base64url(HMAC-SHA256(secret, label id "\n" issued))
 //!

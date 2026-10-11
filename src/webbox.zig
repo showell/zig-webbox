@@ -1,5 +1,6 @@
-//! **THE `gopher` LIBRARY**: what an application built on gopher imports, as
-//! one module (build.zig's `gopher`; dog-park is the first such application).
+//! **THE `webbox` LIBRARY** (a web server in a box): what an application
+//! built on this server imports, as one module (build.zig's `webbox`;
+//! dog-park is the first such application).
 //!
 //! Its files import std and one another, and nothing else of angry-gopher's:
 //! ops/check_zig holds every file named here to that, so an application gets
