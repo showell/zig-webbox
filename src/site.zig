@@ -66,8 +66,12 @@ pub const Host = struct {
 ///     process allocator) for whatever must live as long as the process;
 ///   - `StartReport`: what its setup did, for the host to say in its log.
 pub fn Site(comptime App: type) type {
-    inline for (.{ "routes", "setup", "StartReport" }) |name| {
-        if (!@hasDecl(App, name)) @compileError("a site's application declares " ++ name ++ " (site.zig, Site)");
+    inline for (.{
+        .{ "routes", "routes(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, bus: *Bus) !void" },
+        .{ "setup", "setup(io: Io, base: std.mem.Allocator, roots: ?Roots) !StartReport" },
+        .{ "StartReport", "StartReport: a struct, what its setup did" },
+    }) |decl| {
+        if (!@hasDecl(App, decl[0])) @compileError("a site's application declares " ++ decl[1] ++ " (site.zig, Site)");
     }
     return struct {
         /// What `start` made, and what the application's setup did.
@@ -89,7 +93,7 @@ pub fn Site(comptime App: type) type {
             if (host.log) |l| host_facts.provideLog(l);
             free_space.reader = switch (host.free_space) {
                 .reader => |r| r,
-                .none_for_a_test => null,
+                .unknown => null,
             };
             client_address.trusted_proxy = host.trusted_proxy;
             return .{ .hub = bus.Hub.init(io, base), .app = app };
@@ -137,7 +141,7 @@ fn settle(b: *Bus, done: anyerror!void) anyerror!?Kept {
 
 /// **WHETHER ANY OF THE ANSWER WENT OUT** (metal-vmm QUEUE 127(b)): the
 /// reader's state cannot say, since reading a body moves it on as answering
-/// does. So the router lends each handler a writer of its own in place of
+/// does. So `route` lends each handler a writer of its own in place of
 /// the connection's, which passes every byte through to it, and notes that
 /// one was written. It buffers as the connection's does (the protocol's
 /// writers format chunk headers in place), and is given back, its buffer

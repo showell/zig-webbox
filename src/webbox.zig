@@ -5,7 +5,8 @@
 //! so an application gets these files and only these.
 
 /// An application made servable: `Site(App)` is everything a host calls
-/// around the application's own route table.
+/// (`start`, then `route` per request) around the application's own setup
+/// and route table; `Host` is what a host supplies.
 pub const site = @import("site.zig");
 /// Request and response helpers: bodies, forms, cookies, embedded files.
 pub const http = @import("http.zig");
