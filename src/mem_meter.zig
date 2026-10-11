@@ -84,7 +84,7 @@ const unset_vtable: Alloc.VTable = .{
     .free = unsetFree,
 };
 
-const unset_msg = "mem_meter: allocation before init() — the host must name the base allocator (server.zig: page_allocator; a kernel: its fixed heap)";
+const unset_msg = "mem_meter: allocation before init() — the host must name the base allocator (a Linux host: linux_host.zig, over page_allocator; a kernel: its fixed heap)";
 
 fn unsetAlloc(_: *anyopaque, _: usize, _: Alignment, _: usize) ?[*]u8 {
     @panic(unset_msg);
