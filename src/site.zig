@@ -182,9 +182,11 @@ test "site: a stream a handler kept and then failed is dropped, and a kept one i
 
 test "site: an application's failure is a 500 that names nothing, a malformed form a 400, and success what it answered" {
     const App = struct {
-        pub fn routes(req: *std.http.Server.Request, _: Io, _: std.mem.Allocator, _: *Bus) !void {
-            if (std.mem.eql(u8, req.head.target, "/fails")) return error.SomethingBroke;
-            if (std.mem.eql(u8, req.head.target, "/form")) return error.MalformedForm;
+        pub fn routes(req: *std.http.Server.Request, _: Io, alloc: std.mem.Allocator, _: *Bus) !void {
+            const target = try @import("http.zig").target(req, alloc);
+            defer alloc.free(target);
+            if (std.mem.eql(u8, target, "/fails")) return error.SomethingBroke;
+            if (std.mem.eql(u8, target, "/form")) return error.MalformedForm;
             try req.respond("hello", .{ .keep_alive = false });
         }
     };
