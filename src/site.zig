@@ -1,8 +1,23 @@
 //! site: an application made servable. Part of the `webbox` library.
 //!
-//! `Site(App)` is everything a host calls around an application's own route
-//! table (`App.routes`): the serving that is the same for every application,
-//! so none of them writes it again.
+//! `Site(App)` is everything a host calls, around an application's own route
+//! table and its own one-time setup: the serving that is the same for every
+//! application, so none of them writes it again. The host contract, three
+//! calls:
+//!
+//!   1. `mem_meter.init(base)`  the process-lifetime allocator, before
+//!                              anything else (a host builds its own I/O and
+//!                              heaps on it). An allocation before it panics.
+//!   2. `start(io, Host)`       once, before the first request: everything
+//!                              the host supplies, in one `Host`, set in the
+//!                              one right order around the application's
+//!                              `setup`. Answers the Hub and what the
+//!                              application's setup did.
+//!   3. per request, `route`,   then serve the stream it answered, if any:
+//!                              `bus.serveKept` blocks until the client goes
+//!                              away; `bus.nextFrame` hands over the next
+//!                              event, for a host with one loop. Either way
+//!                              `bus.drop` ends it.
 //!
 //! **THE KEPT STREAM IS ITS ANSWER** (metal-vmm QUEUE 157(a)): `route` answers
 //! the stream a handler kept, which the host must serve or drop
@@ -15,11 +30,71 @@ const Io = std.Io;
 const bus = @import("bus.zig");
 const Bus = bus.Bus;
 const Kept = bus.Kept;
+const mem_meter = @import("mem_meter.zig");
+const store = @import("store.zig");
+const host_facts = @import("host_facts.zig");
+const free_space = @import("free_space.zig");
+const client_address = @import("client_address.zig");
 
-/// `App` declares `routes(req, io, alloc, bus) !void`: its route table.
+/// Where an application's data (`data_dir`) and its secrets (`auth_dir`)
+/// live, as the host spells them.
+pub const Roots = struct {
+    data_dir: []const u8,
+    auth_dir: []const u8,
+};
+
+/// Everything a host supplies, once, as it starts.
+pub const Host = struct {
+    /// Where the data and the secrets live; null is the application's
+    /// development defaults, right for a checkout and nothing else.
+    roots: ?Roots,
+    /// How the data volume's free space is read.
+    free_space: free_space.FreeSpace,
+    /// The reverse proxy whose X-Forwarded-For is believed, as text; null:
+    /// every request is the address it came from.
+    trusted_proxy: ?[]const u8,
+    /// The host's own facts and log, for a page that shows them; null: that
+    /// page shows the application's half only.
+    facts: ?host_facts.Report = null,
+    log: ?host_facts.Log = null,
+};
+
+/// `App` declares, each required:
+///   - `routes(req, io, alloc, bus) !void`: its route table;
+///   - `setup(io, base, roots: ?Roots) !StartReport`: what it does once,
+///     before its first request, in its own order, with `base` (the metered
+///     process allocator) for whatever must live as long as the process;
+///   - `StartReport`: what its setup did, for the host to say in its log.
 pub fn Site(comptime App: type) type {
-    if (!@hasDecl(App, "routes")) @compileError("a site's application declares routes(req, io, alloc, bus) !void: its route table");
+    inline for (.{ "routes", "setup", "StartReport" }) |name| {
+        if (!@hasDecl(App, name)) @compileError("a site's application declares " ++ name ++ " (site.zig, Site)");
+    }
     return struct {
+        /// What `start` made, and what the application's setup did.
+        pub const Started = struct {
+            /// The registry live streams publish through, one per process.
+            hub: bus.Hub,
+            app: App.StartReport,
+        };
+
+        /// **THE SETUP, ONCE, BEFORE THE FIRST REQUEST**, in the one right
+        /// order: the store pointed at the host's roots, the application's
+        /// own setup, then the host's facts, how its free space is read, the
+        /// trusted proxy, and the Hub.
+        pub fn start(io: Io, host: Host) !Started {
+            const base = mem_meter.base();
+            if (host.roots) |r| store.setBases(try base.dupe(u8, r.data_dir), try base.dupe(u8, r.auth_dir));
+            const app = try App.setup(io, base, host.roots);
+            if (host.facts) |f| host_facts.provide(f);
+            if (host.log) |l| host_facts.provideLog(l);
+            free_space.reader = switch (host.free_space) {
+                .reader => |r| r,
+                .none_for_a_test => null,
+            };
+            client_address.trusted_proxy = host.trusted_proxy;
+            return .{ .hub = bus.Hub.init(io, base), .app = app };
+        }
+
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
             var sent: Sent = undefined;
             // Small, on the stack: only a chunk's header is formatted in place, and
@@ -182,6 +257,10 @@ test "site: a stream a handler kept and then failed is dropped, and a kept one i
 
 test "site: an application's failure is a 500 that names nothing, a malformed form a 400, and success what it answered" {
     const App = struct {
+        pub const StartReport = struct {};
+        pub fn setup(_: Io, _: std.mem.Allocator, _: ?Roots) !StartReport {
+            return .{};
+        }
         pub fn routes(req: *std.http.Server.Request, _: Io, alloc: std.mem.Allocator, _: *Bus) !void {
             const target = try @import("http.zig").target(req, alloc);
             defer alloc.free(target);

@@ -13,6 +13,14 @@ pub const Space = struct { free: u64, total: u64 };
 /// fullness is no fact about the server).
 pub var reader: ?*const fn () ?Space = null;
 
+/// How a host says the free space is read, as it starts: its reader, or none
+/// (a test whose data is on a development disk, whose fullness is no fact
+/// about the server).
+pub const FreeSpace = union(enum) {
+    reader: *const fn () ?Space,
+    none_for_a_test,
+};
+
 /// The free space now, or null when the host cannot say.
 pub fn read() ?Space {
     const r = reader orelse return null;
