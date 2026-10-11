@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const body_rule = @import("body.zig");
 const edge = @import("edge.zig");
 
 pub const html_ct = std.http.Header{ .name = "content-type", .value = "text/html; charset=utf-8" };
@@ -287,8 +288,9 @@ pub fn methodNotAllowed(req: *std.http.Server.Request) !void {
 
 /// readLimitedBody reads the request body capped at `max` bytes. On success
 /// returns the body (alloc-owned). On overflow it responds 413 and returns null;
-/// on any other read error it responds 400 and returns null — so callers just
-/// `return` when the result is null.
+/// past the host's deadline for a body read in the turn, 408 (body.zig); on
+/// any other read error 400; and null each time, so callers just `return`
+/// when the result is null.
 ///
 /// `max + 1`: allocRemaining errors when the limit is *reached* (≥), so to allow
 /// a body of exactly `max` and reject only `max + 1` we pass `max + 1`.
@@ -305,17 +307,37 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
         return try alloc.alloc(u8, 0);
     }
     var buf: [4 * 1024]u8 = undefined;
+    const declared = req.head.content_length;
     const reader = try req.readerExpectContinue(&buf);
-    return reader.allocRemaining(alloc, .limited(max + 1)) catch |e| switch (e) {
+    const got = reader.allocRemaining(alloc, .limited(max + 1)) catch |e| switch (e) {
         error.StreamTooLong => {
             try edge.reject(req, .body_too_large, "request body too large\n");
             return null;
         },
         else => {
+            // The host ended the read at the turn's deadline (body.zig).
+            if (body_rule.lateInTurn()) {
+                try edge.reject(req, .body_too_slow, "request body too slow\n");
+                return null;
+            }
             try edge.reject(req, .body_unreadable, "read body\n");
             return null;
         },
     };
+    // **A BODY CUT SHORT IS NOT A BODY** (metal-vmm QUEUE 166): std's reader
+    // ends a Content-Length body at the connection's end, short, without a
+    // word, so a client that hangs up halfway (or a host that ends the read
+    // at its deadline) would hand the handler half a body as the whole.
+    if (declared) |n| if (got.len != n) {
+        alloc.free(got);
+        if (body_rule.lateInTurn()) {
+            try edge.reject(req, .body_too_slow, "request body too slow\n");
+        } else {
+            try edge.reject(req, .body_unreadable, "read body\n");
+        }
+        return null;
+    };
+    return got;
 }
 
 /// redirect sends a 303 See Other to `location`.
@@ -401,6 +423,20 @@ test "readLimitedBody: a body of exactly the limit is read, one byte more is ref
     try testing.expectEqualStrings("b" ** max, (try readBodyOf(a, chunked ++ "8\r\n" ++ "b" ** max ++ "\r\n0\r\n\r\n", max, &status)).?);
     try testing.expect(try readBodyOf(a, chunked ++ "9\r\n" ++ "b" ** (max + 1) ++ "\r\n0\r\n\r\n", max, &status) == null);
     try testing.expectEqualStrings("413", status);
+}
+
+test "readLimitedBody: a Content-Length body cut short by the connection's end is refused 400, and 408 past the turn's deadline (metal-vmm QUEUE 166)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var status: []const u8 = "";
+    const short = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\nbbbb";
+    try testing.expect(try readBodyOf(a, short, 64, &status) == null);
+    try testing.expectEqualStrings("400", status);
+    body_rule.late_in_turn.store(true, .release);
+    defer body_rule.late_in_turn.store(false, .release);
+    try testing.expect(try readBodyOf(a, short, 64, &status) == null);
+    try testing.expectEqualStrings("408", status);
 }
 
 /// `raw` received through a read buffer of `head_bytes`, as a host reads it.

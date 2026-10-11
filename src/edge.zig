@@ -39,7 +39,9 @@ pub const RejectKind = enum {
     header_too_large, // request head exceeded the host's read buffer
     body_too_large, // request body (or an uploaded image) exceeded its cap
     body_unreadable, // body framing was malformed / unreadable
-    body_too_slow, // a body not whole within the host's deadline (linux_host.zig)
+    body_too_slow, // a body not whole within the host's deadline (body.zig)
+    body_framed_twice, // both Content-Length and Transfer-Encoding (RFC 9112 §6.1)
+    no_deadline, // the host could not arm a body's deadline, so did not read it
     malformed_markdown, // hostile / absurdly over-formatted markdown
     malformed_multipart, // a multipart upload we couldn't parse a file out of
 };
@@ -61,7 +63,8 @@ pub fn statusFor(kind: RejectKind) std.http.Status {
         .header_too_large => .request_header_fields_too_large, // 431
         .body_too_large => .payload_too_large, // 413
         .body_too_slow => .request_timeout, // 408
-        .body_unreadable, .malformed_markdown, .malformed_multipart => .bad_request, // 400
+        .body_unreadable, .body_framed_twice, .malformed_markdown, .malformed_multipart => .bad_request, // 400
+        .no_deadline => .service_unavailable, // 503
     };
 }
 

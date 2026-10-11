@@ -66,12 +66,16 @@ pub const Host = struct {
 ///   - `setup(io, base, roots: ?Roots) !StartReport`: what it does once,
 ///     before its first request, in its own order, with `base` (the metered
 ///     process allocator) for whatever must live as long as the process;
-///   - `StartReport`: what its setup did, for the host to say in its log.
+///   - `StartReport`: what its setup did, for the host to say in its log;
+///   - `bodyLimit(path) u64`: the most any handler on that path reads of a
+///     request's body, which the host reads it by (body.zig: before the turn
+///     or in it, and how long it may take).
 pub fn Site(comptime App: type) type {
     inline for (.{
         .{ "routes", "routes(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, bus: *Bus) !void" },
         .{ "setup", "setup(io: Io, base: std.mem.Allocator, roots: ?Roots) !StartReport" },
         .{ "StartReport", "StartReport: a struct, what its setup did" },
+        .{ "bodyLimit", "bodyLimit(path: []const u8) u64: the most any handler on that path reads of a body (body.zig)" },
     }) |decl| {
         if (!@hasDecl(App, decl[0])) @compileError("a site's application declares " ++ decl[1] ++ " (site.zig, Site)");
     }
@@ -101,6 +105,13 @@ pub fn Site(comptime App: type) type {
             return .{ .hub = bus.Hub.init(io, base), .app = app };
         }
 
+        /// The route's cap on a body, from the head's target (its path; the
+        /// query is no part of it): what a host plans the body's read by
+        /// (body.zig's `plan`).
+        pub fn bodyLimit(target: []const u8) u64 {
+            return App.bodyLimit(pathOf(target));
+        }
+
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
             var sent: Sent = undefined;
             // Small, on the stack: only a chunk's header is formatted in place, and
@@ -126,6 +137,11 @@ pub fn Site(comptime App: type) type {
             };
         }
     };
+}
+
+fn pathOf(target: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, target, '?')) |q| return target[0..q];
+    return target;
 }
 
 /// What `route` hands the host: the kept stream on success, taken off the
@@ -266,6 +282,9 @@ test "site: an application's failure is a 500 that names nothing, a malformed fo
         pub const StartReport = struct {};
         pub fn setup(_: Io, _: std.mem.Allocator, _: ?Roots) !StartReport {
             return .{};
+        }
+        pub fn bodyLimit(_: []const u8) u64 {
+            return 0;
         }
         pub fn routes(req: *std.http.Server.Request, _: Io, alloc: std.mem.Allocator, _: *Bus) !void {
             const target = try @import("http.zig").target(req, alloc);

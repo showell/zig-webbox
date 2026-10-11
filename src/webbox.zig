@@ -8,6 +8,9 @@
 /// (`start`, then `route` per request) around the application's own setup
 /// and route table; `Host` is what a host supplies.
 pub const site = @import("site.zig");
+/// When a request's body is read (before the turn or in it) and how long it
+/// may take: the one rule every host reads it by.
+pub const body = @import("body.zig");
 /// Request and response helpers: bodies, forms, cookies, embedded files.
 pub const http = @import("http.zig");
 /// The one policy for incoming data at the server's edges.
@@ -57,6 +60,7 @@ pub const linux_config = @import("linux_config.zig");
 
 test {
     _ = site;
+    _ = body;
     _ = http;
     _ = edge;
     _ = signed;
