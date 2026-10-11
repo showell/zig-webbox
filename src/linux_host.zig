@@ -1,8 +1,9 @@
-//! linux_host: a site served as a Linux process. Part of the `webbox` library,
-//! and host-only: sockets, a thread pool, the environment, /proc. Nothing the
-//! site reaches imports it (the portability lint holds that); an application
-//! calls it from its `main`, and a machine with no operating system replaces
-//! all of it while calling the same `start` and `route`.
+//! linux_host: a site served as a Linux process. Part of the `webbox`
+//! library's Linux half (`webbox_linux`): sockets, a thread pool, the
+//! environment, /proc. Nothing the site reaches imports it (the portability
+//! lint holds that); an application calls it from its `main`, and a machine
+//! with no operating system replaces all of it while calling the same `start`
+//! and `route`. It reaches the portable half as the `webbox` module.
 //!
 //! `Server(S).run` is the whole of it, in one order: the allocator (the
 //! memory meter over the page allocator), the environment, the config file,
@@ -22,14 +23,14 @@
 const std = @import("std");
 const Io = std.Io;
 const net = std.Io.net;
-const mem_meter = @import("mem_meter.zig");
+const mem_meter = @import("webbox").mem_meter;
 const bind = @import("bind.zig");
-const bus = @import("bus.zig");
-const edge = @import("edge.zig");
-const http = @import("http.zig");
-const body_rule = @import("body.zig");
-const host_facts = @import("host_facts.zig");
-const free_space = @import("free_space.zig");
+const bus = @import("webbox").bus;
+const edge = @import("webbox").edge;
+const http = @import("webbox").http;
+const body_rule = @import("webbox").body;
+const host_facts = @import("webbox").host_facts;
+const free_space = @import("webbox").free_space;
 const linux_config = @import("linux_config.zig");
 
 /// The environment variables a host reads, named whole by the application,

@@ -1,6 +1,7 @@
 //! bind: the address a Linux host listens on, from its bind setting (the
 //! application names the variable; angry-gopher's is GOPHER_BIND). Part of
-//! the `webbox` library, and host-only: it names a socket address.
+//! the `webbox` library's Linux half (`webbox_linux`): it names a socket
+//! address.
 //!
 //! The default is every interface. With `127.0.0.1` the server answers on
 //! loopback only, so nothing outside the machine reaches it.
