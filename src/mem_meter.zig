@@ -51,13 +51,26 @@ pub fn init(child: Alloc) Alloc {
     return base();
 }
 
-/// replace swaps the child and answers the previous one, so a test can point the
-/// meter somewhere and put it back: `const prev = replace(x); defer _ = replace(prev);`.
+/// replace swaps the child and answers the previous one.
 pub fn replace(child: Alloc) Alloc {
     const prev = meter.child;
     meter.child = child;
     return prev;
 }
+
+/// **FOR A TEST: THE METER ON `child`**, and a handle to `defer` back
+/// (`defer meter.restore()`; metal-vmm QUEUE 157(e)), where each test kept
+/// the previous child and put it back by hand.
+pub fn useForTest(child: Alloc) Swapped {
+    return .{ .prev = replace(child) };
+}
+
+pub const Swapped = struct {
+    prev: Alloc,
+    pub fn restore(self: Swapped) void {
+        _ = replace(self.prev);
+    }
+};
 
 /// unset is the child before a host names one. Every entry point panics with the
 /// same message, because reaching any of them means the host skipped init().
