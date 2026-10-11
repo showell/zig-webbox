@@ -164,8 +164,11 @@ pub fn Server(comptime S: type) type {
                     try neverRead(req, arena);
                     return null;
                 };
-                slot.* = takeSlot(io, body_rule.keyOf(who), progress) orelse
-                    return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" };
+                slot.* = switch (takeSlot(io, body_rule.keyOf(who), progress, nextAsk(io))) {
+                    .slot => |i| i,
+                    .busy => return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" },
+                    .replaced => return .{ .kind = .upload_replaced, .msg = "a newer upload took this one's place\n" },
+                };
             }
             const began = Io.Clock.now(.awake, io);
             const length = req.head.content_length orelse 0;
@@ -446,6 +449,20 @@ fn neverRead(req: *std.http.Server.Request, arena: std.mem.Allocator) !void {
 /// connections take and give back from their own tasks.
 var slots: body_rule.Slots = .{};
 var slot_readers: [body_rule.upload_slots]?*Progress = @splat(null);
+/// When each slot's upload asked for it, in order (`nextAsk`): of a human's
+/// uploads, the one that asked last is the retry (metal-vmm QUEUE 171's
+/// simulator: two retries waiting took the slot from each other).
+var slot_asked: [body_rule.upload_slots]u64 = @splat(0);
+var asks: u64 = 0;
+
+fn nextAsk(io: Io) u64 {
+    slots_lock.lockUncancelable(io);
+    defer slots_lock.unlock(io);
+    asks += 1;
+    return asks;
+}
+
+const Taken = union(enum) { slot: usize, busy, replaced };
 var slots_lock: Io.Mutex = .init;
 
 /// How long an uploader waits for a slot; a test shortens it.
@@ -456,23 +473,34 @@ pub var slot_wait_for_test_ms: ?u64 = null;
 /// TAKES OVER THEIR OLD ONE** (170.1): the page uploads one at a time, so a
 /// second is a retry, its first most likely a dropped phone's; the first is
 /// ended (409), its slot given back, and taken here.
-fn takeSlot(io: Io, who: u64, progress: *Progress) ?usize {
+fn takeSlot(io: Io, who: u64, progress: *Progress, asked: u64) Taken {
     const most = slot_wait_for_test_ms orelse body_rule.slot_wait_ms;
     var waited: u64 = 0;
     while (true) : (waited += 50) {
         slots_lock.lockUncancelable(io);
         const taken = slots.take(who);
         switch (taken) {
-            .slot => |i| slot_readers[i] = progress,
-            .human_has_one => if (slots.heldBy(who)) |i| if (slot_readers[i]) |old| old.end(.replaced),
+            .slot => |i| {
+                slot_readers[i] = progress;
+                slot_asked[i] = asked;
+            },
+            // A newer upload of theirs holds the slot: this is the stale
+            // retry, told 409; an older one there is taken over.
+            .human_has_one => if (slots.heldBy(who)) |i| {
+                if (slot_asked[i] > asked) {
+                    slots_lock.unlock(io);
+                    return .replaced;
+                }
+                if (slot_readers[i]) |old| old.end(.replaced);
+            },
             .all_busy => {},
         }
         slots_lock.unlock(io);
         switch (taken) {
-            .slot => |i| return i,
-            .all_busy, .human_has_one => if (waited >= most) return null,
+            .slot => |i| return .{ .slot = i },
+            .all_busy, .human_has_one => if (waited >= most) return .busy,
         }
-        sleepMs(io, 50) catch return null;
+        sleepMs(io, 50) catch return .busy;
     }
 }
 
@@ -987,6 +1015,31 @@ test "linux_host: a human's new upload takes over their stalled one: the old is 
     try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
     try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
     try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+}
+
+test "linux_host: a human's older retry, still waiting, never takes over their newest upload: it is told 409 (metal-vmm QUEUE 171)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    const ann = body_rule.keyOf("ann");
+    // The older retry asked first; the newest then took the slot.
+    const older = nextAsk(io);
+    const peer = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const ours = try bench.listener.accept(io);
+    defer ours.close(io);
+    var newest: Progress = .{ .stream = ours, .io = io };
+    const held = switch (takeSlot(io, ann, &newest, nextAsk(io))) {
+        .slot => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer giveBackSlot(io, held);
+    slot_wait_for_test_ms = 100;
+    defer slot_wait_for_test_ms = null;
+    var waiting: Progress = .{ .stream = ours, .io = io };
+    try std.testing.expect(takeSlot(io, ann, &waiting, older) == .replaced);
+    try std.testing.expectEqual(Progress.Ended.nothing, newest.ended_by.load(.acquire));
 }
 
 test "linux_host: an upload with no byte for the stall time gives its slot back, a 408 (metal-vmm QUEUE 170.1)" {
