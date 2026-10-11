@@ -50,6 +50,47 @@ pub fn target(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const 
     return alloc.dupe(u8, req.head.target);
 }
 
+/// **AN EMBEDDED FILE THE BROWSER KEEPS, AND ASKS ABOUT ON EACH USE** (metal-vmm
+/// QUEUE 158): `Cache-Control: no-cache` and an `ETag` of its bytes, and a
+/// request whose `If-None-Match` names that tag is answered 304 with no body.
+/// A changed file is a new tag at the next build, so a browser has it on its
+/// next load and a page names its scripts with no version. The tag is hashed
+/// per request: at compile time, elm.js's 396 KB alone cost two minutes.
+pub fn serveEmbedded(req: *std.http.Server.Request, body: []const u8, content_type: std.http.Header) !void {
+    var buf: [18]u8 = undefined;
+    const tag = std.fmt.bufPrint(&buf, "\"{x:0>16}\"", .{std.hash.Wyhash.hash(0, body)}) catch unreachable;
+    const etag = std.http.Header{ .name = "etag", .value = tag };
+    const no_cache = std.http.Header{ .name = "cache-control", .value = "no-cache" };
+    var it = req.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "if-none-match") and namesTag(h.value, tag))
+            return req.respond("", .{ .status = .not_modified, .extra_headers = &.{ etag, no_cache } });
+    }
+    return req.respond(body, .{ .extra_headers = &.{ content_type, etag, no_cache } });
+}
+
+/// Whether an `If-None-Match` value names `tag`: a list of tags, each
+/// possibly weak (`W/`), or `*` (RFC 9110 §13.1.2).
+fn namesTag(if_none_match: []const u8, tag: []const u8) bool {
+    var each = std.mem.splitScalar(u8, if_none_match, ',');
+    while (each.next()) |raw| {
+        const one = std.mem.trim(u8, raw, " \t");
+        if (std.mem.eql(u8, one, "*")) return true;
+        const strong = if (std.mem.startsWith(u8, one, "W/")) one[2..] else one;
+        if (std.mem.eql(u8, strong, tag)) return true;
+    }
+    return false;
+}
+
+test "namesTag: a list, weak tags and * name it; another tag or a bare value does not" {
+    try std.testing.expect(namesTag("\"ab\"", "\"ab\""));
+    try std.testing.expect(namesTag("\"x\", W/\"ab\"", "\"ab\""));
+    try std.testing.expect(namesTag("*", "\"ab\""));
+    try std.testing.expect(!namesTag("\"abc\"", "\"ab\""));
+    try std.testing.expect(!namesTag("ab", "\"ab\""));
+    try std.testing.expect(!namesTag("", "\"ab\""));
+}
+
 /// cookie returns the value of cookie `name` from any Cookie header, OWNED, or null.
 pub fn cookie(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8) !?[]const u8 {
     var it = req.iterateHeaders();
