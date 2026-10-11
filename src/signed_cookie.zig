@@ -82,7 +82,8 @@ pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secr
     var found: Found = .nothing_yet;
     for (values) |value| switch (verifyEither(c, current, prev, value, now)) {
         .no => {},
-        .yes => |v| switch (found) {
+        // A legacy-named value signed after the move is a plant: not read.
+        .yes => |v| if (named.legacy and v.issued >= http.legacy_issued_before_unix) {} else switch (found) {
             .nothing_yet => found = .{ .one = v },
             .one => return .{ .invalid = .more_than_one_verifies },
         },

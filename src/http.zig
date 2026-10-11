@@ -171,6 +171,14 @@ pub const Named = struct { values: CookieValues, legacy: bool };
 /// one at all is a door left open; until then a visitor's next GET moves it.
 pub const legacy_names_until_unix: i64 = 1_794_700_800;
 
+/// **A LEGACY COOKIE ISSUED AFTER THIS IS A PLANT** (170.8's cold review): the
+/// site issues only `__Host-` names from its move on, so a legacy-named value
+/// signed later came from somewhere else (a sibling subdomain), and is not
+/// read, nor moved to the new name (which would outlive the end date). Set
+/// to the day the move deploys: 2026-10-12. A value issued after it, before
+/// the deploy, is read as no one (its visitor signs in again).
+pub const legacy_issued_before_unix: i64 = 1_791_763_200;
+
 pub fn cookieOrLegacy(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8, legacy: []const u8, now_unix: i64) !Named {
     const current = try cookie(req, alloc, name);
     if (current != .none or now_unix >= legacy_names_until_unix) return .{ .values = current, .legacy = false };
@@ -178,9 +186,13 @@ pub fn cookieOrLegacy(req: *std.http.Server.Request, alloc: std.mem.Allocator, n
 }
 
 /// The Set-Cookie that clears a legacy-named cookie (its old name, its old
-/// path), sent with the answer that moves it.
+/// path), sent with the answer that moves it. **NOT SECURE** (170.8's cold
+/// review): over plain http a browser refuses a Set-Cookie that says Secure,
+/// so a clear that said it would be dropped with the move, and the legacy
+/// cookie (set before 162.2, without Secure) would 303 for ever. A clear
+/// carries no value, and still works from HTTPS.
 pub fn clearCookie(comptime name: []const u8) []const u8 {
-    return name ++ "=; Path=/; Max-Age=0; " ++ cookie_attributes;
+    return name ++ "=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax";
 }
 
 /// Every value of cookie `name`, from every Cookie header.

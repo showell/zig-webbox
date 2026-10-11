@@ -146,7 +146,7 @@ pub fn Server(comptime S: type) type {
         /// rule (body.zig), or the refusal to answer instead. An upload is
         /// read once its uploader is known (a stranger's never) and holds a
         /// slot; a small one is charged to the small budget as it arrives.
-        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, stream: net.Stream, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
+        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, progress: *Progress, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
             const cap = S.bodyLimit(try http.target(req, arena));
             const read: body_rule.Read, const upload = switch (body_rule.plan(&req.head, cap)) {
                 .none => return null,
@@ -159,18 +159,20 @@ pub fn Server(comptime S: type) type {
                 .small => |r| .{ r, false },
                 .upload => |r| .{ r, true },
             };
-            var progress: Progress = .{ .stream = stream, .io = io };
             if (upload) {
                 const who = (try S.uploader(req, io, arena)) orelse {
                     try neverRead(req, arena);
                     return null;
                 };
-                slot.* = takeSlot(io, body_rule.keyOf(who), &progress) orelse
+                slot.* = takeSlot(io, body_rule.keyOf(who), progress) orelse
                     return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" };
             }
             const began = Io.Clock.now(.awake, io);
             const length = req.head.content_length orelse 0;
-            const got = try readWhole(io, arena, req, read, upload, &progress, charged);
+            const got = try readWhole(io, arena, req, read, upload, progress, charged);
+            // Read: nothing left to take over (a newer upload now waits for
+            // this one's slot, which comes back when its request is done).
+            if (slot.*) |i| readDone(io, i);
             if (upload) {
                 // **THE LOG SAYS AN UPLOAD'S SIZE AND ITS TIME** (169),
                 // whole or not, so a slow link is read, not inferred.
@@ -240,6 +242,10 @@ pub fn Server(comptime S: type) type {
             // once its uploader is known and has a slot, within five
             // minutes and never stalled for long. A stranger's upload is
             // never read, and its route refuses it.
+            // **THE READ'S STATE LIVES AS LONG AS THE CONNECTION** (170's
+            // cold review): a slot's reader is named by a pointer to it, and
+            // the slot is given back only when the request is done.
+            var progress: Progress = .{ .stream = stream, .io = io };
             var slot: ?usize = null;
             defer if (slot) |i| giveBackSlot(io, i);
             var held_body: ?[]u8 = null;
@@ -247,8 +253,8 @@ pub fn Server(comptime S: type) type {
             defer unchargeSmall(io, charged);
             // **AN ERROR BEFORE THE TURN IS ANSWERED** (170.6): a 500, as
             // one in the turn is, never a close with no answer.
-            const refusal = bodyBeforeTurn(io, arena.allocator(), &req, stream, &slot, &held_body, &charged) catch |e| {
-                std.debug.print("{s}: before the turn: {s}\n", .{ host_name, @errorName(e) });
+            const refusal = bodyBeforeTurn(io, arena.allocator(), &req, &progress, &slot, &held_body, &charged) catch |e| {
+                if (!@import("builtin").is_test) std.debug.print("{s}: before the turn: {s}\n", .{ host_name, @errorName(e) });
                 req.head.keep_alive = false;
                 req.head.expect = null;
                 req.respond("The server failed before it could answer.\n", .{ .status = .internal_server_error, .keep_alive = false }) catch {};
@@ -470,6 +476,12 @@ fn takeSlot(io: Io, who: u64, progress: *Progress) ?usize {
     }
 }
 
+fn readDone(io: Io, i: usize) void {
+    slots_lock.lockUncancelable(io);
+    defer slots_lock.unlock(io);
+    slot_readers[i] = null;
+}
+
 fn giveBackSlot(io: Io, i: usize) void {
     slots_lock.lockUncancelable(io);
     defer slots_lock.unlock(io);
@@ -519,7 +531,9 @@ const Whole = struct {
         // A Content-Length body has its memory once, exactly; a chunked one
         // (small only) grows as it comes.
         var list: std.ArrayList(u8) = .empty;
-        if (declared) |n| try list.ensureTotalCapacityPrecise(arena, @intCast(n));
+        // An upload's exact length at once (its slot is its bound); a small
+        // body grows as it comes, a silent one holding nothing (170.3).
+        if (!self.small) if (declared) |n| try list.ensureTotalCapacityPrecise(arena, @intCast(n));
         var chunk: [4096]u8 = undefined;
         while (true) {
             const room = if (declared) |n| @min(chunk.len, n - list.items.len) else chunk.len;
