@@ -1,0 +1,19 @@
+//! webbox_linux: a webbox site served as a Linux process. The `webbox`
+//! library's host-only half, its own module, so the portable half (the
+//! `webbox` module, all a site's code imports) never carries it: a site's
+//! Linux `main` imports this, and nothing else does (tools/lint_portable.py).
+//! Its files reach the portable half as the `webbox` module, never by path.
+
+/// `Server(site).run`: the whole Linux host, from the allocator to the
+/// accept loop.
+pub const linux_host = @import("linux_host.zig");
+/// The address a Linux host listens on.
+pub const bind = @import("bind.zig");
+/// Where a Linux host's data is: a config file a variable names.
+pub const linux_config = @import("linux_config.zig");
+
+test {
+    _ = linux_host;
+    _ = bind;
+    _ = linux_config;
+}

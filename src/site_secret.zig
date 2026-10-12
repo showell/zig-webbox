@@ -11,7 +11,7 @@
 //! seeded on disk by hand, before `create`); only `rotate` replaces one.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 const store = @import("store.zig");
 

@@ -4,7 +4,7 @@
 //! sse.zig's). They keep an application's handlers terse.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const edge = @import("edge.zig");
 
 pub const html_ct = std.http.Header{ .name = "content-type", .value = "text/html; charset=utf-8" };

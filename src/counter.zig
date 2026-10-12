@@ -9,7 +9,7 @@
 //! ever unique-per-file, never dense.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 const store = @import("store.zig");
 

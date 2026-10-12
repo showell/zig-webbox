@@ -1,8 +1,9 @@
-//! linux_host: a site served as a Linux process. Part of the `webbox` library,
-//! and host-only: sockets, a thread pool, the environment, /proc. Nothing the
-//! site reaches imports it (the portability lint holds that); an application
-//! calls it from its `main`, and a machine with no operating system replaces
-//! all of it while calling the same `start` and `route`.
+//! linux_host: a site served as a Linux process. Part of the `webbox`
+//! library's Linux half (`webbox_linux`): sockets, a thread pool, the
+//! environment, /proc. Nothing the site reaches imports it (the portability
+//! lint holds that); an application calls it from its `main`, and a machine
+//! with no operating system replaces all of it while calling the same `start`
+//! and `route`. It reaches the portable half as the `webbox` module.
 //!
 //! `Server(S).run` is the whole of it, in one order: the allocator (the
 //! memory meter over the page allocator), the environment, the config file,
@@ -20,16 +21,16 @@
 //! (keep-alive off): see handleConn.
 
 const std = @import("std");
-const Io = std.Io;
+const Io = @import("host_io").Io;
 const net = std.Io.net;
-const mem_meter = @import("mem_meter.zig");
+const mem_meter = @import("webbox").mem_meter;
 const bind = @import("bind.zig");
-const bus = @import("bus.zig");
-const edge = @import("edge.zig");
-const http = @import("http.zig");
-const body_rule = @import("body.zig");
-const host_facts = @import("host_facts.zig");
-const free_space = @import("free_space.zig");
+const bus = @import("webbox").bus;
+const edge = @import("webbox").edge;
+const http = @import("webbox").http;
+const body_rule = @import("webbox").body;
+const host_facts = @import("webbox").host_facts;
+const free_space = @import("webbox").free_space;
 const linux_config = @import("linux_config.zig");
 
 /// The environment variables a host reads, named whole by the application,
@@ -809,7 +810,7 @@ const TestSite = struct {
             var held = b.hold(try b.open("test-stream"));
             defer held.release();
             var hbuf: [256]u8 = undefined;
-            var body = try @import("sse.zig").respond(req, &hbuf);
+            var body = try @import("webbox").sse.respond(req, &hbuf);
             try body.flush();
             held.keep(streamFrame, "");
             const kept = b.kept;
@@ -1116,7 +1117,10 @@ test "linux_host: a stream kept after its request's body gives the body's charge
     defer bench.deinit();
     const io = bench.threaded.io();
     var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 100);
-    // The stream's head came: the route has returned, the stream is open.
+    defer c.end(io);
+    // The stream's head came: the stream is open. The route flushes that
+    // head before it returns, so the charge comes back a moment after: it
+    // is waited for, while the stream stays open.
     var buf: [512]u8 = undefined;
     var r = c.stream.reader(io, &buf);
     var head: std.ArrayList(u8) = .empty;
@@ -1126,8 +1130,11 @@ test "linux_host: a stream kept after its request's body gives the body's charge
         try r.interface.readSliceAll(&one);
         try head.append(std.testing.allocator, one[0]);
     }
+    var waited: u32 = 0;
+    while (small_held != 0 and waited < 2000) : (waited += 10) {
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+    }
     try std.testing.expectEqual(@as(u64, 0), small_held);
-    c.end(io);
 }
 
 test "linux_host: an upload that trickles, a few bytes at a time, is slow, not stalled: a stall is no byte, not no 4 KiB (metal-vmm QUEUE 176.7)" {

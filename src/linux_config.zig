@@ -1,5 +1,6 @@
 //! linux_config: how a Linux host learns where its data is. Part of the
-//! `webbox` library, and host-only: it reads the environment and a file.
+//! `webbox` library's Linux half (`webbox_linux`): it reads the environment
+//! and a file.
 //!
 //! The application names an environment variable (angry-gopher's is
 //! GOPHER_CONFIG) whose value is the path of a flat `key = value` file, read
@@ -8,8 +9,8 @@
 //! in the file, there are none, and each store keeps its development default.
 
 const std = @import("std");
-const Io = std.Io;
-const Roots = @import("site.zig").Roots;
+const Io = @import("host_io").Io;
+const Roots = @import("webbox").site.Roots;
 
 /// The data directory this process serves, for the host's facts: the
 /// config's `data_dir`, or what `load` says when there is none.
