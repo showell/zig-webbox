@@ -147,7 +147,7 @@ pub fn Site(comptime App: type) type {
                     if (!sent.any) req.respond("The form was malformed.\n", .{ .status = .bad_request, .keep_alive = false }) catch {};
                     return null;
                 }
-                answerFailure(req, &sent);
+                answerFailure(req, &sent, e);
                 return e;
             };
         }
@@ -235,8 +235,23 @@ const Sent = struct {
 /// stays unread. **ITS BODY NAMES NOTHING** (metal-vmm QUEUE 134(f)): an
 /// error's name says what of the server failed, which is the log's to know,
 /// not a client's; `route` returns the error for the host to log.
-fn answerFailure(req: *std.http.Server.Request, sent: *const Sent) void {
+///
+/// **A REFUSED WRITE IS A 503** (metal-vmm QUEUE 188.2): a volume whose FAT
+/// copies could not be weighed at mount serves reads and refuses every
+/// write, which io answers as `error.ReadOnlyFileSystem`, until a weighing
+/// succeeds (the kernel tries again once a minute). That is the server not
+/// taking writes for now, not a failure of the request: said as such, with
+/// when to come back. Still the host's to log.
+fn answerFailure(req: *std.http.Server.Request, sent: *const Sent, e: anyerror) void {
     if (sent.any) return;
+    if (e == error.ReadOnlyFileSystem) {
+        req.respond("The server is taking no writes just now. Try again in a minute.\n", .{
+            .status = .service_unavailable,
+            .keep_alive = false,
+            .extra_headers = &.{.{ .name = "retry-after", .value = "60" }},
+        }) catch {};
+        return;
+    }
     req.respond("The server failed.\n", .{ .status = .internal_server_error, .keep_alive = false }) catch {};
 }
 
@@ -266,7 +281,7 @@ test "site: an error after the head went out is not answered again (metal-vmm QU
     sent.giveBack(&req);
     try testing.expectError(error.AfterTheHead, got);
     try testing.expect(sent.any);
-    answerFailure(&req, &sent);
+    answerFailure(&req, &sent, error.AfterTheHead);
     try out.writer.flush();
     try testing.expect(std.mem.startsWith(u8, out.written(), "HTTP/1.1 200"));
     try testing.expect(std.mem.indexOf(u8, out.written(), "500") == null);
@@ -297,7 +312,7 @@ test "site: an error before a streamed answer's first byte sends one status line
     const got = failing.handle(&req);
     sent.giveBack(&req);
     try testing.expectError(error.FirstReadFailed, got);
-    answerFailure(&req, &sent);
+    answerFailure(&req, &sent, error.FirstReadFailed);
     try out.writer.flush();
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "HTTP/1.1 "));
 }
@@ -360,7 +375,7 @@ test "site: a bodiless request expecting 100-Continue in any case is answered, o
     }
 }
 
-test "site: an application's failure is a 500 that names nothing, a malformed form a 400, and success what it answered" {
+test "site: an application's failure is a 500 that names nothing, a refused write a 503, a malformed form a 400, and success what it answered" {
     const App = struct {
         pub const StartReport = struct {};
         pub fn setup(_: Io, _: std.mem.Allocator, _: ?Roots) !StartReport {
@@ -374,6 +389,9 @@ test "site: an application's failure is a 500 that names nothing, a malformed fo
             defer alloc.free(target);
             if (std.mem.eql(u8, target, "/fails")) return error.SomethingBroke;
             if (std.mem.eql(u8, target, "/form")) return error.MalformedForm;
+            // A volume refusing writes (metal-vmm QUEUE 188.2): the store's
+            // write, failed as io answers it, before any answer.
+            if (std.mem.eql(u8, target, "/refused")) return error.ReadOnlyFileSystem;
             // A streamed answer begun, then failed before its first byte
             // (chat_upload.streamFile's first readAt, admin_backup's archive):
             // its head stands alone, with no 500 after it (177.3).
@@ -393,6 +411,7 @@ test "site: an application's failure is a 500 that names nothing, a malformed fo
     defer hub.entries.deinit(testing.allocator);
     for ([_]struct { target: []const u8, head: []const u8, body: []const u8, err: ?anyerror }{
         .{ .target = "/fails", .head = "HTTP/1.1 500", .body = "The server failed.\n", .err = error.SomethingBroke },
+        .{ .target = "/refused", .head = "HTTP/1.1 503", .body = "The server is taking no writes just now. Try again in a minute.\n", .err = error.ReadOnlyFileSystem },
         .{ .target = "/form", .head = "HTTP/1.1 400", .body = "The form was malformed.\n", .err = null },
         .{ .target = "/", .head = "HTTP/1.1 200", .body = "hello", .err = null },
         .{ .target = "/streams", .head = "HTTP/1.1 200", .body = "\r\n\r\n", .err = error.FirstReadFailed },
