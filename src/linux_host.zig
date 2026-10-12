@@ -1116,7 +1116,7 @@ test "linux_host: a body read out of memory is the host's busy (503), never the 
     try std.testing.expect(whole.state == .busy);
 }
 
-test "linux_host: an Expect a request cannot meet is answered 417, never no answer; a mixed-case 100-continue is met (metal-vmm QUEUE 175.4)" {
+test "linux_host: an Expect a request cannot meet is answered 417, never no answer; a mixed-case 100-continue is met, and an exact one with no body is std's (metal-vmm QUEUE 175.4, 177.4)" {
     for ([_][]const u8{
         "GET / HTTP/1.1\r\nHost: x\r\nExpect: tea\r\n\r\n",
         "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\n\r\n",
@@ -1128,6 +1128,11 @@ test "linux_host: an Expect a request cannot meet is answered 417, never no answ
     const got = try exchange("POST / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\nhello");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n5"));
+    // An exact 100-continue with no body is std's to answer, and answered
+    // (177.4): the 100, then the page.
+    const plain = try exchange("GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n");
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.startsWith(u8, plain, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200"));
 }
 
 test "linux_host: a stream kept after its request's body gives the body's charge back when the route returns, not when the stream ends (metal-vmm QUEUE 176.3)" {
