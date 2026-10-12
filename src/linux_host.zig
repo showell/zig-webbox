@@ -1402,35 +1402,40 @@ test "linux_host: an error before the turn once a slot is taken or a charge made
     }
 }
 
-test "linux_host: a takeover with the stall timer running: the old upload is told 409, not 408, and the new is read whole (metal-vmm QUEUE 176.8)" {
-    // **THE RACE NEAR** (metal-vmm QUEUE 180.6): the old upload's stall time
-    // (600 ms) has passed when the retry takes over (700 ms), and its watcher
-    // sees it only at its next tick (1 s): 300 ms of margin either way.
+test "linux_host: a takeover just before the stall, and just after it fired: 409 before, 408 after, and the new upload read whole either way (metal-vmm QUEUE 176.8, 186.1)" {
+    // **THE RACE MET** (186.1): the watcher ticks every 50 ms and the stall
+    // is 600 ms, so silence is counted as it passes. A takeover at 450 ms
+    // comes before the stall (the old is told 409); one at 800 ms comes
+    // after it fired (the old was told 408, and its slot was given back).
     stall_for_test_ms = 600;
     defer stall_for_test_ms = null;
-    tick_for_test_ms = 1000;
+    tick_for_test_ms = 50;
     defer tick_for_test_ms = null;
-    var bench: Bench = undefined;
-    try bench.init();
-    defer bench.deinit();
-    const io = bench.threaded.io();
-    var first = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
-    try first.listen(io);
-    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(700) }, io) catch {};
-    var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\n0123");
-    try again.listen(io);
-    // The rest of the retry soon after: within its own stall.
-    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
-    var w = again.stream.writer(io, &.{});
-    try w.interface.writeAll("456789");
-    const done = again.answer.within(io, 3000);
-    const old_told = first.answer.within(io, 3000);
-    again.end(io);
-    first.end(io);
-    try std.testing.expect(done and old_told);
-    try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
-    try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
-    try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+    for ([_]struct { at_ms: i64, old: []const u8 }{ .{ .at_ms = 450, .old = "HTTP/1.1 409" }, .{ .at_ms = 800, .old = "HTTP/1.1 408" } }) |c| {
+        var bench: Bench = undefined;
+        try bench.init();
+        defer bench.deinit();
+        const io = bench.threaded.io();
+        var first = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
+        try first.listen(io);
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(c.at_ms) }, io) catch {};
+        var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\n0123");
+        try again.listen(io);
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
+        var w = again.stream.writer(io, &.{});
+        try w.interface.writeAll("456789");
+        const done = again.answer.within(io, 3000);
+        const old_told = first.answer.within(io, 3000);
+        again.end(io);
+        first.end(io);
+        try std.testing.expect(done and old_told);
+        try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
+        if (!std.mem.startsWith(u8, first.answer.got(), c.old)) {
+            std.debug.print("taken over at {d} ms: the old was told {s}\n", .{ c.at_ms, first.answer.got()[0..@min(12, first.answer.got().len)] });
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+    }
 }
 
 /// A test's allocator that asks, at each allocation or growth, whether
