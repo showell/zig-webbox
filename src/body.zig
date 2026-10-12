@@ -139,6 +139,16 @@ pub const Read = struct {
     deadline_ms: u64,
 };
 
+/// **THE ONE EXPECTATION MET, MADE STD'S EXACT ONE**: std answers
+/// `100-continue` only as it is spelled, and refuses `100-Continue` with no
+/// answer at all. Each host calls it once a plan is not refused, with a
+/// body or without (metal-vmm QUEUE 175.4, 180.7).
+pub fn meetExpectation(head: *Head) void {
+    if (head.expect) |e| if (std.ascii.eqlIgnoreCase(e, "100-continue")) {
+        head.expect = "100-continue";
+    };
+}
+
 /// The plan for a body under `head`, given its route's cap.
 pub fn plan(head: *const Head, cap: u64) Plan {
     const f = switch (framing(head)) {
@@ -146,14 +156,10 @@ pub fn plan(head: *const Head, cap: u64) Plan {
         .framing => |f| f,
     };
     // **AN EXPECTATION NOT MET IS A 417, FROM THE HEAD** (metal-vmm QUEUE 170.4,
-    // 175.4, 177.4): with a body, 100-continue in any case (the host meets
-    // it); with none, only what std answers itself, an exact `100-continue`
-    // (it writes the 100 and then the answer). Any other on a request with
-    // no body std would refuse to answer at all.
-    if (head.expect) |e| {
-        const met = if (f == .none) std.mem.eql(u8, e, "100-continue") else std.ascii.eqlIgnoreCase(e, "100-continue");
-        if (!met) return .{ .refused = .expectation_failed };
-    }
+    // 175.4, 177.4, 180.7): 100-continue in any case is met, with a body or
+    // without (the host makes it std's exact one, `meetExpectation`, and std
+    // writes the 100 and then the answer); any other is refused.
+    if (head.expect) |e| if (!std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .refused = .expectation_failed };
     const bytes = switch (f) {
         .none => return .none,
         .length => |n| if (n > cap) return .{ .refused = .too_large } else n,
@@ -292,7 +298,6 @@ test "plan: an Expect std can answer is served, body or none; one it cannot is 4
     // but std's own exact `100-continue`, which std would not answer at all.
     for ([_][]const u8{
         "GET / HTTP/1.1\r\nExpect: tea\r\n\r\n",
-        "GET / HTTP/1.1\r\nExpect: 100-Continue\r\n\r\n",
         "POST / HTTP/1.1\r\nExpect: tea\r\nContent-Length: 5\r\n\r\n",
     }) |raw| {
         const h = try headOf(raw);
@@ -300,12 +305,17 @@ test "plan: an Expect std can answer is served, body or none; one it cannot is 4
     }
     // Served: an exact 100-continue with no body, as std always answered
     // it (177.4: 175.4 had made it a 417).
+    // And in any case (180.7): the host makes it std's exact one
+    // (`meetExpectation`), as it does for a request with a body.
     for ([_][]const u8{
         "GET / HTTP/1.1\r\nExpect: 100-continue\r\n\r\n",
         "POST / HTTP/1.1\r\nExpect: 100-continue\r\n\r\n",
+        "GET / HTTP/1.1\r\nExpect: 100-Continue\r\n\r\n",
     }) |raw| {
-        const h = try headOf(raw);
+        var h = try headOf(raw);
         try testing.expect(plan(&h, 100) == .none);
+        meetExpectation(&h);
+        try testing.expectEqualStrings("100-continue", h.expect.?);
     }
     // With a body, 100-continue in any case: the host meets it.
     const h = try headOf("POST / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\n");

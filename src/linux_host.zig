@@ -149,7 +149,9 @@ pub fn Server(comptime S: type) type {
         /// slot; a small one is charged to the small budget as it arrives.
         fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?[]u8, req: *std.http.Server.Request, progress: *Progress, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
             const cap = S.bodyLimit(try http.target(req, arena));
-            const read: body_rule.Read, const upload = switch (body_rule.plan(&req.head, cap)) {
+            const planned = body_rule.plan(&req.head, cap);
+            if (planned != .refused) body_rule.meetExpectation(&req.head);
+            const read: body_rule.Read, const upload = switch (planned) {
                 .none => return null,
                 .refused => |r| return switch (r) {
                     .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
@@ -159,12 +161,6 @@ pub fn Server(comptime S: type) type {
                 },
                 .small => |r| .{ r, false },
                 .upload => |r| .{ r, true },
-            };
-            // The one expectation met, in any case (the rule's reading):
-            // std's own check is exact, and would refuse `100-Continue` with
-            // no answer (metal-vmm QUEUE 175.4).
-            if (req.head.expect) |e| if (std.ascii.eqlIgnoreCase(e, "100-continue")) {
-                req.head.expect = "100-continue";
             };
             if (upload) {
                 const who = (try S.uploader(req, io, arena)) orelse {
@@ -325,6 +321,10 @@ pub var deadline_for_test_ms: ?u64 = null;
 
 /// A test shortens these, in milliseconds.
 pub var stall_for_test_ms: ?u64 = null;
+/// A test's own tick for `watch`, in place of a quarter of the deadline (at
+/// most 250 ms): a tick longer than the stall puts a takeover in the window
+/// where the stall time has passed and the watcher has not yet seen it.
+pub var tick_for_test_ms: ?u64 = null;
 pub var small_budget_for_test: ?u64 = null;
 /// A test's error before the turn, once a body is read: its slot taken or
 /// its charge made (metal-vmm QUEUE 176.8).
@@ -458,7 +458,7 @@ fn sleepMs(io: Io, ms: u64) Io.Cancelable!void {
 /// received for `stall_ms`, it ends the read; ended from outside (a newer
 /// upload), it is done. Cancelled when the read ends first.
 fn watch(io: Io, progress: *Progress, deadline_ms: u64, stall_ms: ?u64) void {
-    const tick: u64 = @min(250, @max(1, deadline_ms / 4));
+    const tick: u64 = tick_for_test_ms orelse @min(250, @max(1, deadline_ms / 4));
     var waited: u64 = 0;
     var quiet: u64 = 0;
     var seen = progress.received.load(.acquire);
@@ -628,16 +628,21 @@ const Whole = struct {
             const need = list.items.len + got;
             if (need > self.most) return .too_large;
             if (self.small and need > list.capacity) {
-                // **THE CHARGE IS WHAT IS HELD** (176.5, 177.2): the room is
-                // charged before it is taken, grown by half (never past the
-                // body's most), so a 1 MiB body is some 30 growths, not 256.
-                // While a growth copies, the old room is beside the new one
-                // for that moment, then freed.
+                // **THE CHARGE IS WHAT IS HELD** (176.5, 177.2, 180.6): the
+                // room is charged before it is taken, grown by half (never
+                // past the body's most), so a 1 MiB body is some 30 growths,
+                // not 256. While a growth copies, the old room is beside the
+                // new one, so the new room is charged whole first, and the
+                // old room's charge given back once the growth is done.
                 const room_now: u64 = list.capacity;
                 const grown: u64 = @min(self.most, @max(need, room_now + room_now / 2));
-                if (!chargeSmall(self.progress.io, grown - room_now)) return .busy;
+                if (!chargeSmall(self.progress.io, grown)) return .busy;
+                list.ensureTotalCapacityPrecise(self.gpa, @intCast(grown)) catch |e| {
+                    unchargeSmall(self.progress.io, grown);
+                    return e;
+                };
+                unchargeSmall(self.progress.io, room_now);
                 self.charged.* += grown - room_now;
-                try list.ensureTotalCapacityPrecise(self.gpa, @intCast(grown));
             }
             try list.appendSlice(self.gpa, chunk[0..got]);
             _ = self.progress.received.fetchAdd(got, .acq_rel);
@@ -1120,7 +1125,6 @@ test "linux_host: a body read out of memory is the host's busy (503), never the 
 test "linux_host: an Expect a request cannot meet is answered 417, never no answer; a mixed-case 100-continue is met, and an exact one with no body is std's (metal-vmm QUEUE 175.4, 177.4)" {
     for ([_][]const u8{
         "GET / HTTP/1.1\r\nHost: x\r\nExpect: tea\r\n\r\n",
-        "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\n\r\n",
     }) |raw| {
         const got = try exchange(raw);
         defer std.testing.allocator.free(got);
@@ -1131,9 +1135,14 @@ test "linux_host: an Expect a request cannot meet is answered 417, never no answ
     try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n5"));
     // An exact 100-continue with no body is std's to answer, and answered
     // (177.4): the 100, then the page.
-    const plain = try exchange("GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n");
-    defer std.testing.allocator.free(plain);
-    try std.testing.expect(std.mem.startsWith(u8, plain, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200"));
+    // In any case (180.7): the host makes it std's exact one.
+    for ([_][]const u8{ "100-continue", "100-Continue" }) |e| {
+        const raw = try std.fmt.allocPrint(std.testing.allocator, "GET / HTTP/1.1\r\nHost: x\r\nExpect: {s}\r\n\r\n", .{e});
+        defer std.testing.allocator.free(raw);
+        const plain = try exchange(raw);
+        defer std.testing.allocator.free(plain);
+        try std.testing.expect(std.mem.startsWith(u8, plain, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200"));
+    }
 }
 
 test "linux_host: a stream kept after its request's body gives the body's charge back when the route returns, not when the stream ends (metal-vmm QUEUE 176.3)" {
@@ -1394,22 +1403,24 @@ test "linux_host: an error before the turn once a slot is taken or a charge made
 }
 
 test "linux_host: a takeover with the stall timer running: the old upload is told 409, not 408, and the new is read whole (metal-vmm QUEUE 176.8)" {
-    // The stall short enough to fire while the test runs, long enough that
-    // the retry comes first.
+    // **THE RACE NEAR** (metal-vmm QUEUE 180.6): the old upload's stall time
+    // (600 ms) has passed when the retry takes over (700 ms), and its watcher
+    // sees it only at its next tick (1 s): 300 ms of margin either way.
     stall_for_test_ms = 600;
     defer stall_for_test_ms = null;
+    tick_for_test_ms = 1000;
+    defer tick_for_test_ms = null;
     var bench: Bench = undefined;
     try bench.init();
     defer bench.deinit();
     const io = bench.threaded.io();
     var first = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
     try first.listen(io);
-    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
+    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(700) }, io) catch {};
     var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\n0123");
     try again.listen(io);
-    // The rest of the retry after the old one's stall time has passed: its
-    // own stall clock was moved by its first bytes, and the old one's is done.
-    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(400) }, io) catch {};
+    // The rest of the retry soon after: within its own stall.
+    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
     var w = again.stream.writer(io, &.{});
     try w.interface.writeAll("456789");
     const done = again.answer.within(io, 3000);
@@ -1421,6 +1432,51 @@ test "linux_host: a takeover with the stall timer running: the old upload is tol
     try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
     try std.testing.expectEqual(@as(usize, 0), slots.inUse());
 }
+
+/// A test's allocator that asks, at each allocation or growth, whether
+/// what is held then is within what the small budget has charged (beyond
+/// what it held before the test).
+const HeldPeak = struct {
+    child: std.mem.Allocator,
+    held_before: u64,
+    live: u64 = 0,
+    over: ?struct { held: u64, charged: u64 } = null,
+
+    fn allocator(self: *HeldPeak) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn judge(self: *HeldPeak, held: u64) void {
+        const charged = small_held - self.held_before;
+        if (held > charged and self.over == null) self.over = .{ .held = held, .charged = charged };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *HeldPeak = @ptrCast(@alignCast(ctx));
+        self.judge(self.live + len);
+        const p = self.child.rawAlloc(len, a, ra) orelse return null;
+        self.live += len;
+        return p;
+    }
+    fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *HeldPeak = @ptrCast(@alignCast(ctx));
+        if (!self.child.rawResize(m, a, new_len, ra)) return false;
+        self.live = self.live - m.len + new_len;
+        self.judge(self.live);
+        return true;
+    }
+    fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *HeldPeak = @ptrCast(@alignCast(ctx));
+        // A remap may copy: both rooms, for that moment.
+        if (new_len > m.len) self.judge(self.live + new_len);
+        const p = self.child.rawRemap(m, a, new_len, ra) orelse return null;
+        self.live = self.live - m.len + new_len;
+        return p;
+    }
+    fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const self: *HeldPeak = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(m, a, ra);
+        self.live -= m.len;
+    }
+};
 
 test "linux_host: a small body's read holds no more memory than it charged (metal-vmm QUEUE 177.2)" {
     var bench: Bench = undefined;
@@ -1442,18 +1498,20 @@ test "linux_host: a small body's read holds no more memory than it charged (meta
     var out: std.Io.Writer = .fixed(&out_buf);
     var server = std.http.Server.init(&reader, &out);
     var req = try server.receiveHead();
-    // What the read holds, counted where it is held.
+    // What the read holds, counted where it is held, at every moment: the
+    // old room beside the new one while a growth copies too (180.6).
     var counted: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     defer _ = counted.deinit();
+    var peak: HeldPeak = .{ .child = counted.allocator(), .held_before = small_held };
     var charged: u64 = 0;
     defer unchargeSmall(io, charged);
-    var whole: Whole = .{ .most = n, .progress = &progress, .small = true, .charged = &charged, .gpa = counted.allocator() };
-    defer whole.list.deinit(counted.allocator());
+    var whole: Whole = .{ .most = n, .progress = &progress, .small = true, .charged = &charged, .gpa = peak.allocator() };
+    defer whole.list.deinit(peak.allocator());
     whole.read(&req);
     try std.testing.expect(whole.state == .read);
     try std.testing.expectEqual(@as(u64, n), charged);
-    if (counted.total_requested_bytes > charged) {
-        std.debug.print("held {d} bytes for a body charged {d}\n", .{ counted.total_requested_bytes, charged });
+    if (peak.over) |o| {
+        std.debug.print("held {d} bytes while {d} were charged\n", .{ o.held, o.charged });
         return error.TestUnexpectedResult;
     }
 }
