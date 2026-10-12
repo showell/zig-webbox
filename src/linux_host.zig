@@ -179,6 +179,7 @@ pub fn Server(comptime S: type) type {
             const began = Io.Clock.now(.awake, io);
             const length = req.head.content_length orelse 0;
             const got = try readWhole(io, arena, req, read, upload, progress, charged);
+            if (fail_after_read_for_test) return error.TestFailedAfterRead;
             // Read: nothing left to take over (a newer upload now waits for
             // this one's slot, which comes back when its request is done).
             if (slot.*) |i| readDone(io, i);
@@ -320,6 +321,9 @@ pub var deadline_for_test_ms: ?u64 = null;
 /// A test shortens these, in milliseconds.
 pub var stall_for_test_ms: ?u64 = null;
 pub var small_budget_for_test: ?u64 = null;
+/// A test's error before the turn, once a body is read: its slot taken or
+/// its charge made (metal-vmm QUEUE 176.8).
+pub var fail_after_read_for_test: bool = false;
 
 const Refusal = struct { kind: edge.RejectKind, msg: []const u8 };
 
@@ -385,9 +389,6 @@ fn readWhole(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, pl
         };
         race.cancelDiscard();
     }
-    // **A READ IS NAMED BY HOW IT ENDED** (170.7): whole is whole, whatever
-    // fired beside it; one ended from outside by why; else its own end (too
-    // large, unreadable, the budget), never a 408 for one that was not late.
     const own: Got = switch (whole.state) {
         .read => |b| .{ .whole = b },
         .reading => unreachable, // both tasks are done
@@ -395,13 +396,7 @@ fn readWhole(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, pl
         .busy => .busy,
         .unreadable => .unreadable,
     };
-    // An unreadable end is the shut socket's when something outside shut it.
-    const got: Got = if (own != .unreadable) own else switch (progress.ended_by.load(.acquire)) {
-        .nothing => .unreadable,
-        .deadline => .too_slow,
-        .stalled => .stalled,
-        .replaced => .replaced,
-    };
+    const got = verdict(own, progress.ended_by.load(.acquire));
     const body = switch (got) {
         .whole => |b| b,
         else => return got,
@@ -420,6 +415,20 @@ fn readWhole(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, pl
 }
 
 const Raced = union(enum) { read: void, watch: void };
+
+/// **A READ IS NAMED BY HOW IT ENDED** (170.7): whole is whole, whatever
+/// fired beside it; one ended from outside by why; else its own end (too
+/// large, unreadable, the budget), never a 408 for one that was not late.
+/// An unreadable end is the shut socket's when something outside shut it.
+fn verdict(own: Got, ended_by: Progress.Ended) Got {
+    if (own != .unreadable) return own;
+    return switch (ended_by) {
+        .nothing => .unreadable,
+        .deadline => .too_slow,
+        .stalled => .stalled,
+        .replaced => .replaced,
+    };
+}
 
 /// A request refused before the turn, its connection closed after: what of
 /// its body is unread stays unread. The answer is best-effort, as the
@@ -750,8 +759,9 @@ test "portFrom: the variable's port, or the default when it is unset or not a po
 
 /// A site for the host's own tests: `GET /` answers "ok", and a POST reads its
 /// body (as a handler does, inside the turn) and answers its length. Its caps:
-/// `/tiny` 4 bytes, `/upload` and `/refuses` past `body_rule.before_turn_most`
-/// (uploads), anything else 64 KiB. Its uploader is the `x-who` header; an
+/// `/tiny` 4 bytes, `/upload`, `/upload-same` and `/refuses` past
+/// `body_rule.before_turn_most` (uploads), anything else 64 KiB; `/same` and
+/// `/upload-same` answer whether the body read is the one the host held. Its uploader is the `x-who` header; an
 /// upload without one is a stranger's, which `/upload` answers 401 unread.
 const TestSite = struct {
     pub const Started = struct {};
@@ -761,6 +771,7 @@ const TestSite = struct {
     pub fn bodyLimit(target: []const u8) u64 {
         if (std.mem.eql(u8, target, "/tiny")) return 4;
         if (std.mem.eql(u8, target, "/upload")) return 4 * body_rule.before_turn_most;
+        if (std.mem.eql(u8, target, "/upload-same")) return 4 * body_rule.before_turn_most;
         if (std.mem.eql(u8, target, "/refuses")) return 4 * body_rule.before_turn_most;
         return 64 * 1024;
     }
@@ -775,6 +786,16 @@ const TestSite = struct {
     pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *bus.Bus) !?bus.Kept {
         if (std.mem.eql(u8, try http.target(req, alloc), "/upload") and try uploader(req, io, alloc) == null) {
             try req.respond("who are you?\n", .{ .status = .unauthorized, .keep_alive = false });
+            return null;
+        }
+        // Whether the body the handler reads is the one the host held, not
+        // a copy (170.5): "same", or "copied".
+        const t = try http.target(req, alloc);
+        if (std.mem.eql(u8, t, "/same") or std.mem.eql(u8, t, "/upload-same")) {
+            const held = http.held_body;
+            const got = (try http.readLimitedBody(req, alloc, bodyLimit(t))) orelse return null;
+            const same = if (held) |h| h.ptr == got.ptr and h.len == got.len else false;
+            try req.respond(if (same) "same" else "copied", .{ .keep_alive = false });
             return null;
         }
         // A handler that refuses an upload without reading it.
@@ -1293,4 +1314,78 @@ test "linux_host: a body refused in the turn without being read is never told to
     const told = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n");
     defer std.testing.allocator.free(told);
     try std.testing.expect(std.mem.startsWith(u8, told, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 408"));
+}
+
+test "linux_host: the body read before the turn reaches its handler as it is, never copied, small or an upload (metal-vmm QUEUE 176.8, 170.5)" {
+    {
+        const got = try exchange("POST /same HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+        defer std.testing.allocator.free(got);
+        try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nsame"));
+    }
+    {
+        const got = try exchange("POST /upload-same HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 2000000\r\n\r\n" ++ "u" ** 2000000);
+        defer std.testing.allocator.free(got);
+        try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nsame"));
+    }
+}
+
+test "linux_host: a read is named by how it ended, whatever fired beside it (metal-vmm QUEUE 176.8, 170.7)" {
+    const whole: Got = .{ .whole = @constCast("x") };
+    for ([_]Progress.Ended{ .nothing, .deadline, .stalled, .replaced }) |why| {
+        // Its own end stands: whole, too large, the budget spent.
+        try std.testing.expectEqual(std.meta.Tag(Got).whole, std.meta.activeTag(verdict(whole, why)));
+        try std.testing.expectEqual(std.meta.Tag(Got).too_large, std.meta.activeTag(verdict(.too_large, why)));
+        try std.testing.expectEqual(std.meta.Tag(Got).busy, std.meta.activeTag(verdict(.busy, why)));
+    }
+    // An unreadable end is the shut socket's, named by who shut it.
+    try std.testing.expectEqual(std.meta.Tag(Got).unreadable, std.meta.activeTag(verdict(.unreadable, .nothing)));
+    try std.testing.expectEqual(std.meta.Tag(Got).too_slow, std.meta.activeTag(verdict(.unreadable, .deadline)));
+    try std.testing.expectEqual(std.meta.Tag(Got).stalled, std.meta.activeTag(verdict(.unreadable, .stalled)));
+    try std.testing.expectEqual(std.meta.Tag(Got).replaced, std.meta.activeTag(verdict(.unreadable, .replaced)));
+}
+
+test "linux_host: an error before the turn once a slot is taken or a charge made is a 500, and gives both back (metal-vmm QUEUE 176.8)" {
+    fail_after_read_for_test = true;
+    defer fail_after_read_for_test = false;
+    {
+        const got = try exchange("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n0123456789");
+        defer std.testing.allocator.free(got);
+        try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 500"));
+        try std.testing.expectEqual(@as(u64, 0), small_held);
+    }
+    {
+        const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\n0123456789");
+        defer std.testing.allocator.free(got);
+        try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 500"));
+        try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+    }
+}
+
+test "linux_host: a takeover with the stall timer running: the old upload is told 409, not 408, and the new is read whole (metal-vmm QUEUE 176.8)" {
+    // The stall short enough to fire while the test runs, long enough that
+    // the retry comes first.
+    stall_for_test_ms = 600;
+    defer stall_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var first = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\nxx");
+    try first.listen(io);
+    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(100) }, io) catch {};
+    var again = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 10\r\n\r\n0123");
+    try again.listen(io);
+    // The rest of the retry after the old one's stall time has passed: its
+    // own stall clock was moved by its first bytes, and the old one's is done.
+    Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(400) }, io) catch {};
+    var w = again.stream.writer(io, &.{});
+    try w.interface.writeAll("456789");
+    const done = again.answer.within(io, 3000);
+    const old_told = first.answer.within(io, 3000);
+    again.end(io);
+    first.end(io);
+    try std.testing.expect(done and old_told);
+    try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
+    try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
+    try std.testing.expectEqual(@as(usize, 0), slots.inUse());
 }
