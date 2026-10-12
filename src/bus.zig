@@ -252,7 +252,7 @@ pub const Held = struct {
     kept: bool = false,
 
     /// Hands the stream to the host, with what renders its frames.
-    pub fn keep(self: *Held, render: *const fn (ctx: []const u8, arena: Alloc, blob: []const u8) ?[]const u8, ctx: []const u8) void {
+    pub fn keep(self: *Held, render: *const fn (ctx: []const u8, arena: Alloc, blob: []const u8) Alloc.Error!?[]const u8, ctx: []const u8) void {
         self.bus.keep(.{ .sub = self.sub, .render = render, .ctx = ctx });
         self.kept = true;
     }
@@ -269,7 +269,10 @@ pub const Kept = struct {
     sub: *Subscriber,
     /// This viewer's frame for one published event, or null to send nothing.
     /// `arena` lives for that one frame.
-    render: *const fn (ctx: []const u8, arena: Alloc, blob: []const u8) ?[]const u8,
+    /// This viewer's frame of a blob: null for nothing to send them, an error
+    /// when it cannot be made, which ends the stream (the browser resumes from
+    /// its cursor), never a hole in it (metal-vmm QUEUE 172).
+    render: *const fn (ctx: []const u8, arena: Alloc, blob: []const u8) Alloc.Error!?[]const u8,
     /// What `render` needs to know about the viewer, owned by the hub's
     /// allocator and freed with the stream.
     ctx: []const u8 = "",
@@ -314,7 +317,7 @@ pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
                 defer k.sub.gpa.free(blob);
                 var arena = std.heap.ArenaAllocator.init(hub.gpa);
                 defer arena.deinit();
-                const frame = k.render(k.ctx, arena.allocator(), blob) orelse continue;
+                const frame = (k.render(k.ctx, arena.allocator(), blob) catch return) orelse continue;
                 w.writeAll(frame) catch return;
                 w.flush() catch return;
             },
@@ -336,7 +339,7 @@ pub fn nextFrame(k: Kept, arena: Alloc) !?[]const u8 {
     if (k.sub.missed) return error.EventsMissed;
     while (k.sub.poll()) |blob| {
         defer k.sub.gpa.free(blob);
-        const frame = k.render(k.ctx, arena, blob) orelse continue;
+        const frame = (try k.render(k.ctx, arena, blob)) orelse continue;
         // The frame may point into the event, which is freed on return.
         return try arena.dupe(u8, frame);
     }
@@ -476,9 +479,28 @@ test "bus: a full ring drops new messages best-effort, keeping the oldest cap in
     bus.close(sub);
 }
 
-fn upper(ctx: []const u8, arena: Alloc, blob: []const u8) ?[]const u8 {
+fn upper(ctx: []const u8, arena: Alloc, blob: []const u8) Alloc.Error!?[]const u8 {
     if (std.mem.eql(u8, blob, "skip")) return null;
-    return std.fmt.allocPrint(arena, "data: {s} for {s}\n\n", .{ blob, ctx }) catch null;
+    // A frame the viewer cannot be rendered for want of memory.
+    if (std.mem.eql(u8, blob, "oom")) return error.OutOfMemory;
+    return try std.fmt.allocPrint(arena, "data: {s} for {s}\n\n", .{ blob, ctx });
+}
+
+test "bus: a frame that cannot be rendered for want of memory ends the stream, to be resumed: never a silent hole (metal-vmm QUEUE 172)" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+    const sub = try hub.open("k");
+    defer hub.close(sub);
+    const k = Kept{ .sub = sub, .render = upper, .ctx = "bob" };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    hub.publish("k", "one");
+    hub.publish("k", "oom");
+    hub.publish("k", "two");
+    try testing.expectEqualStrings("data: one for bob\n\n", (try nextFrame(k, arena.allocator())).?);
+    try testing.expectError(error.OutOfMemory, nextFrame(k, arena.allocator()));
 }
 
 test "bus: a request's handle forwards to the hub, and keeps at most one stream" {
@@ -602,7 +624,7 @@ test "bus: serveKept writes each frame, and a write that fails ends the stream a
 // seeded publishes, opens, closes and reads, one loop, as a host with one
 // loop serves it.
 
-fn same(_: []const u8, _: Alloc, blob: []const u8) ?[]const u8 {
+fn same(_: []const u8, _: Alloc, blob: []const u8) Alloc.Error!?[]const u8 {
     return blob;
 }
 
