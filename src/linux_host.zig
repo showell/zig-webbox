@@ -147,7 +147,7 @@ pub fn Server(comptime S: type) type {
         /// rule (body.zig), or the refusal to answer instead. An upload is
         /// read once its uploader is known (a stranger's never) and holds a
         /// slot; a small one is charged to the small budget as it arrives.
-        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, progress: *Progress, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
+        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?[]u8, req: *std.http.Server.Request, progress: *Progress, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
             const cap = S.bodyLimit(try http.target(req, arena));
             const read: body_rule.Read, const upload = switch (body_rule.plan(&req.head, cap)) {
                 .none => return null,
@@ -179,7 +179,7 @@ pub fn Server(comptime S: type) type {
             }
             const began = Io.Clock.now(.awake, io);
             const length = req.head.content_length orelse 0;
-            const got = try readWhole(io, arena, req, read, upload, progress, charged);
+            const got = try readWhole(io, arena, gpa, owned, req, read, upload, progress, charged);
             if (fail_after_read_for_test) return error.TestFailedAfterRead;
             // Read: nothing left to take over (a newer upload now waits for
             // this one's slot, which comes back when its request is done).
@@ -270,11 +270,15 @@ pub fn Server(comptime S: type) type {
             var slot: ?usize = null;
             defer if (slot) |i| giveBackSlot(io, i);
             var held_body: ?[]u8 = null;
+            // The body's memory (177.2), freed when the connection is done,
+            // as the arena is: after the route and any stream it kept.
+            var body_mem: ?[]u8 = null;
+            defer if (body_mem) |m| alloc.free(m);
             var charged: u64 = 0;
             defer unchargeSmall(io, charged);
             // **AN ERROR BEFORE THE TURN IS ANSWERED** (170.6): a 500, as
             // one in the turn is, never a close with no answer.
-            const refusal = bodyBeforeTurn(io, arena.allocator(), &req, &progress, &slot, &held_body, &charged) catch |e| {
+            const refusal = bodyBeforeTurn(io, arena.allocator(), alloc, &body_mem, &req, &progress, &slot, &held_body, &charged) catch |e| {
                 if (!@import("builtin").is_test) std.debug.print("{s}: before the turn: {s}\n", .{ host_name, @errorName(e) });
                 req.head.keep_alive = false;
                 req.head.expect = null;
@@ -365,9 +369,14 @@ const Progress = struct {
 /// left to its handler as if it had not been: the head copied out of the
 /// read buffer (a body read reuses it), the body served from memory under
 /// a plain Content-Length (and handed over as it is: `http.held_body`).
-fn readWhole(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, plan: body_rule.Read, upload: bool, progress: *Progress, charged: *u64) !Got {
+fn readWhole(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?[]u8, req: *std.http.Server.Request, plan: body_rule.Read, upload: bool, progress: *Progress, charged: *u64) !Got {
     const head = try arena.dupe(u8, req.head_buffer);
-    var whole: Whole = .{ .most = plan.bytes, .progress = progress, .small = !upload, .charged = charged };
+    var whole: Whole = .{ .most = plan.bytes, .progress = progress, .small = !upload, .charged = charged, .gpa = gpa };
+    // The body's memory, the caller's to free when the request is done,
+    // whatever came of the read.
+    defer if (whole.list.capacity > 0) {
+        owned.* = whole.list.allocatedSlice();
+    };
     {
         // The read and its watchdog, whichever ends first. **EVERY TASK IS
         // AWAITED BEFORE THIS FRAME ENDS** (metal-vmm QUEUE 167.1):
@@ -375,7 +384,7 @@ fn readWhole(io: Io, arena: std.mem.Allocator, req: *std.http.Server.Request, pl
         // then is the read's state looked at.
         var buffer: [2]Raced = undefined;
         var race: Io.Select(Raced) = .init(io, &buffer);
-        race.concurrent(.read, Whole.read, .{ &whole, req, arena }) catch return .no_deadline;
+        race.concurrent(.read, Whole.read, .{ &whole, req }) catch return .no_deadline;
         const stall: ?u64 = if (upload) stall_for_test_ms orelse body_rule.upload_stall_ms else null;
         race.concurrent(.watch, watch, .{ io, progress, deadline_for_test_ms orelse plan.deadline_ms, stall }) catch {
             // No deadline to read under: the read is ended, not left to run.
@@ -577,27 +586,32 @@ const Whole = struct {
     /// A small body, charged to the small budget as its bytes arrive.
     small: bool,
     charged: *u64,
+    /// **THE BODY'S MEMORY IS ITS OWN, NOT THE ARENA'S** (metal-vmm QUEUE
+    /// 177.2): an arena frees or grows in place only its newest allocation
+    /// in a node, so a list that outgrew its node left its old copy behind
+    /// (1.5-4.5x what was charged). This allocator frees what a growth
+    /// leaves; the caller frees the list itself when the request is done.
+    gpa: std.mem.Allocator,
+    list: std.ArrayList(u8) = .empty,
     state: union(enum) { reading, read: []u8, too_large, unreadable, busy } = .reading,
 
-    fn read(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) void {
+    fn read(self: *Whole, req: *std.http.Server.Request) void {
         // Memory that runs out is the host's busy (503, the client may try
         // again), never the client's unreadable body (metal-vmm QUEUE 172).
-        self.state = self.readAll(req, arena) catch |e| switch (e) {
+        self.state = self.readAll(req) catch |e| switch (e) {
             error.OutOfMemory => .busy,
             else => .unreadable,
         };
     }
 
-    fn readAll(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) !@FieldType(Whole, "state") {
+    fn readAll(self: *Whole, req: *std.http.Server.Request) !@FieldType(Whole, "state") {
         var transfer: [4096]u8 = undefined;
         const declared = req.head.content_length;
         const r = try req.readerExpectContinue(&transfer);
-        // A Content-Length body has its memory once, exactly; a chunked one
-        // (small only) grows as it comes.
-        var list: std.ArrayList(u8) = .empty;
+        const list = &self.list;
         // An upload's exact length at once (its slot is its bound); a small
         // body grows as it comes, a silent one holding nothing (170.3).
-        if (!self.small) if (declared) |n| try list.ensureTotalCapacityPrecise(arena, @intCast(n));
+        if (!self.small) if (declared) |n| try list.ensureTotalCapacityPrecise(self.gpa, @intCast(n));
         var chunk: [4096]u8 = undefined;
         while (true) {
             const room = if (declared) |n| @min(chunk.len, n - list.items.len) else chunk.len;
@@ -610,16 +624,21 @@ const Whole = struct {
                 error.ReadFailed => return .unreadable,
             };
             if (got == 0) continue; // filled the reader's own buffer: read again
-            if (list.items.len + got > self.most) return .too_large;
-            if (self.small) {
-                if (!chargeSmall(self.progress.io, got)) return .busy;
-                self.charged.* += got;
-                // **THE CHARGE IS THE MEMORY** (176.5): grown exactly, so the
-                // arena (whose last allocation grows in place) holds what is
-                // charged, not the 2-3x a doubling list would.
-                try list.ensureTotalCapacityPrecise(arena, list.items.len + got);
+            const need = list.items.len + got;
+            if (need > self.most) return .too_large;
+            if (self.small and need > list.capacity) {
+                // **THE CHARGE IS WHAT IS HELD** (176.5, 177.2): the room is
+                // charged before it is taken, grown by half (never past the
+                // body's most), so a 1 MiB body is some 30 growths, not 256.
+                // While a growth copies, the old room is beside the new one
+                // for that moment, then freed.
+                const room_now: u64 = list.capacity;
+                const grown: u64 = @min(self.most, @max(need, room_now + room_now / 2));
+                if (!chargeSmall(self.progress.io, grown - room_now)) return .busy;
+                self.charged.* += grown - room_now;
+                try list.ensureTotalCapacityPrecise(self.gpa, @intCast(grown));
             }
-            try list.appendSlice(arena, chunk[0..got]);
+            try list.appendSlice(self.gpa, chunk[0..got]);
             _ = self.progress.received.fetchAdd(got, .acq_rel);
         }
         // std ends a Content-Length body at the connection's end, short and
@@ -1092,8 +1111,8 @@ test "linux_host: a body read out of memory is the host's busy (503), never the 
     var req = try server.receiveHead();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var charged: u64 = 0;
-    var whole: Whole = .{ .most = 2_000_000, .progress = &progress, .small = false, .charged = &charged };
-    whole.read(&req, failing.allocator());
+    var whole: Whole = .{ .most = 2_000_000, .progress = &progress, .small = false, .charged = &charged, .gpa = failing.allocator() };
+    whole.read(&req);
     try std.testing.expect(whole.state == .busy);
 }
 
@@ -1395,4 +1414,40 @@ test "linux_host: a takeover with the stall timer running: the old upload is tol
     try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
     try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
     try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+}
+
+test "linux_host: a small body's read holds no more memory than it charged (metal-vmm QUEUE 177.2)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    const peer = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const ours = try bench.listener.accept(io);
+    defer ours.close(io);
+    var progress: Progress = .{ .stream = ours, .io = io };
+    const n = 300 * 1024;
+    const raw = try std.fmt.allocPrint(std.testing.allocator, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{n});
+    defer std.testing.allocator.free(raw);
+    const whole_raw = try std.mem.concat(std.testing.allocator, u8, &.{ raw, &([_]u8{'x'} ** n) });
+    defer std.testing.allocator.free(whole_raw);
+    var reader: std.Io.Reader = .fixed(whole_raw);
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var server = std.http.Server.init(&reader, &out);
+    var req = try server.receiveHead();
+    // What the read holds, counted where it is held.
+    var counted: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer _ = counted.deinit();
+    var charged: u64 = 0;
+    defer unchargeSmall(io, charged);
+    var whole: Whole = .{ .most = n, .progress = &progress, .small = true, .charged = &charged, .gpa = counted.allocator() };
+    defer whole.list.deinit(counted.allocator());
+    whole.read(&req);
+    try std.testing.expect(whole.state == .read);
+    try std.testing.expectEqual(@as(u64, n), charged);
+    if (counted.total_requested_bytes > charged) {
+        std.debug.print("held {d} bytes for a body charged {d}\n", .{ counted.total_requested_bytes, charged });
+        return error.TestUnexpectedResult;
+    }
 }
