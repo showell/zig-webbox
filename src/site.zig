@@ -267,6 +267,36 @@ test "site: an error after the head went out is not answered again (metal-vmm QU
     try testing.expect(std.mem.indexOf(u8, out.written(), "500") == null);
 }
 
+test "site: an error before a streamed answer's first byte sends one status line, never a 500 after the head (metal-vmm QUEUE 177.3)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: std.Io.Writer.Allocating = .init(a);
+    var reader: std.Io.Reader = .fixed("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    var server = std.http.Server.init(&reader, &out.writer);
+    var req = try server.receiveHead();
+    req.head.keep_alive = false;
+    const failing = struct {
+        // chat_upload.streamFile's shape: the head begun, then the first
+        // read fails.
+        fn handle(r: *std.http.Server.Request) !void {
+            var hbuf: [1024]u8 = undefined;
+            var body = try r.respondStreaming(&hbuf, .{ .respond_options = .{ .keep_alive = false } });
+            _ = &body;
+            return error.FirstReadFailed;
+        }
+    };
+    var sent: Sent = undefined;
+    var buffer: [1024]u8 = undefined;
+    sent.lend(&req, &buffer);
+    const got = failing.handle(&req);
+    sent.giveBack(&req);
+    try testing.expectError(error.FirstReadFailed, got);
+    answerFailure(&req, &sent);
+    try out.writer.flush();
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "HTTP/1.1 "));
+}
+
 test "site: a stream a handler kept and then failed is dropped, and a kept one is the host's to take (metal-vmm QUEUE 157(a))" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -301,6 +331,15 @@ test "site: an application's failure is a 500 that names nothing, a malformed fo
             defer alloc.free(target);
             if (std.mem.eql(u8, target, "/fails")) return error.SomethingBroke;
             if (std.mem.eql(u8, target, "/form")) return error.MalformedForm;
+            // A streamed answer begun, then failed before its first byte
+            // (chat_upload.streamFile's first readAt, admin_backup's archive):
+            // its head stands alone, with no 500 after it (177.3).
+            if (std.mem.eql(u8, target, "/streams")) {
+                var hbuf: [1024]u8 = undefined;
+                var body = try req.respondStreaming(&hbuf, .{ .respond_options = .{ .keep_alive = false } });
+                _ = &body;
+                return error.FirstReadFailed;
+            }
             try req.respond("hello", .{ .keep_alive = false });
         }
     };
@@ -313,6 +352,7 @@ test "site: an application's failure is a 500 that names nothing, a malformed fo
         .{ .target = "/fails", .head = "HTTP/1.1 500", .body = "The server failed.\n", .err = error.SomethingBroke },
         .{ .target = "/form", .head = "HTTP/1.1 400", .body = "The form was malformed.\n", .err = null },
         .{ .target = "/", .head = "HTTP/1.1 200", .body = "hello", .err = null },
+        .{ .target = "/streams", .head = "HTTP/1.1 200", .body = "\r\n\r\n", .err = error.FirstReadFailed },
     }) |case| {
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
         defer out.deinit();
@@ -327,5 +367,6 @@ test "site: an application's failure is a 500 that names nothing, a malformed fo
         try out.writer.flush();
         try testing.expect(std.mem.startsWith(u8, out.written(), case.head));
         try testing.expect(std.mem.endsWith(u8, out.written(), case.body));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "HTTP/1.1 "));
     }
 }
