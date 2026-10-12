@@ -160,13 +160,22 @@ pub fn Server(comptime S: type) type {
                 .small => |r| .{ r, false },
                 .upload => |r| .{ r, true },
             };
+            // The one expectation met, in any case (the rule's reading):
+            // std's own check is exact, and would refuse `100-Continue` with
+            // no answer (metal-vmm QUEUE 175.4).
+            if (req.head.expect) |e| if (std.ascii.eqlIgnoreCase(e, "100-continue")) {
+                req.head.expect = "100-continue";
+            };
             if (upload) {
                 const who = (try S.uploader(req, io, arena)) orelse {
                     try neverRead(req, arena);
                     return null;
                 };
-                slot.* = takeSlot(io, body_rule.keyOf(who), progress) orelse
-                    return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" };
+                slot.* = switch (takeSlot(io, body_rule.keyOf(who), progress, nextAsk(io))) {
+                    .slot => |i| i,
+                    .busy => return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" },
+                    .replaced => return .{ .kind = .upload_replaced, .msg = "a newer upload took this one's place\n" },
+                };
             }
             const began = Io.Clock.now(.awake, io);
             const length = req.head.content_length orelse 0;
@@ -235,6 +244,16 @@ pub fn Server(comptime S: type) type {
                     sw.interface.flush() catch {};
                     return;
                 },
+                // **A HEAD THAT IS NOT HTTP IS A 400, COUNTED** (edge.zig's
+                // rule, metal-vmm QUEUE 172): it was closed with no answer
+                // and no counter. Best-effort, as the 431.
+                error.HttpHeadersInvalid => {
+                    edge.count(.head_malformed);
+                    sw.interface.writeAll("HTTP/1.1 400 Bad Request\r\n" ++
+                        "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
+                    sw.interface.flush() catch {};
+                    return;
+                },
                 else => return e,
             };
             // **THE TURN NEVER WAITS ON THE NETWORK** (webbox's body.zig,
@@ -273,6 +292,11 @@ pub fn Server(comptime S: type) type {
             const routed = S.route(&req, io, arena.allocator(), &b);
             http.held_body = null;
             turn.unlock(io);
+            // The body's charge back now, before a kept stream holds the
+            // connection (metal-vmm QUEUE 176.3: ~64 open streams of 1 MiB
+            // posts pinned the whole budget).
+            unchargeSmall(io, charged);
+            charged = 0;
             // A stream the handler kept is route's answer, served here, on
             // this connection's own task, until its client goes away; on an
             // error route has dropped it (metal-vmm QUEUE 157(a)).
@@ -447,6 +471,20 @@ fn neverRead(req: *std.http.Server.Request, arena: std.mem.Allocator) !void {
 /// connections take and give back from their own tasks.
 var slots: body_rule.Slots = .{};
 var slot_readers: [body_rule.upload_slots]?*Progress = @splat(null);
+/// When each slot's upload asked for it, in order (`nextAsk`): of a human's
+/// uploads, the one that asked last is the retry (metal-vmm QUEUE 171's
+/// simulator: two retries waiting took the slot from each other).
+var slot_asked: [body_rule.upload_slots]u64 = @splat(0);
+var asks: u64 = 0;
+
+fn nextAsk(io: Io) u64 {
+    slots_lock.lockUncancelable(io);
+    defer slots_lock.unlock(io);
+    asks += 1;
+    return asks;
+}
+
+const Taken = union(enum) { slot: usize, busy, replaced };
 var slots_lock: Io.Mutex = .init;
 
 /// How long an uploader waits for a slot; a test shortens it.
@@ -457,23 +495,34 @@ pub var slot_wait_for_test_ms: ?u64 = null;
 /// TAKES OVER THEIR OLD ONE** (170.1): the page uploads one at a time, so a
 /// second is a retry, its first most likely a dropped phone's; the first is
 /// ended (409), its slot given back, and taken here.
-fn takeSlot(io: Io, who: u64, progress: *Progress) ?usize {
+fn takeSlot(io: Io, who: u64, progress: *Progress, asked: u64) Taken {
     const most = slot_wait_for_test_ms orelse body_rule.slot_wait_ms;
     var waited: u64 = 0;
     while (true) : (waited += 50) {
         slots_lock.lockUncancelable(io);
         const taken = slots.take(who);
         switch (taken) {
-            .slot => |i| slot_readers[i] = progress,
-            .human_has_one => if (slots.heldBy(who)) |i| if (slot_readers[i]) |old| old.end(.replaced),
+            .slot => |i| {
+                slot_readers[i] = progress;
+                slot_asked[i] = asked;
+            },
+            // A newer upload of theirs holds the slot: this is the stale
+            // retry, told 409; an older one there is taken over.
+            .human_has_one => if (slots.heldBy(who)) |i| {
+                if (slot_asked[i] > asked) {
+                    slots_lock.unlock(io);
+                    return .replaced;
+                }
+                if (slot_readers[i]) |old| old.end(.replaced);
+            },
             .all_busy => {},
         }
         slots_lock.unlock(io);
         switch (taken) {
-            .slot => |i| return i,
-            .all_busy, .human_has_one => if (waited >= most) return null,
+            .slot => |i| return .{ .slot = i },
+            .all_busy, .human_has_one => if (waited >= most) return .busy,
         }
-        sleepMs(io, 50) catch return null;
+        sleepMs(io, 50) catch return .busy;
     }
 }
 
@@ -522,7 +571,12 @@ const Whole = struct {
     state: union(enum) { reading, read: []u8, too_large, unreadable, busy } = .reading,
 
     fn read(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) void {
-        self.state = self.readAll(req, arena) catch .unreadable;
+        // Memory that runs out is the host's busy (503, the client may try
+        // again), never the client's unreadable body (metal-vmm QUEUE 172).
+        self.state = self.readAll(req, arena) catch |e| switch (e) {
+            error.OutOfMemory => .busy,
+            else => .unreadable,
+        };
     }
 
     fn readAll(self: *Whole, req: *std.http.Server.Request, arena: std.mem.Allocator) !@FieldType(Whole, "state") {
@@ -539,12 +593,22 @@ const Whole = struct {
         while (true) {
             const room = if (declared) |n| @min(chunk.len, n - list.items.len) else chunk.len;
             if (room == 0) break;
-            const got = r.readSliceShort(chunk[0..room]) catch return .unreadable;
-            if (got == 0) break;
+            // **WHAT HAS ARRIVED, AS IT ARRIVES** (metal-vmm QUEUE 176.7): a
+            // read that waited to fill 4 KiB made a 100 B/s link a stall.
+            var bufs: [1][]u8 = .{chunk[0..room]};
+            const got = r.readVec(&bufs) catch |e| switch (e) {
+                error.EndOfStream => break,
+                error.ReadFailed => return .unreadable,
+            };
+            if (got == 0) continue; // filled the reader's own buffer: read again
             if (list.items.len + got > self.most) return .too_large;
             if (self.small) {
                 if (!chargeSmall(self.progress.io, got)) return .busy;
                 self.charged.* += got;
+                // **THE CHARGE IS THE MEMORY** (176.5): grown exactly, so the
+                // arena (whose last allocation grows in place) holds what is
+                // charged, not the 2-3x a doubling list would.
+                try list.ensureTotalCapacityPrecise(arena, list.items.len + got);
             }
             try list.appendSlice(arena, chunk[0..got]);
             _ = self.progress.received.fetchAdd(got, .acq_rel);
@@ -706,7 +770,10 @@ const TestSite = struct {
         if (who) |w| if (std.mem.eql(u8, w, "boom")) return error.StoreUnreadable;
         return who;
     }
-    pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, _: *bus.Bus) !?bus.Kept {
+    fn streamFrame(_: []const u8, _: std.mem.Allocator, blob: []const u8) error{OutOfMemory}!?[]const u8 {
+        return blob;
+    }
+    pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *bus.Bus) !?bus.Kept {
         if (std.mem.eql(u8, try http.target(req, alloc), "/upload") and try uploader(req, io, alloc) == null) {
             try req.respond("who are you?\n", .{ .status = .unauthorized, .keep_alive = false });
             return null;
@@ -715,6 +782,19 @@ const TestSite = struct {
         if (std.mem.eql(u8, try http.target(req, alloc), "/refuses")) {
             try http.redirect(req, "/login");
             return null;
+        }
+        // A stream kept after its body was read: the host serves it on.
+        if (std.mem.eql(u8, try http.target(req, alloc), "/stream")) {
+            _ = (try http.readLimitedBody(req, alloc, 64 * 1024)) orelse return null;
+            var held = b.hold(try b.open("test-stream"));
+            defer held.release();
+            var hbuf: [256]u8 = undefined;
+            var body = try @import("webbox").sse.respond(req, &hbuf);
+            try body.flush();
+            held.keep(streamFrame, "");
+            const kept = b.kept;
+            b.kept = null;
+            return kept;
         }
         if (req.head.method == .POST) {
             const cap = bodyLimit(try http.target(req, alloc));
@@ -960,6 +1040,114 @@ test "linux_host: an upload never finished is a 408 at its deadline (metal-vmm Q
     try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 408"));
 }
 
+test "linux_host: a head that is not HTTP is answered 400 and counted, never closed with no answer (metal-vmm QUEUE 172)" {
+    for ([_][]const u8{
+        "NOT HTTP AT ALL\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: twelve\r\n\r\n",
+    }) |raw| {
+        const before = edge.countOf(.head_malformed);
+        const got = try exchange(raw);
+        defer std.testing.allocator.free(got);
+        errdefer std.debug.print("got: {s}\n", .{got});
+        try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 400"));
+        try std.testing.expectEqual(before + 1, edge.countOf(.head_malformed));
+    }
+}
+
+test "linux_host: a body read out of memory is the host's busy (503), never the client's unreadable (400) (metal-vmm QUEUE 172)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    const peer = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const ours = try bench.listener.accept(io);
+    defer ours.close(io);
+    var progress: Progress = .{ .stream = ours, .io = io };
+    var reader: std.Io.Reader = .fixed("POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 2000000\r\n\r\nxxxx");
+    var out_buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var server = std.http.Server.init(&reader, &out);
+    var req = try server.receiveHead();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var charged: u64 = 0;
+    var whole: Whole = .{ .most = 2_000_000, .progress = &progress, .small = false, .charged = &charged };
+    whole.read(&req, failing.allocator());
+    try std.testing.expect(whole.state == .busy);
+}
+
+test "linux_host: an Expect a request cannot meet is answered 417, never no answer; a mixed-case 100-continue is met (metal-vmm QUEUE 175.4)" {
+    for ([_][]const u8{
+        "GET / HTTP/1.1\r\nHost: x\r\nExpect: tea\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\n\r\n",
+    }) |raw| {
+        const got = try exchange(raw);
+        defer std.testing.allocator.free(got);
+        try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 417"));
+    }
+    const got = try exchange("POST / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\nhello");
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n5"));
+}
+
+test "linux_host: a stream kept after its request's body gives the body's charge back when the route returns, not when the stream ends (metal-vmm QUEUE 176.3)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 100);
+    // The stream's head came: the route has returned, the stream is open.
+    var buf: [512]u8 = undefined;
+    var r = c.stream.reader(io, &buf);
+    var head: std.ArrayList(u8) = .empty;
+    defer head.deinit(std.testing.allocator);
+    while (std.mem.indexOf(u8, head.items, "\r\n\r\n") == null) {
+        var one: [1]u8 = undefined;
+        try r.interface.readSliceAll(&one);
+        try head.append(std.testing.allocator, one[0]);
+    }
+    try std.testing.expectEqual(@as(u64, 0), small_held);
+    c.end(io);
+}
+
+test "linux_host: an upload that trickles, a few bytes at a time, is slow, not stalled: a stall is no byte, not no 4 KiB (metal-vmm QUEUE 176.7)" {
+    stall_for_test_ms = 200;
+    defer stall_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 300\r\n\r\n");
+    try c.listen(io);
+    // Ten bytes every 50 ms: 1.5 s in all, never 200 ms without a byte.
+    var w = c.stream.writer(io, &.{});
+    for (0..30) |_| {
+        try w.interface.writeAll("0123456789");
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(50) }, io) catch {};
+    }
+    const done = c.answer.within(io, 3000);
+    c.end(io);
+    try std.testing.expect(done);
+    try std.testing.expect(std.mem.endsWith(u8, c.answer.got(), "\r\n\r\n300"));
+}
+
+test "linux_host: a small body charged as it came gives its charge back when it is refused 408 (metal-vmm QUEUE 176.8)" {
+    deadline_for_test_ms = 200;
+    defer deadline_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    // Forty bytes of a hundred, then nothing: charged forty, then 408.
+    var c = try bench.client("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 40);
+    try c.listen(io);
+    const done = c.answer.within(io, 2000);
+    c.end(io);
+    try std.testing.expect(done);
+    try std.testing.expect(std.mem.startsWith(u8, c.answer.got(), "HTTP/1.1 408"));
+    try std.testing.expectEqual(@as(u64, 0), small_held);
+}
+
 test "linux_host: a stranger's upload is never read: its route refuses it at once, never told to send (metal-vmm QUEUE 169)" {
     const got = try exchange("POST /upload HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2000000\r\n\r\n");
     defer std.testing.allocator.free(got);
@@ -988,6 +1176,31 @@ test "linux_host: a human's new upload takes over their stalled one: the old is 
     try std.testing.expect(std.mem.endsWith(u8, again.answer.got(), "\r\n\r\n10"));
     try std.testing.expect(std.mem.startsWith(u8, first.answer.got(), "HTTP/1.1 409"));
     try std.testing.expectEqual(@as(usize, 0), slots.inUse());
+}
+
+test "linux_host: a human's older retry, still waiting, never takes over their newest upload: it is told 409 (metal-vmm QUEUE 171)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    const ann = body_rule.keyOf("ann");
+    // The older retry asked first; the newest then took the slot.
+    const older = nextAsk(io);
+    const peer = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const ours = try bench.listener.accept(io);
+    defer ours.close(io);
+    var newest: Progress = .{ .stream = ours, .io = io };
+    const held = switch (takeSlot(io, ann, &newest, nextAsk(io))) {
+        .slot => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer giveBackSlot(io, held);
+    slot_wait_for_test_ms = 100;
+    defer slot_wait_for_test_ms = null;
+    var waiting: Progress = .{ .stream = ours, .io = io };
+    try std.testing.expect(takeSlot(io, ann, &waiting, older) == .replaced);
+    try std.testing.expectEqual(Progress.Ended.nothing, newest.ended_by.load(.acquire));
 }
 
 test "linux_host: an upload with no byte for the stall time gives its slot back, a 408 (metal-vmm QUEUE 170.1)" {

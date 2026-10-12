@@ -179,7 +179,24 @@ pub const legacy_names_until_unix: i64 = 1_794_700_800;
 /// past the planned deploy. A value issued after it, before the deploy, is
 /// read as no one (its visitor signs in again), so a release after this day
 /// moves it first.
+///
+/// **ACCEPTED** (metal-vmm QUEUE 176.9): a sibling subdomain can still plant a
+/// legacy value issued BEFORE the cutoff on a visitor with no `__Host-` cookie
+/// yet, and it is moved to the new name. The cutoff narrows that; the end
+/// date ends it.
 pub const legacy_issued_before_unix: i64 = 1_791_936_000;
+
+/// **THE CLOCK THE END DATE IS READ BY** (metal-vmm QUEUE 176.1): the real one,
+/// but in the tests a fixed day before the end date, so the migration's tests
+/// do not go red on 2026-11-15 with no change. A test of the end itself sets
+/// it; `legacy names have ended` below is the one test that fails that day,
+/// saying what to delete.
+pub var names_clock_for_test: ?i64 = if (@import("builtin").is_test) legacy_names_until_unix - 30 * 86_400 else null;
+
+/// The time the legacy names' end date is judged by, given the real one.
+pub fn namesNow(real_now: i64) i64 {
+    return names_clock_for_test orelse real_now;
+}
 
 pub fn cookieOrLegacy(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8, legacy: []const u8, now_unix: i64) !Named {
     const current = try cookie(req, alloc, name);
@@ -383,7 +400,10 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
             try edge.reject(req, .body_too_large, "request body too large\n");
             return null;
         },
-        else => {
+        // Memory that runs out is the server's (a 500 the host logs), never
+        // the client's malformed body (metal-vmm QUEUE 172).
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ReadFailed => {
             try edge.reject(req, .body_unreadable, "read body\n");
             return null;
         },
@@ -541,4 +561,25 @@ test "head_bytes: a request head of exactly head_bytes is received, one byte mor
     const pad = "p" ** (head_bytes - start.len - end.len);
     try receiveThroughHostBuffer(start ++ pad ++ end);
     try testing.expectError(error.HttpHeadersOversize, receiveThroughHostBuffer(start ++ pad ++ "p" ++ end));
+}
+
+test "readLimitedBody: memory that runs out is the server's error, never the client's 400 'read body' (metal-vmm QUEUE 172)" {
+    var reader: std.Io.Reader = .fixed("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+    var out_buf: [512]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var server = std.http.Server.init(&reader, &out);
+    var req = try server.receiveHead();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, readLimitedBody(&req, failing.allocator(), 100));
+    try std.testing.expectEqual(@as(usize, 0), out.end);
+}
+
+test "the legacy names have ended on 2026-11-15: delete the migration, its tests, and the judges' legacy steps (metal-vmm QUEUE 176.1)" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const real: i64 = @intCast(@divFloor(std.Io.Clock.now(.real, threaded.io()).nanoseconds, std.time.ns_per_s));
+    if (real >= legacy_names_until_unix) {
+        std.debug.print("the legacy cookie names ended on 2026-11-15: delete http.cookieOrLegacy's legacy branch, users' session move, uid_cookie's unsigned window, their tests, and gopher-metal probe/judge_gopher.py's legacy steps\n", .{});
+        return error.LegacyNamesHaveEnded;
+    }
 }

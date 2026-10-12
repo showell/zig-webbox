@@ -51,6 +51,9 @@ pub fn push(body: *std.http.BodyWriter, bytes: []const u8) !void {
 /// verbatim. Live only: a page rendered by the server is its backlog, and a
 /// published blob is already the JSON its client parses.
 pub fn forward(req: *Request, bus: *Bus, key: []const u8) !void {
+    // A stream is a GET's (metal-vmm QUEUE 176.3): a POST's body would be
+    // charged and read for nothing, and held as long as the stream is.
+    if (req.head.method != .GET) return http.methodNotAllowed(req);
     const sub = try bus.open(key);
     var held = bus.hold(sub);
     defer held.release();
@@ -64,8 +67,8 @@ pub fn forward(req: *Request, bus: *Bus, key: []const u8) !void {
     held.keep(renderForward, "");
 }
 
-fn renderForward(_: []const u8, arena: Alloc, blob: []const u8) ?[]const u8 {
-    return std.fmt.allocPrint(arena, "data: {s}\n\n", .{blob}) catch null;
+fn renderForward(_: []const u8, arena: Alloc, blob: []const u8) Alloc.Error!?[]const u8 {
+    return try std.fmt.allocPrint(arena, "data: {s}\n\n", .{blob});
 }
 
 /// **WHERE A STREAM RESUMES**, from the request: its Last-Event-ID (a
@@ -110,7 +113,7 @@ test "resumeAt: Last-Event-ID resumes after n; ?since resumes at n; junk falls t
 test "forward's frame: a blob as one data frame, verbatim" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("data: {\"x\":1}\n\n", renderForward("", arena.allocator(), "{\"x\":1}").?);
+    try testing.expectEqualStrings("data: {\"x\":1}\n\n", (try renderForward("", arena.allocator(), "{\"x\":1}")).?);
 }
 
 test "push: a frame is on the connection the moment push returns, not left in a buffer" {

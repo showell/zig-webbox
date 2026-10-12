@@ -66,7 +66,7 @@ pub const Invalid = enum {
 pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Reading {
     var one: [1][]const u8 = undefined;
     const named: http.Named = if (c.legacy_name) |old|
-        try http.cookieOrLegacy(req, alloc, c.name, old, now)
+        try http.cookieOrLegacy(req, alloc, c.name, old, http.namesNow(now))
     else
         .{ .values = try http.cookie(req, alloc, c.name), .legacy = false };
     const values: []const []const u8 = switch (named.values) {
