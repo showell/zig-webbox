@@ -365,8 +365,9 @@ const Progress = struct {
     }
 };
 
-/// The request's body read into `arena`, before the turn, and the request
-/// left to its handler as if it had not been: the head copied out of the
+/// The request's body read into memory from `gpa` (its slice left in
+/// `owned`, the caller's to free; the head is copied into `arena`), before
+/// the turn, and the request left to its handler as if it had not been: the head copied out of the
 /// read buffer (a body read reuses it), the body served from memory under
 /// a plain Content-Length (and handed over as it is: `http.held_body`).
 fn readWhole(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?[]u8, req: *std.http.Server.Request, plan: body_rule.Read, upload: bool, progress: *Progress, charged: *u64) !Got {
