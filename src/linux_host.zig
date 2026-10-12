@@ -324,7 +324,16 @@ pub fn Server(comptime S: type) type {
             // A stream the handler kept is route's answer, served here, on
             // this connection's own task, until its client goes away; on an
             // error route has dropped it (metal-vmm QUEUE 157(a)).
-            if (try routed) |kept| bus.serveKept(hub, kept, &sw.interface);
+            // **AT MOST `streams_most` HELD** (metal-vmm QUEUE 184): each
+            // held a task and its buffers for as long as its client stayed,
+            // with no count; a member could open them until no thread was
+            // left. One more ends the oldest, as the kernel's do: a browser
+            // whose stream ends reconnects and resumes.
+            if (try routed) |kept| {
+                const held_stream = holdStream(io, stream);
+                defer letGoStream(io, held_stream);
+                bus.serveKept(hub, kept, &sw.interface);
+            }
         }
     };
 }
@@ -449,6 +458,57 @@ fn readWhole(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?
 }
 
 const Raced = union(enum) { read: void, watch: void };
+
+/// The most streams held at once (184), as the kernel's default, and a test's own.
+pub const streams_most: usize = 64;
+pub var streams_most_for_test: ?usize = null;
+var held_streams: [streams_most]?struct { stream: net.Stream, since: u64 } = @splat(null);
+var held_lock: Io.Mutex = .init;
+var held_count: u64 = 0;
+
+const Held = struct { slot: usize, ticket: u64 };
+
+/// A slot for a stream about to be served; the oldest ended to make room.
+fn holdStream(io: Io, stream: net.Stream) Held {
+    held_lock.lockUncancelable(io);
+    defer held_lock.unlock(io);
+    const most = @min(streams_most_for_test orelse streams_most, streams_most);
+    held_count += 1;
+    var free: ?usize = null;
+    var oldest: usize = 0;
+    for (held_streams[0..most], 0..) |h, i| {
+        if (h) |x| {
+            if (held_streams[oldest] == null or x.since < held_streams[oldest].?.since) oldest = i;
+        } else if (free == null) free = i;
+    }
+    const i = free orelse at: {
+        // Its socket shut: its writes fail, and its task lets the slot go.
+        held_streams[oldest].?.stream.shutdown(io, .both) catch {};
+        break :at oldest;
+    };
+    held_streams[i] = .{ .stream = stream, .since = held_count };
+    return .{ .slot = i, .ticket = held_count };
+}
+
+/// A stream's slot given back, unless a newer stream has taken it.
+fn letGoStream(io: Io, h: Held) void {
+    held_lock.lockUncancelable(io);
+    defer held_lock.unlock(io);
+    if (held_streams[h.slot]) |x| if (x.since == h.ticket) {
+        held_streams[h.slot] = null;
+    };
+}
+
+/// How many streams are held now, for tests.
+fn heldStreams(io: Io) usize {
+    held_lock.lockUncancelable(io);
+    defer held_lock.unlock(io);
+    var n: usize = 0;
+    for (held_streams) |h| if (h != null) {
+        n += 1;
+    };
+    return n;
+}
 
 /// The most a request's head may take to arrive whole (184), and a test's own.
 pub const head_ms: u64 = 10_000;
@@ -1583,4 +1643,46 @@ test "linux_host: a request head not finished within its deadline is a 408, coun
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "linux_host: at most streams_most streams are held: one more ends the oldest, as the kernel does (metal-vmm QUEUE 184)" {
+    streams_most_for_test = 2;
+    defer streams_most_for_test = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var clients: [3]@TypeOf(try bench.client("")) = undefined;
+    for (&clients, 0..) |*c, k| {
+        c.* = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nx");
+        // Each held before the next opens, so the first is the oldest.
+        var buf: [512]u8 = undefined;
+        var r = c.stream.reader(io, &buf);
+        var seen: usize = 0;
+        var tail: [4]u8 = @splat(0);
+        while (!std.mem.eql(u8, &tail, "\r\n\r\n")) : (seen += 1) {
+            var one: [1]u8 = undefined;
+            try r.interface.readSliceAll(&one);
+            std.mem.copyForwards(u8, tail[0..3], tail[1..4]);
+            tail[3] = one[0];
+        }
+        var waited: u32 = 0;
+        while (heldStreams(io) < @min(k + 1, 2) and waited < 2000) : (waited += 10) {
+            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+        }
+    }
+    defer for (&clients) |*c| c.end(io);
+    // The first's connection is ended: its read meets the end.
+    var buf: [64]u8 = undefined;
+    var r = clients[0].stream.reader(io, &buf);
+    var ended = false;
+    var waited: u32 = 0;
+    while (!ended and waited < 3000) : (waited += 1) {
+        var one: [1]u8 = undefined;
+        r.interface.readSliceAll(&one) catch {
+            ended = true;
+        };
+    }
+    try std.testing.expect(ended);
+    try std.testing.expectEqual(@as(usize, 2), heldStreams(io));
 }
