@@ -141,8 +141,9 @@ pub const Read = struct {
 
 /// **THE ONE EXPECTATION MET, MADE STD'S EXACT ONE**: std answers
 /// `100-continue` only as it is spelled, and refuses `100-Continue` with no
-/// answer at all. Each host calls it once a plan is not refused, with a
-/// body or without (metal-vmm QUEUE 175.4, 180.7).
+/// answer at all. site.zig's `route` calls it for every host, so no host can
+/// route one unmet; a host that answers 100 itself before the turn (Linux,
+/// reading a body first) calls it then too (metal-vmm QUEUE 175.4, 180.7).
 pub fn meetExpectation(head: *Head) void {
     if (head.expect) |e| if (std.ascii.eqlIgnoreCase(e, "100-continue")) {
         head.expect = "100-continue";
@@ -157,7 +158,7 @@ pub fn plan(head: *const Head, cap: u64) Plan {
     };
     // **AN EXPECTATION NOT MET IS A 417, FROM THE HEAD** (metal-vmm QUEUE 170.4,
     // 175.4, 177.4, 180.7): 100-continue in any case is met, with a body or
-    // without (the host makes it std's exact one, `meetExpectation`, and std
+    // without (site.zig's route makes it std's exact one, `meetExpectation`, for every host, and std
     // writes the 100 and then the answer); any other is refused.
     if (head.expect) |e| if (!std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .refused = .expectation_failed };
     const bytes = switch (f) {

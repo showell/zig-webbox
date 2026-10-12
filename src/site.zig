@@ -123,6 +123,11 @@ pub fn Site(comptime App: type) type {
         }
 
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
+            // **100-continue IN ANY CASE IS MET HERE, FOR EVERY HOST** (180.6's
+            // review): the body rule takes it, std answers only the exact
+            // spelling, and a host that routed it as sent answered nothing.
+            // A refused expectation never reaches here (the host's 417).
+            @import("body.zig").meetExpectation(&req.head);
             var sent: Sent = undefined;
             // Small, on the stack: only a chunk's header is formatted in place, and
             // anything longer passes straight to the connection's own buffer.
@@ -315,6 +320,44 @@ test "site: a stream a handler kept and then failed is dropped, and a kept one i
     try testing.expect(b.kept == null);
     bus.drop(&hub, k);
     try testing.expectEqual(@as(usize, 0), hub.entries.items.len);
+}
+
+test "site: a bodiless request expecting 100-Continue in any case is answered, on every host (metal-vmm QUEUE 180.6's review)" {
+    // The body rule takes 100-continue in any case (body.plan), and std
+    // answers only its exact spelling: a host that routed it without the
+    // rewrite answered nothing at all (metal's did). So route makes it, for
+    // every host. Both sides: the exact spelling, and another case.
+    const App = struct {
+        pub const StartReport = struct {};
+        pub fn setup(_: Io, _: std.mem.Allocator, _: ?Roots) !StartReport {
+            return .{};
+        }
+        pub fn bodyLimit(_: []const u8) u64 {
+            return 0;
+        }
+        pub fn routes(req: *std.http.Server.Request, _: Io, _: std.mem.Allocator, _: *Bus) !void {
+            try req.respond("hello", .{ .keep_alive = false });
+        }
+    };
+    const Served = Site(App);
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var hub = bus.Hub.init(threaded.io(), testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+    for ([_][]const u8{ "100-continue", "100-Continue" }) |spelled| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        const raw = try std.fmt.allocPrint(testing.allocator, "GET / HTTP/1.1\r\nHost: x\r\nExpect: {s}\r\n\r\n", .{spelled});
+        defer testing.allocator.free(raw);
+        var reader: std.Io.Reader = .fixed(raw);
+        var server = std.http.Server.init(&reader, &out.writer);
+        var req = try server.receiveHead();
+        var b = Bus.of(&hub);
+        try testing.expect((try Served.route(&req, threaded.io(), testing.allocator, &b)) == null);
+        try out.writer.flush();
+        try testing.expect(std.mem.indexOf(u8, out.written(), "HTTP/1.1 200") != null);
+        try testing.expect(std.mem.endsWith(u8, out.written(), "hello"));
+    }
 }
 
 test "site: an application's failure is a 500 that names nothing, a malformed form a 400, and success what it answered" {
