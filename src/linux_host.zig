@@ -227,7 +227,30 @@ pub fn Server(comptime S: type) type {
             var arena = std.heap.ArenaAllocator.init(alloc);
             defer arena.deinit();
 
-            var req = server.receiveHead() catch |e| switch (e) {
+            // **THE HEAD HAS A DEADLINE TOO** (metal-vmm QUEUE 184): a client
+            // that connected and sent nothing, or a head a byte at a time,
+            // held its task for ever (the body's deadline came only after).
+            // The read races `watch`, as a body's does.
+            var head_progress: Progress = .{ .stream = stream, .io = io };
+            var head_read: HeadRead = .{ .server = &server };
+            {
+                var buffer: [2]Raced = undefined;
+                var race: Io.Select(Raced) = .init(io, &buffer);
+                if (race.concurrent(.read, HeadRead.run, .{&head_read})) |_| {
+                    if (race.concurrent(.watch, watch, .{ io, &head_progress, head_for_test_ms orelse head_ms, null })) |_| {
+                        _ = race.await() catch {};
+                    } else |_| head_progress.end(.deadline);
+                    race.cancelDiscard();
+                } else |_| head_read.run(); // no task for it: read here, as before
+            }
+            if (head_progress.ended_by.load(.acquire) == .deadline) {
+                edge.count(.head_too_slow);
+                sw.interface.writeAll("HTTP/1.1 408 Request Timeout\r\n" ++
+                    "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
+                sw.interface.flush() catch {};
+                return;
+            }
+            var req = head_read.got.? catch |e| switch (e) {
                 error.HttpConnectionClosing => return,
                 // A request head larger than read_buf. Count it (the
                 // guaranteed observable) and best-effort a 431 before
@@ -426,6 +449,19 @@ fn readWhole(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?
 }
 
 const Raced = union(enum) { read: void, watch: void };
+
+/// The most a request's head may take to arrive whole (184), and a test's own.
+pub const head_ms: u64 = 10_000;
+pub var head_for_test_ms: ?u64 = null;
+
+/// A request head read, beside its watchdog.
+const HeadRead = struct {
+    server: *std.http.Server,
+    got: ?(std.http.Server.ReceiveHeadError!std.http.Server.Request) = null,
+    fn run(h: *HeadRead) void {
+        h.got = h.server.receiveHead();
+    }
+};
 
 /// **A READ IS NAMED BY HOW IT ENDED** (170.7): whole is whole, whatever
 /// fired beside it; one ended from outside by why; else its own end (too
@@ -1518,5 +1554,33 @@ test "linux_host: a small body's read holds no more memory than it charged (meta
     if (peak.over) |o| {
         std.debug.print("held {d} bytes while {d} were charged\n", .{ o.held, o.charged });
         return error.TestUnexpectedResult;
+    }
+}
+
+test "linux_host: a request head not finished within its deadline is a 408, counted, and one finished just before it is served (metal-vmm QUEUE 184)" {
+    head_for_test_ms = 400;
+    defer head_for_test_ms = null;
+    tick_for_test_ms = 50;
+    defer tick_for_test_ms = null;
+    for ([_]struct { rest_after_ms: ?i64, want: []const u8 }{ .{ .rest_after_ms = 200, .want = "HTTP/1.1 200" }, .{ .rest_after_ms = null, .want = "HTTP/1.1 408" } }) |c| {
+        var bench: Bench = undefined;
+        try bench.init();
+        defer bench.deinit();
+        const io = bench.threaded.io();
+        // Half a head, then (or never) the rest.
+        var half = try bench.client("GET / HTTP/1.1\r\nHo");
+        try half.listen(io);
+        if (c.rest_after_ms) |ms| {
+            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(ms) }, io) catch {};
+            var w = half.stream.writer(io, &.{});
+            try w.interface.writeAll("st: x\r\n\r\n");
+        }
+        const answered = half.answer.within(io, 3000);
+        half.end(io);
+        try std.testing.expect(answered);
+        if (!std.mem.startsWith(u8, half.answer.got(), c.want)) {
+            std.debug.print("the rest after {?d} ms: told {s}\n", .{ c.rest_after_ms, half.answer.got()[0..@min(12, half.answer.got().len)] });
+            return error.TestUnexpectedResult;
+        }
     }
 }

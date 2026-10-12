@@ -38,6 +38,7 @@ const Request = std.http.Server.Request;
 pub const RejectKind = enum {
     header_too_large, // request head exceeded the host's read buffer
     head_malformed, // a request head that is not HTTP (metal-vmm QUEUE 172)
+    head_too_slow, // a request head not whole within the host's deadline (metal-vmm QUEUE 184)
     body_too_large, // request body (or an uploaded image) exceeded its cap
     body_unreadable, // body framing was malformed / unreadable
     body_too_slow, // a body not whole within the host's deadline (body.zig)
@@ -67,7 +68,7 @@ pub fn statusFor(kind: RejectKind) std.http.Status {
     return switch (kind) {
         .header_too_large => .request_header_fields_too_large, // 431
         .body_too_large => .payload_too_large, // 413
-        .body_too_slow => .request_timeout, // 408
+        .body_too_slow, .head_too_slow => .request_timeout, // 408
         .head_malformed, .body_unreadable, .body_framed_twice, .malformed_markdown, .malformed_multipart => .bad_request, // 400
         .no_deadline, .uploads_busy => .service_unavailable, // 503
         .body_length_required => .length_required, // 411
