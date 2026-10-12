@@ -80,11 +80,13 @@ pub fn readResume(req: *Request, alloc: Alloc) !usize {
 /// The decision, pure: a parseable Last-Event-ID wins (a reconnect resumes
 /// AFTER the last frame delivered: n+1); else a parseable `?since=N` (a first
 /// load resumes AT n); else 0. A malformed source falls through to the next,
-/// so a junk Last-Event-ID doesn't strand a valid `?since`.
+/// so a junk Last-Event-ID doesn't strand a valid `?since`. **n+1 SATURATES**:
+/// the header is the client's, and its largest value must resume past
+/// everything, not overflow (a panic halts the served machine).
 pub fn resumeAt(last_event_id: ?[]const u8, since_q: ?[]const u8) usize {
     if (last_event_id) |lei| {
         const t = std.mem.trim(u8, lei, " \t");
-        if (std.fmt.parseInt(usize, t, 10)) |n| return n + 1 else |_| {}
+        if (std.fmt.parseInt(usize, t, 10)) |n| return n +| 1 else |_| {}
     }
     if (since_q) |q| {
         if (std.fmt.parseInt(usize, q, 10)) |n| return n else |_| {}
@@ -108,6 +110,15 @@ test "resumeAt: Last-Event-ID resumes after n; ?since resumes at n; junk falls t
     try testing.expectEqual(@as(usize, 5), resumeAt("garbage", "5"));
     // both unparseable → 0
     try testing.expectEqual(@as(usize, 0), resumeAt("x", "y"));
+}
+
+test "resumeAt: the largest Last-Event-ID resumes past everything, never overflows (a panic of the served machine)" {
+    // Its edge, both sides: one under the most is +1; the most itself stays
+    // the most. Before, any member's stream with this header halted the site.
+    try testing.expectEqual(@as(usize, std.math.maxInt(usize)), resumeAt("18446744073709551614", null));
+    try testing.expectEqual(@as(usize, std.math.maxInt(usize)), resumeAt("18446744073709551615", null));
+    // One past what a usize holds does not parse: it falls through to ?since.
+    try testing.expectEqual(@as(usize, 5), resumeAt("18446744073709551616", "5"));
 }
 
 test "forward's frame: a blob as one data frame, verbatim" {
