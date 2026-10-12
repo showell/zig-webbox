@@ -353,9 +353,11 @@ pub fn notFound(req: *std.http.Server.Request) !void {
     try req.respond("not found\n", .{ .status = .not_found });
 }
 
-pub fn methodNotAllowed(req: *std.http.Server.Request) !void {
+/// A 405, naming the one method the route takes (metal-vmm QUEUE 177.6: a
+/// 405 must say what is allowed, RFC 9110 15.5.6).
+pub fn methodNotAllowed(req: *std.http.Server.Request, allow: std.http.Method) !void {
     declineExpectation(req);
-    try req.respond("method not allowed\n", .{ .status = .method_not_allowed });
+    try req.respond("method not allowed\n", .{ .status = .method_not_allowed, .extra_headers = &.{.{ .name = "allow", .value = @tagName(allow) }} });
 }
 
 /// readLimitedBody reads the request body capped at `max` bytes. On success
@@ -582,4 +584,16 @@ test "the legacy names have ended on 2026-11-15: delete the migration, its tests
         std.debug.print("the legacy cookie names ended on 2026-11-15: delete http.cookieOrLegacy's legacy branch, users' session move, uid_cookie's unsigned window, their tests, and gopher-metal probe/judge_gopher.py's legacy steps\n", .{});
         return error.LegacyNamesHaveEnded;
     }
+}
+
+test "methodNotAllowed is a 405 that names the method allowed (RFC 9110 15.5.6; metal-vmm QUEUE 177.6)" {
+    var out_buf: [512]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var reader: std.Io.Reader = .fixed("DELETE /x HTTP/1.1\r\nHost: x\r\n\r\n");
+    var server = std.http.Server.init(&reader, &out);
+    var req = try server.receiveHead();
+    try methodNotAllowed(&req, .POST);
+    const got = out.buffered();
+    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 405"));
+    try testing.expect(std.mem.indexOf(u8, got, "\r\nallow: POST\r\n") != null);
 }
