@@ -145,7 +145,11 @@ pub fn plan(head: *const Head, cap: u64) Plan {
         .refused => |r| return .{ .refused = r },
         .framing => |f| f,
     };
-    if (f != .none) if (head.expect) |e| if (!std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .refused = .expectation_failed };
+    // **AN EXPECTATION NOT MET IS A 417, FROM THE HEAD** (metal-vmm QUEUE 170.4,
+    // 175.4): only 100-continue, in any case, and only for a body; on a
+    // request with none there is nothing to continue, and std would refuse
+    // to answer it at all.
+    if (head.expect) |e| if (f == .none or !std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .refused = .expectation_failed };
     const bytes = switch (f) {
         .none => return .none,
         .length => |n| if (n > cap) return .{ .refused = .too_large } else n,
@@ -277,6 +281,21 @@ test "framing: a method without a body has none; both framings are refused" {
     try testing.expectEqual(Framing.chunked, framing(&h).framing);
     h = try headOf("POST / HTTP/1.1\r\n\r\n");
     try testing.expectEqual(Framing.none, framing(&h).framing);
+}
+
+test "plan: an Expect on a request with no body is 417, whatever it asks; with a body only 100-continue is met (metal-vmm QUEUE 175.4)" {
+    for ([_][]const u8{
+        "GET / HTTP/1.1\r\nExpect: tea\r\n\r\n",
+        "GET / HTTP/1.1\r\nExpect: 100-continue\r\n\r\n",
+        "GET / HTTP/1.1\r\nExpect: 100-Continue\r\n\r\n",
+        "POST / HTTP/1.1\r\nExpect: 100-continue\r\n\r\n",
+        "POST / HTTP/1.1\r\nExpect: tea\r\nContent-Length: 5\r\n\r\n",
+    }) |raw| {
+        const h = try headOf(raw);
+        try testing.expectEqual(Refusal.expectation_failed, plan(&h, 100).refused);
+    }
+    const h = try headOf("POST / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\n");
+    try testing.expectEqual(@as(u64, 5), plan(&h, 100).small.bytes);
 }
 
 test "plan: past the cap is refused, unread; the cap itself is read" {

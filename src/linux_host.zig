@@ -159,6 +159,12 @@ pub fn Server(comptime S: type) type {
                 .small => |r| .{ r, false },
                 .upload => |r| .{ r, true },
             };
+            // The one expectation met, in any case (the rule's reading):
+            // std's own check is exact, and would refuse `100-Continue` with
+            // no answer (metal-vmm QUEUE 175.4).
+            if (req.head.expect) |e| if (std.ascii.eqlIgnoreCase(e, "100-continue")) {
+                req.head.expect = "100-continue";
+            };
             if (upload) {
                 const who = (try S.uploader(req, io, arena)) orelse {
                     try neverRead(req, arena);
@@ -1036,6 +1042,20 @@ test "linux_host: a body read out of memory is the host's busy (503), never the 
     var whole: Whole = .{ .most = 2_000_000, .progress = &progress, .small = false, .charged = &charged };
     whole.read(&req, failing.allocator());
     try std.testing.expect(whole.state == .busy);
+}
+
+test "linux_host: an Expect a request cannot meet is answered 417, never no answer; a mixed-case 100-continue is met (metal-vmm QUEUE 175.4)" {
+    for ([_][]const u8{
+        "GET / HTTP/1.1\r\nHost: x\r\nExpect: tea\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\n\r\n",
+    }) |raw| {
+        const got = try exchange(raw);
+        defer std.testing.allocator.free(got);
+        try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 417"));
+    }
+    const got = try exchange("POST / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\nhello");
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n5"));
 }
 
 test "linux_host: a stranger's upload is never read: its route refuses it at once, never told to send (metal-vmm QUEUE 169)" {
