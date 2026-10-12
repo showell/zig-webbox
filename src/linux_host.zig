@@ -291,6 +291,11 @@ pub fn Server(comptime S: type) type {
             const routed = S.route(&req, io, arena.allocator(), &b);
             http.held_body = null;
             turn.unlock(io);
+            // The body's charge back now, before a kept stream holds the
+            // connection (metal-vmm QUEUE 176.3: ~64 open streams of 1 MiB
+            // posts pinned the whole budget).
+            unchargeSmall(io, charged);
+            charged = 0;
             // A stream the handler kept is route's answer, served here, on
             // this connection's own task, until its client goes away; on an
             // error route has dropped it (metal-vmm QUEUE 157(a)).
@@ -754,7 +759,10 @@ const TestSite = struct {
         if (who) |w| if (std.mem.eql(u8, w, "boom")) return error.StoreUnreadable;
         return who;
     }
-    pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, _: *bus.Bus) !?bus.Kept {
+    fn streamFrame(_: []const u8, _: std.mem.Allocator, blob: []const u8) error{OutOfMemory}!?[]const u8 {
+        return blob;
+    }
+    pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *bus.Bus) !?bus.Kept {
         if (std.mem.eql(u8, try http.target(req, alloc), "/upload") and try uploader(req, io, alloc) == null) {
             try req.respond("who are you?\n", .{ .status = .unauthorized, .keep_alive = false });
             return null;
@@ -763,6 +771,19 @@ const TestSite = struct {
         if (std.mem.eql(u8, try http.target(req, alloc), "/refuses")) {
             try http.redirect(req, "/login");
             return null;
+        }
+        // A stream kept after its body was read: the host serves it on.
+        if (std.mem.eql(u8, try http.target(req, alloc), "/stream")) {
+            _ = (try http.readLimitedBody(req, alloc, 64 * 1024)) orelse return null;
+            var held = b.hold(try b.open("test-stream"));
+            defer held.release();
+            var hbuf: [256]u8 = undefined;
+            var body = try @import("sse.zig").respond(req, &hbuf);
+            try body.flush();
+            held.keep(streamFrame, "");
+            const kept = b.kept;
+            b.kept = null;
+            return kept;
         }
         if (req.head.method == .POST) {
             const cap = bodyLimit(try http.target(req, alloc));
@@ -1056,6 +1077,26 @@ test "linux_host: an Expect a request cannot meet is answered 417, never no answ
     const got = try exchange("POST / HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\nhello");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\n5"));
+}
+
+test "linux_host: a stream kept after its request's body gives the body's charge back when the route returns, not when the stream ends (metal-vmm QUEUE 176.3)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 100);
+    // The stream's head came: the route has returned, the stream is open.
+    var buf: [512]u8 = undefined;
+    var r = c.stream.reader(io, &buf);
+    var head: std.ArrayList(u8) = .empty;
+    defer head.deinit(std.testing.allocator);
+    while (std.mem.indexOf(u8, head.items, "\r\n\r\n") == null) {
+        var one: [1]u8 = undefined;
+        try r.interface.readSliceAll(&one);
+        try head.append(std.testing.allocator, one[0]);
+    }
+    try std.testing.expectEqual(@as(u64, 0), small_held);
+    c.end(io);
 }
 
 test "linux_host: a stranger's upload is never read: its route refuses it at once, never told to send (metal-vmm QUEUE 169)" {
