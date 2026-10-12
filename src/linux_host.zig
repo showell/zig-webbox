@@ -592,12 +592,22 @@ const Whole = struct {
         while (true) {
             const room = if (declared) |n| @min(chunk.len, n - list.items.len) else chunk.len;
             if (room == 0) break;
-            const got = r.readSliceShort(chunk[0..room]) catch return .unreadable;
-            if (got == 0) break;
+            // **WHAT HAS ARRIVED, AS IT ARRIVES** (metal-vmm QUEUE 176.7): a
+            // read that waited to fill 4 KiB made a 100 B/s link a stall.
+            var bufs: [1][]u8 = .{chunk[0..room]};
+            const got = r.readVec(&bufs) catch |e| switch (e) {
+                error.EndOfStream => break,
+                error.ReadFailed => return .unreadable,
+            };
+            if (got == 0) continue; // filled the reader's own buffer: read again
             if (list.items.len + got > self.most) return .too_large;
             if (self.small) {
                 if (!chargeSmall(self.progress.io, got)) return .busy;
                 self.charged.* += got;
+                // **THE CHARGE IS THE MEMORY** (176.5): grown exactly, so the
+                // arena (whose last allocation grows in place) holds what is
+                // charged, not the 2-3x a doubling list would.
+                try list.ensureTotalCapacityPrecise(arena, list.items.len + got);
             }
             try list.appendSlice(arena, chunk[0..got]);
             _ = self.progress.received.fetchAdd(got, .acq_rel);
@@ -1097,6 +1107,44 @@ test "linux_host: a stream kept after its request's body gives the body's charge
     }
     try std.testing.expectEqual(@as(u64, 0), small_held);
     c.end(io);
+}
+
+test "linux_host: an upload that trickles, a few bytes at a time, is slow, not stalled: a stall is no byte, not no 4 KiB (metal-vmm QUEUE 176.7)" {
+    stall_for_test_ms = 200;
+    defer stall_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c = try bench.client("POST /upload HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 300\r\n\r\n");
+    try c.listen(io);
+    // Ten bytes every 50 ms: 1.5 s in all, never 200 ms without a byte.
+    var w = c.stream.writer(io, &.{});
+    for (0..30) |_| {
+        try w.interface.writeAll("0123456789");
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(50) }, io) catch {};
+    }
+    const done = c.answer.within(io, 3000);
+    c.end(io);
+    try std.testing.expect(done);
+    try std.testing.expect(std.mem.endsWith(u8, c.answer.got(), "\r\n\r\n300"));
+}
+
+test "linux_host: a small body charged as it came gives its charge back when it is refused 408 (metal-vmm QUEUE 176.8)" {
+    deadline_for_test_ms = 200;
+    defer deadline_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    // Forty bytes of a hundred, then nothing: charged forty, then 408.
+    var c = try bench.client("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 40);
+    try c.listen(io);
+    const done = c.answer.within(io, 2000);
+    c.end(io);
+    try std.testing.expect(done);
+    try std.testing.expect(std.mem.startsWith(u8, c.answer.got(), "HTTP/1.1 408"));
+    try std.testing.expectEqual(@as(u64, 0), small_held);
 }
 
 test "linux_host: a stranger's upload is never read: its route refuses it at once, never told to send (metal-vmm QUEUE 169)" {
