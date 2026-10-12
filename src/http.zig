@@ -175,9 +175,11 @@ pub const legacy_names_until_unix: i64 = 1_794_700_800;
 /// site issues only `__Host-` names from its move on, so a legacy-named value
 /// signed later came from somewhere else (a sibling subdomain), and is not
 /// read, nor moved to the new name (which would outlive the end date). Set
-/// to the day the move deploys: 2026-10-12. A value issued after it, before
-/// the deploy, is read as no one (its visitor signs in again).
-pub const legacy_issued_before_unix: i64 = 1_791_763_200;
+/// on or after the day the move deploys: 2026-10-14 00:00 UTC, two days
+/// past the planned deploy. A value issued after it, before the deploy, is
+/// read as no one (its visitor signs in again), so a release after this day
+/// moves it first.
+pub const legacy_issued_before_unix: i64 = 1_791_936_000;
 
 pub fn cookieOrLegacy(req: *std.http.Server.Request, alloc: std.mem.Allocator, name: []const u8, legacy: []const u8, now_unix: i64) !Named {
     const current = try cookie(req, alloc, name);
