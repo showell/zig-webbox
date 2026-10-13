@@ -37,6 +37,10 @@ pub const bus = @import("bus.zig");
 pub const sse = @import("sse.zig");
 /// The counting allocator under everything long-lived: live bytes, for leaks.
 pub const mem_meter = @import("mem_meter.zig");
+/// Shale, the script language for a site's own data (metal-vmm QUEUE 199):
+/// `script.run` parses and runs one script inside its budgets, every effect
+/// through `store`.
+pub const script = @import("script/script.zig");
 /// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
@@ -55,6 +59,7 @@ pub const client_address = @import("client_address.zig");
 pub const free_space = @import("free_space.zig");
 
 test {
+    _ = script;
     _ = site;
     _ = body;
     _ = http;
