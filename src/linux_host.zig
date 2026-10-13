@@ -1243,6 +1243,10 @@ test "linux_host: an Expect a request cannot meet is answered 417, never no answ
 }
 
 test "linux_host: a stream kept after its request's body gives the body's charge back when the route returns, not when the stream ends (metal-vmm QUEUE 176.3)" {
+    // A kept stream notices its client has gone on the ping that fails to
+    // send: pinged every 200 ms, not every 25 s, the test's end is not a wait.
+    bus.Subscriber.keepalive_ms = 200;
+    defer bus.Subscriber.keepalive_ms = bus.Subscriber.keepalive_s * std.time.ms_per_s;
     var bench: Bench = undefined;
     try bench.init();
     defer bench.deinit();
@@ -1647,6 +1651,10 @@ test "linux_host: a request head not finished within its deadline is a 408, coun
 }
 
 test "linux_host: at most streams_most streams are held: one more ends the oldest, as the kernel does (metal-vmm QUEUE 184)" {
+    // A kept stream notices its client has gone on the ping that fails to
+    // send: pinged every 200 ms, not every 25 s, the test's end is not a wait.
+    bus.Subscriber.keepalive_ms = 200;
+    defer bus.Subscriber.keepalive_ms = bus.Subscriber.keepalive_s * std.time.ms_per_s;
     streams_most_for_test = 2;
     defer streams_most_for_test = null;
     var bench: Bench = undefined;
