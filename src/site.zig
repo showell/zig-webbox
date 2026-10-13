@@ -135,6 +135,7 @@ pub fn Site(comptime App: type) type {
             sent.lend(req, &buffer);
             const done = App.routes(req, io, alloc, b);
             sent.giveBack(req);
+            b.status = sent.status();
             return settle(b, done) catch |e| {
                 // **A FAILURE IS A 500, NEVER SILENCE** (metal-vmm QUEUE 123, Steve:
                 // louder is better): an error that escapes a handler before its
@@ -144,10 +145,13 @@ pub fn Site(comptime App: type) type {
                 if (e == error.MalformedForm) {
                     // The client's, not the server's (http.formField): said as such,
                     // and nothing for the host to log.
-                    if (!sent.any) req.respond("The form was malformed.\n", .{ .status = .bad_request, .keep_alive = false }) catch {};
+                    if (!sent.any) {
+                        req.respond("The form was malformed.\n", .{ .status = .bad_request, .keep_alive = false }) catch {};
+                        b.status = 400;
+                    }
                     return null;
                 }
-                answerFailure(req, &sent, e);
+                if (answerFailure(req, &sent, e)) |code| b.status = code;
                 return e;
             };
         }
@@ -184,11 +188,14 @@ const Sent = struct {
     to: *std.Io.Writer,
     any: bool,
     writer: std.Io.Writer,
+    /// The answer's first bytes, `HTTP/1.1 200`, for `status` (189.2).
+    head: [12]u8 = undefined,
+    head_len: usize = 0,
 
     const vtable: std.Io.Writer.VTable = .{ .drain = drain, .sendFile = sendFile, .flush = flush };
 
     fn lend(self: *Sent, req: *std.http.Server.Request, buffer: []u8) void {
-        self.* = .{ .to = req.server.out, .any = false, .writer = .{ .buffer = buffer, .vtable = &vtable } };
+        self.* = .{ .to = req.server.out, .any = false, .writer = .{ .buffer = buffer, .vtable = &vtable }, .head_len = 0 };
         req.server.out = &self.writer;
     }
 
@@ -198,10 +205,33 @@ const Sent = struct {
         req.server.out = self.to;
     }
 
+    /// Keeps the answer's first bytes, for `status`.
+    fn note(self: *Sent, bytes: []const u8) void {
+        const n = @min(bytes.len, self.head.len - self.head_len);
+        @memcpy(self.head[self.head_len..][0..n], bytes[0..n]);
+        self.head_len += n;
+    }
+
+    /// The code the answer's status line gave, `HTTP/1.x NNN`, or 0 when
+    /// none went out whole. Its digits read by hand: a number this parses is
+    /// the server's own, not a request's (router's edge harness).
+    fn status(self: *const Sent) u16 {
+        if (self.head_len < self.head.len) return 0;
+        const h = &self.head;
+        if (!std.mem.startsWith(u8, h, "HTTP/1.") or h[8] != ' ') return 0;
+        var code: u16 = 0;
+        for (h[9..12]) |c| {
+            if (c < '0' or c > '9') return 0;
+            code = code * 10 + (c - '0');
+        }
+        return code;
+    }
+
     /// What is buffered, to the connection's writer.
     fn pass(self: *Sent) std.Io.Writer.Error!void {
         const w = &self.writer;
         if (w.end == 0) return;
+        self.note(w.buffer[0..w.end]);
         self.any = true;
         defer w.end = 0;
         try self.to.writeAll(w.buffer[0..w.end]);
@@ -210,6 +240,8 @@ const Sent = struct {
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *Sent = @alignCast(@fieldParentPtr("writer", w));
         try self.pass();
+        for (data[0 .. data.len - 1]) |d| self.note(d);
+        for (0..splat) |_| self.note(data[data.len - 1]);
         const n = try self.to.writeSplat(data, splat);
         if (n > 0) self.any = true;
         return n;
@@ -242,17 +274,19 @@ const Sent = struct {
 /// succeeds (the kernel tries again once a minute). That is the server not
 /// taking writes for now, not a failure of the request: said as such, with
 /// when to come back. Still the host's to log.
-fn answerFailure(req: *std.http.Server.Request, sent: *const Sent, e: anyerror) void {
-    if (sent.any) return;
+/// Answers the status it sent, or null when the answer was already out.
+fn answerFailure(req: *std.http.Server.Request, sent: *const Sent, e: anyerror) ?u16 {
+    if (sent.any) return null;
     if (e == error.ReadOnlyFileSystem) {
         req.respond("The server is taking no writes just now. Try again in a minute.\n", .{
             .status = .service_unavailable,
             .keep_alive = false,
             .extra_headers = &.{.{ .name = "retry-after", .value = "60" }},
         }) catch {};
-        return;
+        return 503;
     }
     req.respond("The server failed.\n", .{ .status = .internal_server_error, .keep_alive = false }) catch {};
+    return 500;
 }
 
 const testing = std.testing;
@@ -281,7 +315,7 @@ test "site: an error after the head went out is not answered again (metal-vmm QU
     sent.giveBack(&req);
     try testing.expectError(error.AfterTheHead, got);
     try testing.expect(sent.any);
-    answerFailure(&req, &sent, error.AfterTheHead);
+    _ = answerFailure(&req, &sent, error.AfterTheHead);
     try out.writer.flush();
     try testing.expect(std.mem.startsWith(u8, out.written(), "HTTP/1.1 200"));
     try testing.expect(std.mem.indexOf(u8, out.written(), "500") == null);
@@ -312,7 +346,7 @@ test "site: an error before a streamed answer's first byte sends one status line
     const got = failing.handle(&req);
     sent.giveBack(&req);
     try testing.expectError(error.FirstReadFailed, got);
-    answerFailure(&req, &sent, error.FirstReadFailed);
+    _ = answerFailure(&req, &sent, error.FirstReadFailed);
     try out.writer.flush();
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "HTTP/1.1 "));
 }
@@ -409,12 +443,12 @@ test "site: an application's failure is a 500 that names nothing, a refused writ
     defer threaded.deinit();
     var hub = bus.Hub.init(threaded.io(), testing.allocator);
     defer hub.entries.deinit(testing.allocator);
-    for ([_]struct { target: []const u8, head: []const u8, body: []const u8, err: ?anyerror }{
-        .{ .target = "/fails", .head = "HTTP/1.1 500", .body = "The server failed.\n", .err = error.SomethingBroke },
-        .{ .target = "/refused", .head = "HTTP/1.1 503", .body = "The server is taking no writes just now. Try again in a minute.\n", .err = error.ReadOnlyFileSystem },
-        .{ .target = "/form", .head = "HTTP/1.1 400", .body = "The form was malformed.\n", .err = null },
-        .{ .target = "/", .head = "HTTP/1.1 200", .body = "hello", .err = null },
-        .{ .target = "/streams", .head = "HTTP/1.1 200", .body = "\r\n\r\n", .err = error.FirstReadFailed },
+    for ([_]struct { target: []const u8, head: []const u8, status: u16, body: []const u8, err: ?anyerror }{
+        .{ .target = "/fails", .head = "HTTP/1.1 500", .status = 500, .body = "The server failed.\n", .err = error.SomethingBroke },
+        .{ .target = "/refused", .head = "HTTP/1.1 503", .status = 503, .body = "The server is taking no writes just now. Try again in a minute.\n", .err = error.ReadOnlyFileSystem },
+        .{ .target = "/form", .head = "HTTP/1.1 400", .status = 400, .body = "The form was malformed.\n", .err = null },
+        .{ .target = "/", .head = "HTTP/1.1 200", .status = 200, .body = "hello", .err = null },
+        .{ .target = "/streams", .head = "HTTP/1.1 200", .status = 200, .body = "\r\n\r\n", .err = error.FirstReadFailed },
     }) |case| {
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
         defer out.deinit();
@@ -426,6 +460,9 @@ test "site: an application's failure is a 500 that names nothing, a refused writ
         var b = Bus.of(&hub);
         const got = Served.route(&req, threaded.io(), testing.allocator, &b);
         if (case.err) |e| try testing.expectError(e, got) else try testing.expect((try got) == null);
+        // **THE STATUS IS THE HOST'S TO LOG** (metal-vmm QUEUE 189.2): what
+        // the answer's status line said, whoever wrote it.
+        try testing.expectEqual(case.status, b.status);
         try out.writer.flush();
         try testing.expect(std.mem.startsWith(u8, out.written(), case.head));
         try testing.expect(std.mem.endsWith(u8, out.written(), case.body));
