@@ -141,6 +141,8 @@ pub fn writeSeen(s: *const Seen, w: *std.Io.Writer) std.Io.Writer.Error!void {
 /// `2026-10-13T14:02:07.123Z`, as the kernel's request lines spell it.
 pub fn writeTime(w: *std.Io.Writer, ms: i64) std.Io.Writer.Error!void {
     if (ms < 0) return w.writeAll("before-1970");
+    // Past 9999-12-31 (189's minor 11): the raw count, never a panic.
+    if (ms > 253_402_300_799_999) return w.print("(unix ms {d})", .{ms});
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(@divFloor(ms, std.time.ms_per_s)) };
     const day = es.getEpochDay().calculateYearDay();
     const md = day.calculateMonthDay();
@@ -250,4 +252,15 @@ const upload_id_cases = [_][2][]const u8{
 
 test "traffic: a path is kept as the log keeps it: an upload's name after `//`, and in any case (metal-vmm QUEUE 194.3)" {
     for (upload_id_cases) |c| try testing.expectEqualStrings(c[1], keptPath(c[0]).slice());
+}
+
+test "traffic: writeTime of any i64 does not panic (189's minor 11)" {
+    var buf: [64]u8 = undefined;
+    for ([_]i64{ std.math.minInt(i64), -1, 0, 253_402_300_799_999, 253_402_300_799_999 + 1, std.math.maxInt(i64) }) |ms| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try writeTime(&w, ms);
+    }
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeTime(&w, 253_402_300_799_999);
+    try testing.expectEqualStrings("9999-12-31T23:59:59.999Z", w.buffered());
 }
