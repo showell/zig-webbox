@@ -15,15 +15,18 @@ const Table = value.Table;
 
 /// Every budget, a named default each, any of which the caller overrides.
 pub const Budgets = struct {
+    pub const default_source_bytes = 64 * 1024;
+    pub const default_output_bytes = 256 * 1024;
+
     steps: u64 = 5_000_000,
     arena_bytes: usize = 16 * 1024 * 1024,
     call_depth: u32 = 64,
-    output_bytes: usize = 256 * 1024,
+    output_bytes: usize = default_output_bytes,
     reads: u64 = 10_000,
     read_bytes: u64 = 64 * 1024 * 1024,
     changes: u64 = 1_000,
     change_bytes: u64 = 16 * 1024 * 1024,
-    source_bytes: usize = 64 * 1024,
+    source_bytes: usize = default_source_bytes,
     nesting: u32 = 200,
     /// **THE WALK'S DEPTH** (README, "The Zig stack"): expressions and
     /// statements the walk is inside of at once, across every call. The

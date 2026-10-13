@@ -29,6 +29,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // **THE SHALE RUNNER** (src/script_runner.zig): a script against a
+    // data folder, for writing and trying scripts on Linux.
+    //   SHALE_ROOT=<data> zig build script -- <file.shale>
+    const runner = b.addExecutable(.{ .name = "shale", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/script_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "webbox", .module = webbox }},
+    }) });
+    b.installArtifact(runner);
+    const run_script = b.addRunArtifact(runner);
+    if (b.args) |a| run_script.addArgs(a);
+    b.step("script", "run a Shale script: SHALE_ROOT=<data folder> zig build script -- <file.shale>").dependOn(&run_script.step);
+
     const test_step = b.step("test", "Run unit tests");
     // **THE SCRIPT FUZZER'S COUNT** (src/script/fuzz_test.zig): a few hundred
     // sources in the tests, as many as asked for with -Dscript-fuzz.
