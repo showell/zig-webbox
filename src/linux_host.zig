@@ -915,6 +915,10 @@ fn linuxFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const host_facts.Fact
     try facts.append(alloc, .{ .label = "started", .value = try host_facts.utc(alloc, started_unix) });
     try facts.append(alloc, .{ .label = "up for", .value = try host_facts.duration(alloc, nowUnix(io) - started_unix) });
     try facts.append(alloc, .{ .label = "data directory", .value = linux_config.data_dir_shown });
+    // **WHAT DURABILITY COST** (198.6): a sync that failed is a response
+    // that went out with the writes before it not yet on the disk.
+    try facts.append(alloc, .{ .label = "data syncs failed", .value = try std.fmt.allocPrint(alloc, "{d} (each a response sent before the writes it followed were durable)", .{durable.failures.load(.acquire)}) });
+    try facts.append(alloc, .{ .label = "kept streams ended by a stalled write", .value = try std.fmt.allocPrint(alloc, "{d} (a reader that stayed connected and stopped reading for {d} s)", .{ writes_ended_by_deadline.load(.acquire), kept_write_deadline_ms / std.time.ms_per_s }) });
     const status = readProcFile(alloc, "/proc/self/status") catch |e| {
         try facts.append(alloc, .{ .label = "memory", .value = try std.fmt.allocPrint(alloc, "/proc/self/status: {s}", .{@errorName(e)}) });
         return facts.items;
@@ -1806,4 +1810,23 @@ test "linux_host: at most streams_most streams are held: one more ends the oldes
     }
     try std.testing.expect(ended);
     try std.testing.expectEqual(@as(usize, 2), heldStreams(io));
+}
+
+test "linux_host: /admin/host says how many syncs of the data failed, and how many kept streams ended at their write's deadline (metal-vmm QUEUE 198.6)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const before = durable.failures.load(.acquire);
+    defer durable.failures.store(before, .release);
+    durable.failures.store(3, .release);
+    const facts = try linuxFacts(threaded.io(), arena.allocator());
+    var syncs: ?[]const u8 = null;
+    var streams: ?[]const u8 = null;
+    for (facts) |f| {
+        if (std.mem.eql(u8, f.label, "data syncs failed")) syncs = f.value;
+        if (std.mem.eql(u8, f.label, "kept streams ended by a stalled write")) streams = f.value;
+    }
+    try std.testing.expect(std.mem.startsWith(u8, syncs.?, "3"));
+    try std.testing.expect(streams != null);
 }
