@@ -28,6 +28,7 @@
 const std = @import("std");
 const Io = @import("host_io").Io;
 const bus = @import("bus.zig");
+const traffic = @import("traffic.zig");
 const Bus = bus.Bus;
 const Kept = bus.Kept;
 const mem_meter = @import("mem_meter.zig");
@@ -125,7 +126,30 @@ pub fn Site(comptime App: type) type {
             return App.uploader(req, io, alloc);
         }
 
+        /// **EVERY REQUEST COUNTED** (metal-vmm QUEUE 189.5, traffic.zig): its
+        /// family (the application's `family`, if it has one), its status,
+        /// how long the route took, and a 5xx's error. The path is copied
+        /// first (http.pathInto): the target is borrowed from a buffer the
+        /// handler's body read may consume.
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
+            var path_buf: [traffic.Text.capacity]u8 = undefined;
+            const kept_path = @import("http.zig").pathInto(req, &path_buf);
+            const family: []const u8 = if (@hasDecl(App, "family")) @tagName(App.family(kept_path)) else "all";
+            const began = Io.Clock.now(.awake, io).nanoseconds;
+            const out = answer(req, io, alloc, b);
+            const took = Io.Clock.now(.awake, io).nanoseconds - began;
+            traffic.global.note(.{
+                .family = family,
+                .status = b.status,
+                .took_ns = @intCast(@max(took, 0)),
+                .target = kept_path,
+                .at_unix_ms = b.at_unix_ms,
+                .err = if (out) |_| null else |e| @errorName(e),
+            });
+            return out;
+        }
+
+        fn answer(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
             // **100-continue IN ANY CASE IS MET HERE, FOR EVERY HOST** (180.6's
             // review): the body rule takes it, std answers only the exact
             // spelling, and a host that routed it as sent answered nothing.

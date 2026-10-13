@@ -49,6 +49,17 @@ pub fn target(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const 
     return alloc.dupe(u8, req.head.target);
 }
 
+/// The target's path, without its query, copied into `buf` (cut short to
+/// fit): an owned copy with no allocation, for a count kept of every
+/// request (traffic.zig, metal-vmm QUEUE 189.5).
+pub fn pathInto(req: *const std.http.Server.Request, buf: []u8) []const u8 {
+    const t = req.head.target;
+    const path = t[0 .. std.mem.indexOfScalar(u8, t, '?') orelse t.len];
+    const n = @min(path.len, buf.len);
+    @memcpy(buf[0..n], path[0..n]);
+    return buf[0..n];
+}
+
 /// **AN EMBEDDED FILE THE BROWSER KEEPS** (metal-vmm QUEUE 158; Steve,
 /// 2026-10-11). Its `ETag` is a hash of its bytes, and a page names it by that
 /// hash (`hashedSrc`: `path?h=<hash>`).

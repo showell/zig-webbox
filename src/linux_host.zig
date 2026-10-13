@@ -309,6 +309,7 @@ pub fn Server(comptime S: type) type {
             var b = bus.Bus.of(hub);
             var peer_buf: [64]u8 = undefined;
             b.peer = peerText(&peer_buf, stream.socket.address);
+            b.at_unix_ms = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_ms));
             turn.lockUncancelable(io);
             // The body read before the turn, handed to the handler's read
             // as it is (170.5: an upload in memory once, not twice).

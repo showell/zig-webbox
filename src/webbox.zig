@@ -41,6 +41,8 @@ pub const mem_meter = @import("mem_meter.zig");
 pub const host_facts = @import("host_facts.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
 pub const log_view = @import("log_view.zig");
+/// The requests since boot, counted where every host's pass.
+pub const traffic = @import("traffic.zig");
 /// Every file an application keeps, through one seam, under FAT's rules on
 /// every host.
 pub const store = @import("store.zig");
@@ -66,6 +68,7 @@ test {
     _ = mem_meter;
     _ = host_facts;
     _ = log_view;
+    _ = traffic;
     _ = store;
     _ = counter;
     _ = client_address;
