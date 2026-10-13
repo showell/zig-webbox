@@ -55,6 +55,45 @@ pub fn provideLog(l: Log) void {
     log = l;
 }
 
+/// **THE WHOLE LOG, FOR THE TEXT VIEW** (metal-vmm QUEUE 189.3,
+/// admin_log.zig): this boot's, and the boot before it if the host keeps it
+/// across a restart, with what the view's header says of them. Secrets were
+/// taken out as the log was written, as for `Log`.
+pub const Logs = struct {
+    this_boot: []const u8,
+    /// The most bytes the host keeps of one boot's log.
+    capacity: usize,
+    /// This boot's bytes written and no longer held.
+    lost: u64 = 0,
+    /// When this boot began, Unix seconds, if the host knows.
+    booted_unix: ?i64 = null,
+    /// The host's own build (gopher-metal's commit), if it has one apart
+    /// from the application's.
+    host_commit: ?[]const u8 = null,
+    before: ?Before = null,
+
+    pub const Before = struct {
+        /// Its boot number, as the host counts them.
+        boot: u64,
+        text: []const u8,
+    };
+};
+
+pub const LogsSource = *const fn (io: Io, alloc: Alloc) anyerror!?Logs;
+
+var logs: ?LogsSource = null;
+
+/// The host calls it once at startup, if it keeps its whole log.
+pub fn provideLogs(l: ?LogsSource) void {
+    logs = l;
+}
+
+/// The whole log, or null when the host keeps none.
+pub fn allLogs(io: Io, alloc: Alloc) !?Logs {
+    const l = logs orelse return null;
+    return l(io, alloc);
+}
+
 /// How many of the log's newest lines the page shows.
 pub const log_lines = 60;
 

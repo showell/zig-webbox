@@ -57,6 +57,8 @@ pub const Host = struct {
     /// page shows the application's half only.
     facts: ?host_facts.Report = null,
     log: ?host_facts.Log = null,
+    /// The host's whole log, both boots, for /admin/log (189.3).
+    logs: ?host_facts.LogsSource = null,
 };
 
 /// `App` declares, each required:
@@ -99,6 +101,7 @@ pub fn Site(comptime App: type) type {
             const app = try App.setup(io, base, host.roots);
             if (host.facts) |f| host_facts.provide(f);
             if (host.log) |l| host_facts.provideLog(l);
+            if (host.logs) |l| host_facts.provideLogs(l);
             free_space.reader = switch (host.free_space) {
                 .reader => |r| r,
                 .unknown => null,
