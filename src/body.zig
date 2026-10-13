@@ -1,7 +1,7 @@
 //! body: **WHEN A REQUEST'S BODY IS READ, AND HOW LONG IT MAY TAKE** (metal-vmm
 //! QUEUE 166, 167, and 169, which redid 166). Part of the `webbox` library.
 //! One rule for every host, said here once: Linux's (linux_host.zig) and the
-//! bare-metal kernel's (gopher-metal's probe/gopher.zig) both read it.
+//! bare-metal kernel's (zig-metal-unikernel's probe/gopher.zig) both read it.
 //!
 //! The application handles one request at a time (the turn). **THE TURN
 //! NEVER WAITS ON THE NETWORK**: every body is in memory before its request

@@ -592,7 +592,7 @@ test "the legacy names have ended on 2026-11-15: delete the migration, its tests
     defer threaded.deinit();
     const real: i64 = @intCast(@divFloor(std.Io.Clock.now(.real, threaded.io()).nanoseconds, std.time.ns_per_s));
     if (real >= legacy_names_until_unix) {
-        std.debug.print("the legacy cookie names ended on 2026-11-15: delete http.cookieOrLegacy's legacy branch, users' session move, uid_cookie's unsigned window, their tests, and gopher-metal probe/judge_gopher.py's legacy steps\n", .{});
+        std.debug.print("the legacy cookie names ended on 2026-11-15: delete http.cookieOrLegacy's legacy branch, users' session move, uid_cookie's unsigned window, their tests, and zig-metal-unikernel probe/judge_gopher.py's legacy steps\n", .{});
         return error.LegacyNamesHaveEnded;
     }
 }

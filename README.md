@@ -6,7 +6,7 @@ store); webbox does the HTTP, the cookies, the streams and the disk, and a
 host runs it.
 
 - **Two hosts, one library.** The `webbox_linux` module runs a site as a
-  Linux process. [zig-metal-unikernel](https://github.com/showell/gopher-metal)
+  Linux process. [zig-metal-unikernel](https://github.com/showell/zig-metal-unikernel)
   runs the same sources on a machine with no operating system, handing them
   its own `host_io`.
 - **Two applications use it:** [angry-gopher](https://github.com/showell/angry-gopher)

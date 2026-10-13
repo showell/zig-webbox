@@ -67,7 +67,7 @@ pub const Logs = struct {
     lost: u64 = 0,
     /// When this boot began, Unix seconds, if the host knows.
     booted_unix: ?i64 = null,
-    /// The host's own build (gopher-metal's commit), if it has one apart
+    /// The host's own build (zig-metal-unikernel's commit), if it has one apart
     /// from the application's.
     host_commit: ?[]const u8 = null,
     before: ?Before = null,
