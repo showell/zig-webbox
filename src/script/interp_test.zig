@@ -209,3 +209,7 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
     try testing.expect(p.stack_bytes < 4 * 1024 * 1024);
     try testing.expect(w.stack_bytes < 4 * 1024 * 1024);
 }
+
+test "run: print evaluates all its arguments before it writes one, as Lua's" {
+    try expectOutput("function f() print(\"inner\") return 2 end print(1, f())", "inner\n1\t2\n");
+}

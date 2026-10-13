@@ -37,6 +37,8 @@ pub const Result = struct {
     /// The most Zig stack the parse or the walk took, in bytes (README,
     /// "The Zig stack").
     stack_bytes: usize = 0,
+    /// The arena bytes the run held at its end, never past its budget.
+    arena_bytes: usize = 0,
 
     pub fn finished(r: *const Result) bool {
         return r.stop == null;
@@ -91,6 +93,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     result.effects = r.effects.items;
     result.steps = r.steps;
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
+    result.arena_bytes = budgeted.used;
     return result;
 }
 
@@ -102,7 +105,11 @@ fn arenaStop(result: *Result) Result {
 test {
     _ = lex;
     _ = parse;
+    _ = @import("parse_test.zig");
     _ = value;
     _ = @import("interp_test.zig");
     _ = @import("builtins_test.zig");
+    _ = @import("examples_test.zig");
+    _ = @import("portable_test.zig");
+    _ = @import("fuzz_test.zig");
 }

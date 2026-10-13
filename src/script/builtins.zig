@@ -166,10 +166,15 @@ pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
                 if (std.meta.activeTag(item) != kind or (kind != .int and kind != .string))
                     return run.fail(pos, .type, "`sort` takes all integers or all strings, and item {d} is {s}", .{ i + 1, item.typeName() });
             }
+            // **CHARGED BEFORE IT RUNS**, its bound: a step a comparison
+            // and a step a byte, every byte compared at most once a pass.
+            var bytes: u64 = 0;
+            if (kind == .string) for (items) |item| {
+                bytes += item.string.len;
+            };
+            try run.charge(pos, sortBound(items.len, bytes));
             var ctx: SortContext = .{};
             std.sort.pdq(Value, items, &ctx, SortContext.lessThan);
-            // Every comparison, and every byte one compared, charged.
-            try run.charge(pos, ctx.comparisons + ctx.bytes);
             return .nil;
         },
         .print => unreachable, // the interpreter's own
@@ -297,6 +302,9 @@ fn storeRead(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
             const entries = store.list(io, a, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e);
             const names = a.alloc([]const u8, entries.len) catch return run.oom(pos);
             for (entries, names) |en, *n| n.* = en.name;
+            var name_bytes: u64 = 0;
+            for (names) |n| name_bytes += n.len;
+            try run.charge(pos, entries.len + sortBound(names.len, name_bytes));
             var ctx: SortContext = .{};
             std.sort.pdq([]const u8, names, &ctx, struct {
                 fn lt(c: *SortContext, x: []const u8, y: []const u8) bool {
@@ -305,7 +313,6 @@ fn storeRead(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
                     return std.mem.lessThan(u8, x, y);
                 }
             }.lt);
-            try run.charge(pos, entries.len + ctx.comparisons + ctx.bytes);
             const out = try run.newTable(pos);
             out.list.ensureTotalCapacity(a, names.len) catch return run.oom(pos);
             for (names) |n| out.list.appendAssumeCapacity(.{ .string = n });
@@ -373,4 +380,13 @@ fn storeChange(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
     run.effects.append(a, .{ .op = op, .path = p.rel, .outcome = if (outcome) |e| @errorName(e) else "ok" }) catch return run.oom(pos);
     if (outcome) |e| return storeFailed(run, pos, b, p.rel, e);
     return .nil;
+}
+
+/// The most a sort of `n` items, `bytes` of them in all, can cost: n log n
+/// comparisons (pdq's bound, doubled for its worst case) and every byte in
+/// each of log n passes.
+pub fn sortBound(n: usize, bytes: u64) u64 {
+    if (n < 2) return 1;
+    const lg: u64 = std.math.log2_int_ceil(usize, n);
+    return 2 * @as(u64, n) * lg + bytes * lg;
 }

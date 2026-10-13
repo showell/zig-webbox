@@ -1,0 +1,40 @@
+-- Every topic with its message count: the direct conversations
+-- (chat/<a>_<b>/sessions/<sid>.md) and the channels
+-- (chat/channels/<name>/sessions/<sid>.md). A message is a block that
+-- starts with a line "MSG_<sid>_<n>".
+
+function messages(text)
+  local n = 0
+  for line in split(text, "\n") do
+    if starts_with(line, "MSG_") then n = n + 1 end
+  end
+  return n
+end
+
+-- The topics in one conversation's folder, printed; how many there were.
+function topics(dir, label)
+  local sessions = dir .. "/sessions"
+  if not is_dir(sessions) then return 0 end
+  local seen = 0
+  for name in ls(sessions) do
+    if ends_with(name, ".md") then
+      print(label, sub(name, 1, #name - 3), messages(read(sessions .. "/" .. name)))
+      seen = seen + 1
+    end
+  end
+  return seen
+end
+
+local total = 0
+for conv in ls("chat") do
+  if conv == "channels" then
+    for ch in ls("chat/channels") do
+      if is_dir("chat/channels/" .. ch) then
+        total = total + topics("chat/channels/" .. ch, "#" .. ch)
+      end
+    end
+  elseif is_dir("chat/" .. conv) then
+    total = total + topics("chat/" .. conv, conv)
+  end
+end
+print("topics", total)
