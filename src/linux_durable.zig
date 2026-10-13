@@ -63,16 +63,22 @@ pub const Durable = struct {
     /// working directory. A root that will not open stops the host.
     pub fn openRoots(self: *Durable, io: Io) ![]const u8 {
         if (store.data_base == null and store.auth_base == null) {
-            self.roots[0] = (try Io.Dir.cwd().openDir(io, ".", .{})).handle;
+            self.roots[0] = try openRoot(io, ".");
             return "the working directory's filesystem (no data roots)";
         }
         for ([_]?[]const u8{ store.data_base, store.auth_base }, 0..) |base, i| {
             const b = base orelse continue;
-            self.roots[i] = (try Io.Dir.cwd().openDir(io, b, .{})).handle;
+            self.roots[i] = try openRoot(io, b);
         }
         return "the filesystems of the data and auth roots";
     }
 };
+
+/// A root's directory, opened so `syncfs` takes it: an `openDir` that will
+/// not iterate opens with O_PATH, and `syncfs` refuses that (EBADF).
+fn openRoot(io: Io, path: []const u8) !std.posix.fd_t {
+    return (try Io.Dir.cwd().openDir(io, path, .{ .iterate = true })).handle;
+}
 
 /// `syncfs` on each open root: the whole filesystem under it, so every file
 /// the store wrote there, and the folders that name them.
@@ -238,4 +244,19 @@ test "durable: a failed sync is counted, the response still goes, and the next r
     try testing.expectEqual(@as(usize, 2), syncs);
     _ = try answerOne(&d, .whole);
     try testing.expectEqual(@as(usize, 2), syncs);
+}
+
+test "durable: the real sync on a root opened as openRoots opens it succeeds" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer testing.allocator.free(dir);
+
+    var d: Durable = .init(syncRoots, 0);
+    d.roots[0] = try openRoot(io, dir);
+    defer _ = std.os.linux.close(d.roots[0]);
+    try testing.expect(syncRoots(&d));
 }
