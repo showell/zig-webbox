@@ -259,3 +259,18 @@ test "log view: the query's filters, and a value spelled wrong is the client's" 
     }
     try testing.expectError(error.MalformedForm, parseFilter(a, "/admin/log?path=%zz"));
 }
+
+test "log view: a request refused at its head is found by its path, its upload line with it (metal-vmm QUEUE 194.5)" {
+    // The kernel's refusal line carries METHOD PATH, as the route's does
+    // (zig-metal-unikernel request_line.what).
+    const text =
+        \\  2026-10-13T14:02:07.123Z request 20: POST /chat/c/1_2/T/upload (refused at its head) -> every upload slot is held, 503 (base: 2)
+        \\    upload: 2026-10-13T14:02:07.123Z request 20: /chat/c/1_2/T/upload, 0 bytes, not whole after 0 ms, 0 disk requests: busy (503)
+        \\  2026-10-13T14:02:08.000Z request 21: POST /chat/c/1_2/T/upload -> ok, 200 in 41.3 ms (base: 2)
+        \\
+    ;
+    var buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    _ = try writeLines(&w, text, .{ .path = "/chat/c/1_2/T/upload" });
+    try testing.expectEqualStrings(text, w.buffered());
+}

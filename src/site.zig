@@ -134,7 +134,7 @@ pub fn Site(comptime App: type) type {
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
             var path_buf: [traffic.Text.capacity]u8 = undefined;
             const kept_path = @import("http.zig").pathInto(req, &path_buf);
-            const family: []const u8 = if (@hasDecl(App, "family")) @tagName(App.family(kept_path)) else "all";
+            const family = familyName(App, req.head.target);
             const began = Io.Clock.now(.awake, io).nanoseconds;
             const out = answer(req, io, alloc, b);
             const took = Io.Clock.now(.awake, io).nanoseconds - began;
@@ -317,6 +317,29 @@ fn answerFailure(req: *std.http.Server.Request, sent: *const Sent, e: anyerror) 
 }
 
 const testing = std.testing;
+
+/// The application's family for a request, from its whole path (no
+/// query): the kept copy is cut at 120 bytes, and a long topic's upload
+/// read from it was counted as chat (189's minor 10). Read before the
+/// route, while the target is still the head's.
+fn familyName(comptime A: type, target: []const u8) []const u8 {
+    if (!@hasDecl(A, "family")) return "all";
+    const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+    return @tagName(A.family(path));
+}
+
+test "site: a long topic's upload is counted under uploads: the family is read from the whole path (189's minor 10)" {
+    const A = struct {
+        const Family = enum { chat, uploads };
+        fn family(path: []const u8) Family {
+            return if (std.mem.endsWith(u8, path, "/upload")) .uploads else .chat;
+        }
+    };
+    const topic = "t" ** 150;
+    try testing.expectEqualStrings("uploads", familyName(A, "/chat/c/1_2/" ++ topic ++ "/upload?x=1"));
+    try testing.expectEqualStrings("chat", familyName(A, "/chat/c/1_2/" ++ topic));
+    try testing.expectEqualStrings("all", familyName(struct {}, "/x"));
+}
 
 test "site: an error after the head went out is not answered again (metal-vmm QUEUE 127(b))" {
     // A handler that answered, then failed: the answer stands, cut short or
