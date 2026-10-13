@@ -20,8 +20,8 @@ const sources = .{
 /// helpers, the OS, processes, threads, the clock, a host's own Io or
 /// allocator, and printing past the run's own output.
 const refused = [_][]const u8{
-    "std.posix", "std.os", "std.c.", "std.process", "std.Thread", "std.time",
-    "Io.Dir", "Threaded", "page_allocator", "std.debug.print",
+    "std.posix", "std.os",   "std.c.",         "std.process",     "std.Thread", "std.time",
+    "Io.Dir",    "Threaded", "page_allocator", "std.debug.print",
 };
 
 /// The first refused name in `text` outside its `test` blocks, with its

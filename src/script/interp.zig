@@ -496,21 +496,21 @@ pub const Run = struct {
         {
             {
                 // `print` takes any number, all evaluated before any is written
-        // (as Lua's: a call among them that prints, prints first), then
-        // joined by tabs, and a newline.
-        if (b == .print) {
-            var small: [8]Value = undefined;
-            const vals = if (c.args.len <= small.len) small[0..c.args.len] else self.alloc.alloc(Value, c.args.len) catch return self.oom(pos);
-            for (c.args, vals) |a, *v| v.* = try self.eval(a);
-            for (vals, c.args, 0..) |v, a, i| {
-                if (i > 0) try self.write(pos, "\t");
-                var buf: [24]u8 = undefined;
-                try self.write(a.pos, try builtins.scalarText(self, a.pos, v, &buf, "print"));
-            }
-            try self.write(pos, "\n");
-            return .nil;
-        }
-        var args: [4]Value = undefined;
+                // (as Lua's: a call among them that prints, prints first), then
+                // joined by tabs, and a newline.
+                if (b == .print) {
+                    var small: [8]Value = undefined;
+                    const vals = if (c.args.len <= small.len) small[0..c.args.len] else self.alloc.alloc(Value, c.args.len) catch return self.oom(pos);
+                    for (c.args, vals) |a, *v| v.* = try self.eval(a);
+                    for (vals, c.args, 0..) |v, a, i| {
+                        if (i > 0) try self.write(pos, "\t");
+                        var buf: [24]u8 = undefined;
+                        try self.write(a.pos, try builtins.scalarText(self, a.pos, v, &buf, "print"));
+                    }
+                    try self.write(pos, "\n");
+                    return .nil;
+                }
+                var args: [4]Value = undefined;
                 if (c.args.len > args.len) return builtins.tooMany(self, pos, b);
                 for (c.args, 0..) |a, i| args[i] = try self.eval(a);
                 return builtins.call(self, pos, b, args[0..c.args.len]);
