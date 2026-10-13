@@ -48,9 +48,12 @@ pub const max_name = 96;
 /// The longest path the bare-metal host holds a file by (its io.zig's max_path).
 pub const max_path = 256;
 
-/// How deep the bare-metal host removes a tree and checks a volume at boot
-/// (its disk_fat.zig's max_tree_depth). A path is held to it from the
-/// volume's root.
+/// The most parts a path has, from the root's own name ("data") to the
+/// file: such a file sits in `max_depth - 1` folders, the deepest the
+/// bare-metal host makes (its disk_fat.zig's `max_path_depth`, which
+/// zig-metal-unikernel's tools/check_limits.py holds this to). Not its
+/// `max_tree_depth`, the stack bound on removing a tree and checking a
+/// volume, though the two are equal today (metal-vmm QUEUE 198.7).
 pub const max_depth = 16;
 
 pub const Error = error{ BadName, PathTooLong, PathTooDeep };
