@@ -68,6 +68,8 @@ pub const Parser = struct {
     functions: std.ArrayList(ast.Function) = .empty,
     function_names: std.StringHashMapUnmanaged(u32) = .empty,
     pending: std.ArrayList(PendingCall) = .empty,
+    /// The lowest frame address the parse reached (README, "The Zig stack").
+    stack_low: usize = std.math.maxInt(usize),
 
     fn failAt(self: *Parser, pos: ast.Pos, class: diag.Class, message: []const u8) Error {
         self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message };
@@ -118,6 +120,7 @@ pub const Parser = struct {
     }
 
     fn enter(self: *Parser) Error!void {
+        self.stack_low = @min(self.stack_low, @frameAddress());
         self.nesting += 1;
         if (self.nesting > self.max_nesting) {
             self.stop = .{ .line = self.tok.line, .column = self.tok.column, .class = .budget, .budget = .nesting, .message = "the source nests deeper than the nesting budget" };
@@ -607,7 +610,16 @@ fn describe(t: Token) []const u8 {
 
 /// The whole source, parsed. On `error.Parse`, `stop` says where and why.
 pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop) Error!ast.Program {
+    return parseMeasured(alloc, source, max_nesting, stop, null);
+}
+
+/// `parse`, saying how many bytes of the Zig stack it took.
+pub fn parseMeasured(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize) Error!ast.Program {
+    const top = @frameAddress();
     var p: Parser = .{ .alloc = alloc, .lexer = lex.Lexer.init(alloc, source), .tok = undefined, .max_nesting = max_nesting };
+    defer if (stack_used) |u| {
+        u.* = top -| p.stack_low;
+    };
     errdefer stop.* = p.stop;
     try p.advance();
     p.frame.depth = 0;

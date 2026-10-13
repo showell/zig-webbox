@@ -33,6 +33,8 @@ pub const Budget = enum {
     change_bytes,
     source,
     nesting,
+    /// The walk's own recursion, across calls: what the Zig stack bounds.
+    depth,
 };
 
 /// Where and why a run stopped. `message` is owned by the run's arena (or
