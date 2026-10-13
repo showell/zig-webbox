@@ -46,7 +46,7 @@ pub const traffic = @import("traffic.zig");
 /// Every file an application keeps, through one seam, under FAT's rules on
 /// every host.
 pub const store = @import("store.zig");
-/// A number in a file, bumped under a lock: ids handed out exactly once.
+/// A number in a file, bumped once per call: ids handed out exactly once.
 pub const counter = @import("counter.zig");
 /// Which address a request comes from: the connection's, or behind a trusted
 /// reverse proxy, the one it names.

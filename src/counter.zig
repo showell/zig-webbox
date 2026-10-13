@@ -1,4 +1,4 @@
-//! counter: a number in a file, bumped under a lock. Part of the `webbox`
+//! counter: a number in a file, bumped once per call. Part of the `webbox`
 //! library: how an application hands out ids (sessions, accounts, players),
 //! each exactly once.
 //!
@@ -13,16 +13,13 @@ const Io = @import("host_io").Io;
 const Alloc = std.mem.Allocator;
 const store = @import("store.zig");
 
-/// mu serializes the read-add-write within this process, so two requests cannot
-/// be handed the same id.
-var mu: Io.Mutex = .init;
+// No lock: both hosts run one handler at a time (the bare-metal host's one
+// loop, the Linux host's turn; zig-metal-unikernel HOST.md), so the
+// read-add-write is one step and two requests are never handed the same id.
 
 /// next returns the counter's current value and persists value+1, creating the
 /// file and its parent directories. Floors at 1.
 pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
-    mu.lockUncancelable(io);
-    defer mu.unlock(io);
-
     const n = try current(io, alloc, path);
 
     const out = try std.fmt.allocPrint(alloc, "{d}\n", .{n + 1});
@@ -34,15 +31,13 @@ pub fn next(io: Io, alloc: Alloc, path: []const u8) !i64 {
 /// page offers before anything is made (a session made only by its first
 /// move). Floors at 1, as `next` does.
 pub fn peek(io: Io, alloc: Alloc, path: []const u8) !i64 {
-    mu.lockUncancelable(io);
-    defer mu.unlock(io);
     return current(io, alloc, path);
 }
 
 /// The value the counter holds, floored at 1; 1 when there is no counter
 /// yet. **A COUNTER THAT CANNOT BE READ, OR DOES NOT HOLD A NUMBER, IS AN
 /// ERROR** (metal-vmm QUEUE 105): read as a new one, it handed out ids
-/// already given. Called under `mu`.
+/// already given.
 fn current(io: Io, alloc: Alloc, path: []const u8) !i64 {
     const body = (try store.readOrNull(io, alloc, path, .limited(64))) orelse return 1;
     return @max(try std.fmt.parseInt(i64, std.mem.trim(u8, body, " \t\r\n"), 10), 1);
