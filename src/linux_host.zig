@@ -37,7 +37,8 @@ const linux_durable = @import("linux_durable.zig");
 /// The environment variables a host reads, named whole by the application,
 /// so a search for one finds where it is read.
 pub const Env = struct {
-    /// The port; unset, or not a port, is `Options.default_port`.
+    /// The port; unset is `Options.default_port`, and one that is not a
+    /// port stops the host (198.6).
     port: []const u8,
     /// The address to listen on (bind.zig); unset is every interface, and one
     /// that will not parse stops the host.
@@ -120,7 +121,10 @@ pub fn Server(comptime S: type) type {
                 std.debug.print("{s}: {s}={d}: a quiet stream pings after {d} ms\n", .{ options.name, options.env.keepalive_ms, ms, ms });
             }
 
-            const port = portFrom(env.get(options.env.port), options.default_port);
+            const port = portFrom(env.get(options.env.port), options.default_port) catch |e| {
+                std.debug.print("{s}: {s}={s} is not a port (1 to 65535); not starting\n", .{ options.name, options.env.port, env.get(options.env.port) orelse "" });
+                return e;
+            };
             const addr = bind.address(env.get(options.env.bind), port) catch |e| {
                 std.debug.print("{s}: {s}={s} is not an IP address; not starting\n", .{ options.name, options.env.bind, env.get(options.env.bind) orelse "" });
                 return e;
@@ -773,12 +777,19 @@ var durable: linux_durable.Durable = .init(linux_durable.syncRoots, 0);
 /// process.
 var turn: Io.Mutex = .init;
 
-/// The port in the variable's text, or `default` when it is unset or is not a
-/// port. A port override is load-bearing for running more than one server at
-/// once (a test's server on a side port beside the development one).
-fn portFrom(text: ?[]const u8, default: u16) u16 {
-    const s = text orelse return default;
-    return std.fmt.parseInt(u16, std.mem.trim(u8, s, " \t\r\n"), 10) catch default;
+/// The port in the variable's text, or `default` when it is unset. A port
+/// override is load-bearing for running more than one server at once (a
+/// test's server on a side port beside the development one). **SET AND NOT
+/// A PORT, IT IS REFUSED** (metal-vmm QUEUE 198.6): decimal digits, 1 to
+/// 65535, around whitespace; metal stops on a setting it cannot read, and a
+/// typo that served on the default instead ran a second server beside the
+/// one it meant to stand apart from.
+fn portFrom(text: ?[]const u8, default: u16) error{NotAPort}!u16 {
+    const s = std.mem.trim(u8, text orelse return default, " \t\r\n");
+    if (s.len == 0) return error.NotAPort;
+    for (s) |c| if (!std.ascii.isDigit(c)) return error.NotAPort;
+    const port = std.fmt.parseInt(u16, s, 10) catch return error.NotAPort;
+    return if (port == 0) error.NotAPort else port;
 }
 
 /// The connection's address as text with no port (`203.0.113.7`,
@@ -885,11 +896,14 @@ fn readProcFile(alloc: std.mem.Allocator, path: [*:0]const u8) ![]u8 {
     }
 }
 
-test "portFrom: the variable's port, or the default when it is unset or not a port" {
-    try std.testing.expectEqual(@as(u16, 9001), portFrom(null, 9001));
-    try std.testing.expectEqual(@as(u16, 8080), portFrom(" 8080\n", 9001));
-    try std.testing.expectEqual(@as(u16, 9001), portFrom("/home/x/build/port", 9001));
-    try std.testing.expectEqual(@as(u16, 9001), portFrom("70000", 9001));
+test "portFrom: the variable's port, the default when it is unset, and a refusal when it is set and is not a port (metal-vmm QUEUE 198.6)" {
+    try std.testing.expectEqual(@as(u16, 9001), try portFrom(null, 9001));
+    try std.testing.expectEqual(@as(u16, 8080), try portFrom(" 8080\n", 9001));
+    // Set, and not a port: metal stops on such a setting, and so does
+    // Linux. It used to serve on the default, so a typo ran a second server
+    // on the development one's port.
+    for ([_][]const u8{ "/home/x/build/port", "70000", "0", "", " ", "+80", "8_080", "80x", "-1" }) |bad|
+        try std.testing.expectError(error.NotAPort, portFrom(bad, 9001));
 }
 
 // ── a held body holds only its own connection: the turn never waits on the
