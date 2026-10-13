@@ -104,4 +104,5 @@ test {
     _ = parse;
     _ = value;
     _ = @import("interp_test.zig");
+    _ = @import("builtins_test.zig");
 }

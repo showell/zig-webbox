@@ -7,6 +7,8 @@ const ast = @import("ast.zig");
 const interp = @import("interp.zig");
 const value = @import("value.zig");
 
+const store = @import("../store.zig");
+
 const Run = interp.Run;
 const Value = value.Value;
 const Error = interp.Error;
@@ -80,7 +82,97 @@ pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
             try run.charge(pos, k.len);
             return .{ .boolean = t.map.contains(k) };
         },
-        else => return run.fail(pos, .argument, "`{s}` is not built yet", .{@tagName(b)}),
+        // ── the store ──
+        .ls, .stat, .exists, .is_dir, .read => return storeRead(run, pos, b, args),
+        .replace, .append, .mkdir, .remove, .remove_tree => return storeChange(run, pos, b, args),
+        // ── strings ──
+        .split => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            const sep = try stringArg(run, pos, b, args[1], "its separator");
+            if (sep.len == 0) return run.fail(pos, .argument, "`split` by \"\" is an error: there is no empty separator", .{});
+            try run.charge(pos, str.len);
+            const out = try run.newTable(pos);
+            var it = std.mem.splitSequence(u8, str, sep);
+            while (it.next()) |part| out.list.append(run.alloc, .{ .string = part }) catch return run.oom(pos);
+            out.kind = .list;
+            return .{ .table = out };
+        },
+        .join => {
+            const t = try listArg(run, pos, b, args[0]);
+            const sep = try stringArg(run, pos, b, args[1], "its separator");
+            var buf: std.ArrayList(u8) = .empty;
+            for (t.list.items, 0..) |item, i| {
+                if (i > 0) buf.appendSlice(run.alloc, sep) catch return run.oom(pos);
+                var nb: [24]u8 = undefined;
+                const piece = switch (item) {
+                    .string => |x| x,
+                    .int => |n| std.fmt.bufPrint(&nb, "{d}", .{n}) catch unreachable,
+                    else => return run.fail(pos, .type, "`join` takes strings and integers, and item {d} is {s}", .{ i + 1, item.typeName() }),
+                };
+                try run.charge(pos, piece.len + sep.len);
+                buf.appendSlice(run.alloc, piece) catch return run.oom(pos);
+            }
+            return .{ .string = buf.items };
+        },
+        .starts_with, .ends_with, .contains => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            const sub_s = try stringArg(run, pos, b, args[1], "what it looks for");
+            try run.charge(pos, str.len);
+            return .{ .boolean = switch (b) {
+                .starts_with => std.mem.startsWith(u8, str, sub_s),
+                .ends_with => std.mem.endsWith(u8, str, sub_s),
+                else => std.mem.indexOf(u8, str, sub_s) != null,
+            } };
+        },
+        .find => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            const sub_s = try stringArg(run, pos, b, args[1], "what it looks for");
+            try run.charge(pos, str.len);
+            const at = std.mem.indexOf(u8, str, sub_s) orelse return .nil;
+            return .{ .int = @intCast(at + 1) };
+        },
+        .sub => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            const i = try intArg(run, pos, b, args[1], "its start");
+            const j = if (args.len > 2) try intArg(run, pos, b, args[2], "its end") else -1;
+            const r = subRange(str.len, i, j);
+            try run.charge(pos, r.len);
+            return .{ .string = str[r.start..][0..r.len] };
+        },
+        .trim => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            try run.charge(pos, str.len);
+            return .{ .string = std.mem.trim(u8, str, " \t\r\n") };
+        },
+        .upper, .lower => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            try run.charge(pos, str.len);
+            const out = run.alloc.alloc(u8, str.len) catch return run.oom(pos);
+            for (str, out) |c, *o| o.* = if (b == .upper) std.ascii.toUpper(c) else std.ascii.toLower(c);
+            return .{ .string = out };
+        },
+        .tonumber => {
+            const str = try stringArg(run, pos, b, args[0], "its string");
+            try run.charge(pos, str.len);
+            return .{ .int = parseInteger(str) orelse return run.fail(pos, .argument, "`tonumber`: \"{s}\" is not an integer (an optional `-`, then decimal digits)", .{str[0..@min(str.len, 40)]}) };
+        },
+        // ── lists ──
+        .sort => {
+            const t = try listArg(run, pos, b, args[0]);
+            const items = t.list.items;
+            if (items.len == 0) return .nil;
+            const kind = std.meta.activeTag(items[0]);
+            for (items, 0..) |item, i| {
+                if (std.meta.activeTag(item) != kind or (kind != .int and kind != .string))
+                    return run.fail(pos, .type, "`sort` takes all integers or all strings, and item {d} is {s}", .{ i + 1, item.typeName() });
+            }
+            var ctx: SortContext = .{};
+            std.sort.pdq(Value, items, &ctx, SortContext.lessThan);
+            // Every comparison, and every byte one compared, charged.
+            try run.charge(pos, ctx.comparisons + ctx.bytes);
+            return .nil;
+        },
+        .print => unreachable, // the interpreter's own
     }
 }
 
@@ -118,4 +210,167 @@ pub fn mapArg(run: *Run, pos: ast.Pos, b: B, v: Value) Error!*value.Table {
         },
         else => run.fail(pos, .type, "`{s}` takes a map, not {s}", .{ @tagName(b), v.typeName() }),
     };
+}
+
+const SortContext = struct {
+    comparisons: u64 = 0,
+    bytes: u64 = 0,
+
+    fn lessThan(ctx: *SortContext, a: Value, b: Value) bool {
+        ctx.comparisons += 1;
+        return switch (a) {
+            .int => |x| x < b.int,
+            .string => |x| blk: {
+                ctx.bytes += @min(x.len, b.string.len);
+                break :blk std.mem.lessThan(u8, x, b.string);
+            },
+            else => unreachable,
+        };
+    }
+};
+
+/// Lua's `string.sub` range: 1-based, inclusive, negatives from the end,
+/// clamped to the string.
+pub fn subRange(len: usize, i: i64, j: i64) struct { start: usize, len: usize } {
+    const n: i64 = @intCast(len);
+    var a: i64 = if (i < 0) @max(n + i + 1, 1) else if (i == 0) 1 else i;
+    var z: i64 = if (j < 0) n + j + 1 else @min(j, n);
+    if (a < 1) a = 1;
+    if (z > n) z = n;
+    if (a > z) return .{ .start = 0, .len = 0 };
+    return .{ .start = @intCast(a - 1), .len = @intCast(z - a + 1) };
+}
+
+/// An optional `-`, then decimal digits, within 64 bits; null otherwise.
+pub fn parseInteger(s: []const u8) ?i64 {
+    const digits = if (s.len > 0 and s[0] == '-') s[1..] else s;
+    if (digits.len == 0) return null;
+    for (digits) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(i64, s, 10) catch null;
+}
+
+// ── the store ────────────────────────────────────────────────────────────
+
+/// **A SCRIPT'S PATH, CONFINED TO THE ROOT** (README, "Paths"): every part
+/// a name FAT holds (so `.`, `..` and empty parts are refused, and a
+/// leading `/`), joined to the root. `""` is the root, for the calls that
+/// only look (`allow_root`); every change needs at least one part.
+const Path = struct { full: []const u8, rel: []const u8 };
+
+fn pathArg(run: *Run, pos: ast.Pos, b: B, v: Value, allow_root: bool) Error!Path {
+    const rel = try stringArg(run, pos, b, v, "its path");
+    try run.charge(pos, rel.len);
+    if (rel.len == 0) {
+        if (!allow_root) return run.fail(pos, .argument, "`{s}(\"\")` would act on the whole root: a change needs a path of at least one part", .{@tagName(b)});
+        return .{ .full = run.root, .rel = "" };
+    }
+    if (rel[0] == '/') return run.fail(pos, .argument, "`{s}`: \"{s}\" is absolute: paths are relative to the data root", .{ @tagName(b), rel });
+    var it = std.mem.splitScalar(u8, rel, '/');
+    while (it.next()) |part| {
+        if (!store.fatName(part)) return run.fail(pos, .argument, "`{s}`: \"{s}\" has a part (\"{s}\") that is not a name: no `.`, `..`, empty parts or characters FAT refuses", .{ @tagName(b), rel, part });
+    }
+    const full = std.fmt.allocPrint(run.alloc, "{s}/{s}", .{ run.root, rel }) catch return run.oom(pos);
+    return .{ .full = full, .rel = rel };
+}
+
+fn storeFailed(run: *Run, pos: ast.Pos, b: B, rel: []const u8, e: anyerror) Error {
+    if (e == error.OutOfMemory) return run.oom(pos);
+    return run.fail(pos, .store, "`{s}(\"{s}\")`: {s}", .{ @tagName(b), rel, @errorName(e) });
+}
+
+fn countRead(run: *Run, pos: ast.Pos) Error!void {
+    if (run.reads >= run.budgets.reads) return run.budgetStop(pos, .reads);
+    run.reads += 1;
+}
+
+fn storeRead(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
+    const p = try pathArg(run, pos, b, args[0], b == .ls or b == .stat or b == .exists);
+    try countRead(run, pos);
+    const io = run.io;
+    const a = run.alloc;
+    switch (b) {
+        .ls => {
+            // The store lists a missing folder as empty; a script's `ls` of
+            // one is an error (README, "The store").
+            const st = (store.statOrNull(io, a, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e)) orelse return storeFailed(run, pos, b, p.rel, error.FileNotFound);
+            if (st.kind != .directory) return storeFailed(run, pos, b, p.rel, error.NotDir);
+            const entries = store.list(io, a, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e);
+            const names = a.alloc([]const u8, entries.len) catch return run.oom(pos);
+            for (entries, names) |en, *n| n.* = en.name;
+            var ctx: SortContext = .{};
+            std.sort.pdq([]const u8, names, &ctx, struct {
+                fn lt(c: *SortContext, x: []const u8, y: []const u8) bool {
+                    c.comparisons += 1;
+                    c.bytes += @min(x.len, y.len);
+                    return std.mem.lessThan(u8, x, y);
+                }
+            }.lt);
+            try run.charge(pos, entries.len + ctx.comparisons + ctx.bytes);
+            const out = try run.newTable(pos);
+            out.list.ensureTotalCapacity(a, names.len) catch return run.oom(pos);
+            for (names) |n| out.list.appendAssumeCapacity(.{ .string = n });
+            out.kind = .list;
+            return .{ .table = out };
+        },
+        .stat => {
+            const st = store.stat(io, a, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e);
+            const out = try run.newTable(pos);
+            out.map.put(a, "size", .{ .int = @intCast(st.size) }) catch return run.oom(pos);
+            out.map.put(a, "kind", .{ .string = @tagName(st.kind) }) catch return run.oom(pos);
+            out.kind = .map;
+            return .{ .table = out };
+        },
+        .exists => return .{ .boolean = store.has(io, a, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e) },
+        .is_dir => {
+            const st = store.statOrNull(io, a, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e);
+            return .{ .boolean = if (st) |x| x.kind == .directory else false };
+        },
+        .read => {
+            // The read budget's rest is the read's limit (README, "Budgets").
+            const left = run.budgets.read_bytes -| run.read_bytes;
+            const bytes = store.read(io, a, p.full, .limited(@intCast(@min(left, std.math.maxInt(usize))))) catch |e| switch (e) {
+                error.StreamTooLong => return run.budgetStop(pos, .read_bytes),
+                else => return storeFailed(run, pos, b, p.rel, e),
+            };
+            run.read_bytes += bytes.len;
+            try run.charge(pos, bytes.len);
+            return .{ .string = bytes };
+        },
+        else => unreachable,
+    }
+}
+
+fn storeChange(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
+    const p = try pathArg(run, pos, b, args[0], false);
+    const data: []const u8 = switch (b) {
+        .replace, .append => try stringArg(run, pos, b, args[1], "what it writes"),
+        else => "",
+    };
+    if (run.changes >= run.budgets.changes) return run.budgetStop(pos, .changes);
+    if (data.len > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
+    run.changes += 1;
+    run.change_bytes += data.len;
+    try run.charge(pos, data.len);
+    const io = run.io;
+    const a = run.alloc;
+    const op: []const u8 = @tagName(b);
+    // The store takes removing what is not there as done; a script's
+    // removal of a missing path is an error, logged (README, "The store").
+    const missing: bool = switch (b) {
+        .remove, .remove_tree => (store.statOrNull(io, a, p.full) catch null) == null,
+        else => false,
+    };
+    const outcome: ?anyerror = if (missing) error.FileNotFound else switch (b) {
+        .replace => if (store.replace(io, a, p.full, data, .{})) |_| null else |e| e,
+        .append => if (store.append(io, a, p.full, data)) |_| null else |e| e,
+        .mkdir => if (store.makeDir(io, a, p.full)) |_| null else |e| e,
+        .remove => if (store.remove(io, a, p.full)) |_| null else |e| e,
+        .remove_tree => if (store.removeTree(io, a, p.full)) |_| null else |e| e,
+        else => unreachable,
+    };
+    // **EVERY CHANGE ATTEMPTED IS LOGGED**, its outcome with it: a failed
+    // one is also why the run stopped.
+    run.effects.append(a, .{ .op = op, .path = p.rel, .outcome = if (outcome) |e| @errorName(e) else "ok" }) catch return run.oom(pos);
+    if (outcome) |e| return storeFailed(run, pos, b, p.rel, e);
+    return .nil;
 }
