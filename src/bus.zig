@@ -313,7 +313,20 @@ pub fn drop(hub: *Hub, k: Kept) void {
 /// **FOR A HOST WITH A TASK PER CONNECTION.** Serves a kept stream until its
 /// client goes away — the loop a stream handler would otherwise run itself.
 pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
+    serveKeptCounted(hub, k, w, null);
+}
+
+/// `serveKept`, counting each write's start and end on `writes` (odd while
+/// one is under way), so a watcher with a clock can end a write that never
+/// returns (metal-vmm QUEUE 198.6: a reader that stays connected and stops
+/// reading blocked it for good).
+pub fn serveKeptCounted(hub: *Hub, k: Kept, w: *std.Io.Writer, writes: ?*std.atomic.Value(u64)) void {
     defer drop(hub, k);
+    const Count = struct {
+        fn mark(c: ?*std.atomic.Value(u64)) void {
+            if (c) |v| _ = v.fetchAdd(1, .acq_rel);
+        }
+    };
     while (true) {
         // **A MAILBOX THAT OVERFLOWED ENDS THE STREAM**, as `nextFrame` ends it
         // on a host with one loop: the browser reconnects and resumes from
@@ -326,10 +339,14 @@ pub fn serveKept(hub: *Hub, k: Kept, w: *std.Io.Writer) void {
                 var arena = std.heap.ArenaAllocator.init(hub.gpa);
                 defer arena.deinit();
                 const frame = (k.render(k.ctx, arena.allocator(), blob) catch return) orelse continue;
+                Count.mark(writes);
+                defer Count.mark(writes);
                 w.writeAll(frame) catch return;
                 w.flush() catch return;
             },
             .idle => {
+                Count.mark(writes);
+                defer Count.mark(writes);
                 w.writeAll(ping) catch return;
                 w.flush() catch return;
             },

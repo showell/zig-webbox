@@ -346,11 +346,66 @@ pub fn Server(comptime S: type) type {
             if (try routed) |kept| {
                 const held_stream = holdStream(io, stream);
                 defer letGoStream(io, held_stream);
-                bus.serveKept(hub, kept, &sw.interface);
+                // **ITS WRITES WATCHED** (198.6): a write under way and
+                // unmoved past the deadline has its socket shut, so it fails
+                // and the stream ends. A stream with no watcher is not
+                // served without one.
+                var watched: WriteWatch = .{ .stream = stream, .ms = write_deadline_for_test_ms orelse kept_write_deadline_ms };
+                const watcher = std.Thread.spawn(.{}, WriteWatch.run, .{ &watched, io }) catch {
+                    std.debug.print("{s}: a kept stream's writes could not be watched; the stream ends\n", .{host_name});
+                    bus.drop(hub, kept);
+                    return;
+                };
+                defer {
+                    watched.done.store(true, .release);
+                    watcher.join();
+                }
+                bus.serveKeptCounted(hub, kept, &sw.interface, &watched.writes);
             }
         }
     };
 }
+
+/// **A KEPT STREAM'S WRITE HAS A DEADLINE** (metal-vmm QUEUE 198.6): a
+/// reader that stays connected and stops reading blocked `serveKept`'s
+/// write for good, and the stream ended only when a newer one displaced it.
+/// A send taking no byte for this long fails, and the stream ends (as
+/// metal's does after `idle_timeout_ms` with nothing taken).
+pub const kept_write_deadline_ms: u64 = 30_000;
+pub var write_deadline_for_test_ms: ?u64 = null;
+
+/// A kept stream's watcher: it samples the write count a quarter-deadline at
+/// a time, and a write under way (odd) that has not moved for the whole
+/// deadline has its socket shut. Not SO_SNDTIMEO: std's Io takes the EAGAIN
+/// it gives for a programmer's error.
+pub var writes_ended_by_deadline: std.atomic.Value(u64) = .init(0);
+const WriteWatch = struct {
+    stream: net.Stream,
+    ms: u64,
+    writes: std.atomic.Value(u64) = .init(0),
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *WriteWatch, io: Io) void {
+        const step = @max(self.ms / 4, 10);
+        var last = self.writes.load(.acquire);
+        var still: u64 = 0;
+        while (!self.done.load(.acquire)) {
+            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(@intCast(step)) }, io) catch {};
+            const now = self.writes.load(.acquire);
+            if (now != last or now % 2 == 0) {
+                last = now;
+                still = 0;
+                continue;
+            }
+            still += step;
+            if (still >= self.ms) {
+                _ = writes_ended_by_deadline.fetchAdd(1, .acq_rel);
+                self.stream.shutdown(io, .both) catch {};
+                return;
+            }
+        }
+    }
+};
 
 /// A connection there is no task to serve: a 503 written straight to it (a
 /// few bytes, which the socket's own buffer takes), and closed.
@@ -1677,6 +1732,34 @@ test "linux_host: a request head not finished within its deadline is a 408, coun
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "linux_host: a kept stream whose reader stays connected but stops reading ends at its write's deadline (metal-vmm QUEUE 198.6)" {
+    write_deadline_for_test_ms = 300;
+    defer write_deadline_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nx");
+    defer c.end(io);
+    var waited: u32 = 0;
+    while (heldStreams(io) < 1 and waited < 2000) : (waited += 10) {
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), heldStreams(io));
+    // The reader reads nothing more. Events far past what the sockets
+    // buffer: the host's write blocks, and a write with no deadline blocks
+    // for good (the mailbox's overflow is only looked at between writes).
+    const big = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'e');
+    waited = 0;
+    while (heldStreams(io) > 0 and waited < 5000) : (waited += 20) {
+        bench.hub.publish("test-stream", big);
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(20) }, io) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 0), heldStreams(io));
 }
 
 test "linux_host: at most streams_most streams are held: one more ends the oldest, as the kernel does (metal-vmm QUEUE 184)" {
