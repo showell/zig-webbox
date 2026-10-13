@@ -11,9 +11,12 @@ pub const linux_host = @import("linux_host.zig");
 pub const bind = @import("bind.zig");
 /// Where a Linux host's data is: a config file a variable names.
 pub const linux_config = @import("linux_config.zig");
+/// No response before the writes ahead of it are on the disk.
+pub const linux_durable = @import("linux_durable.zig");
 
 test {
     _ = linux_host;
     _ = bind;
     _ = linux_config;
+    _ = linux_durable;
 }

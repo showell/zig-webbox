@@ -32,6 +32,7 @@ const body_rule = @import("webbox").body;
 const host_facts = @import("webbox").host_facts;
 const free_space = @import("webbox").free_space;
 const linux_config = @import("linux_config.zig");
+const linux_durable = @import("linux_durable.zig");
 
 /// The environment variables a host reads, named whole by the application,
 /// so a search for one finds where it is read.
@@ -100,6 +101,11 @@ pub fn Server(comptime S: type) type {
                 .facts = linuxFacts,
             });
             report(&started);
+            // **NO RESPONSE BEFORE ITS WRITES ARE DURABLE** (HOST.md): the
+            // data's filesystems, opened once, are synced before a response
+            // that follows a write (linux_durable.zig).
+            const synced = try durable.openRoots(io);
+            std.debug.print("{s}: before a response that follows a write, syncs {s}\n", .{ options.name, synced });
             // The pub/sub fan-out shared across all connections, for the
             // process's lifetime. Each request gets its own handle on it (a
             // Bus), which is where a stream handler leaves the stream it
@@ -221,7 +227,10 @@ pub fn Server(comptime S: type) type {
             var read_buf: [http.head_bytes]u8 = undefined; // must hold the full request header
             var write_buf: [64 * 1024]u8 = undefined;
             var sr = stream.reader(io, &read_buf);
-            var sw = stream.writer(io, &write_buf);
+            // The socket's own writer, unbuffered, under the one every byte
+            // goes through: it syncs the writes before it (linux_durable.zig).
+            var socket_w = stream.writer(io, &.{});
+            var sw: linux_durable.Writer = .init(&socket_w.interface, &durable, &write_buf);
             var server = std.http.Server.init(&sr.interface, &sw.interface);
 
             var arena = std.heap.ArenaAllocator.init(alloc);
@@ -343,6 +352,7 @@ pub fn Server(comptime S: type) type {
 /// few bytes, which the socket's own buffer takes), and closed.
 fn busy(io: Io, stream: net.Stream) void {
     defer stream.close(io);
+    durable.beforeBytes();
     edge.count(.no_deadline);
     var w = stream.writer(io, &.{});
     w.interface.writeAll("HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n") catch {};
@@ -750,6 +760,11 @@ const Whole = struct {
         return .{ .read = list.items };
     }
 };
+
+/// The process's one account of what is durable (linux_durable.zig). Until
+/// `run` opens the roots it syncs nothing, which is what a test's server,
+/// with none, wants.
+var durable: linux_durable.Durable = .init(linux_durable.syncRoots, 0);
 
 /// **ONE HANDLER AT A TIME**: held while `route` runs, so no two handlers
 /// interleave, as on the bare-metal host, where one loop runs each to its

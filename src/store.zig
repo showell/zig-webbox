@@ -65,6 +65,19 @@ pub const Error = error{ BadName, PathTooLong, PathTooDeep };
 // neither root (a test's temporary folder, the site's own files) is not
 // measured.
 
+/// **HOW MANY CALLS HAVE CHANGED THE DISK** (zig-metal-unikernel HOST.md,
+/// "Durability"): every call that may have changed it counts once, after it
+/// returns, whether it succeeded or not. A host that makes writes durable
+/// before a response compares it with the count its last sync covered
+/// (Linux: linux_durable.zig); the bare-metal host's io keeps its own
+/// account and reads nothing here. Atomic: on Linux a kept stream's task
+/// reads it outside the turn.
+pub var changes: std.atomic.Value(u64) = .init(0);
+
+fn changed() void {
+    _ = changes.fetchAdd(1, .acq_rel);
+}
+
 /// The two roots, as this host spells them; null until the host sets them.
 pub var data_base: ?[]const u8 = null;
 pub var auth_base: ?[]const u8 = null;
@@ -343,6 +356,7 @@ pub const WriteOptions = struct {
 /// Makes `path` hold exactly `data`, making the folders above it.
 pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
     const p = try forWrite(io, alloc, path);
+    defer changed();
     if (std.fs.path.dirname(p)) |d| try makeDir(io, alloc, d);
     // The flags are spelled in place, not named: std.Io and the bare-metal
     // host's io call their type differently.
@@ -368,10 +382,11 @@ pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: Wri
 ///
 /// Not a lock: two replaces of one path at once share the sibling's name, so
 /// the callers that need one order (a counter, a sidecar) hold their own.
-/// Nothing is flushed: on Linux the rename is atomic in the namespace, but a
-/// power cut can still lose recent data that the kernel had not written.
+/// Nothing is flushed here: the host makes it durable before the next
+/// response (`changes`).
 pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
     const p = try forWrite(io, alloc, path);
+    defer changed();
     const dir = std.fs.path.dirname(p);
     if (dir) |d| try makeDir(io, alloc, d);
     const tmp_name = try siblingName(alloc, std.fs.path.basename(p));
@@ -403,6 +418,7 @@ pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: W
 /// `create`, for a new site's first secret, is its one caller).
 pub fn createNew(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
     const p = try forWrite(io, alloc, path);
+    defer changed();
     const dir = std.fs.path.dirname(p);
     if (dir) |d| try makeDir(io, alloc, d);
     var r: [4]u8 = undefined;
@@ -435,6 +451,7 @@ fn siblingName(alloc: Alloc, name: []const u8) ![]u8 {
 /// needed, and answers its size afterwards. One positional write at the end.
 pub fn append(io: Io, alloc: Alloc, path: []const u8, bytes: []const u8) !u64 {
     const p = try forWrite(io, alloc, path);
+    defer changed();
     if (std.fs.path.dirname(p)) |d| try makeDir(io, alloc, d);
     var file = try Io.Dir.cwd().createFile(io, p, .{ .truncate = false });
     defer file.close(io);
@@ -445,12 +462,15 @@ pub fn append(io: Io, alloc: Alloc, path: []const u8, bytes: []const u8) !u64 {
 
 /// Makes the folder `path` and every folder above it that is missing.
 pub fn makeDir(io: Io, alloc: Alloc, path: []const u8) !void {
-    try Io.Dir.cwd().createDirPath(io, try forMakeDir(io, alloc, path));
+    const p = try forMakeDir(io, alloc, path);
+    defer changed();
+    try Io.Dir.cwd().createDirPath(io, p);
 }
 
 /// Removes the file at `path`. Not there is not an error: the caller wanted
 /// it gone, and it is.
 pub fn remove(io: Io, alloc: Alloc, path: []const u8) !void {
+    defer changed();
     Io.Dir.cwd().deleteFile(io, path) catch |e| switch (e) {
         error.FileNotFound => {
             const p = (try retry(io, alloc, path)) orelse return;
@@ -465,6 +485,7 @@ pub fn remove(io: Io, alloc: Alloc, path: []const u8) !void {
 /// otherwise name the root itself).
 pub fn removeTree(io: Io, alloc: Alloc, path: []const u8) !void {
     if (!fatName(std.fs.path.basename(path))) return error.BadName;
+    defer changed();
     const p = (try retry(io, alloc, path)) orelse path;
     try Io.Dir.cwd().deleteTree(io, p);
 }
@@ -730,4 +751,38 @@ test "fs: createNew makes a file once, whole; one there, in any case, is PathAlr
     try std.testing.expectEqualStrings("first", try read(io, a, path, .limited(64)));
     const left = try list(io, a, dir);
     try std.testing.expectEqual(@as(usize, 1), left.len);
+}
+
+test "fs: every call that changes the disk is counted, after it; a read, or a name refused, is not" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Call = enum { write, replace, create_new, append, make_dir, remove, remove_tree };
+    for (std.enums.values(Call)) |call| {
+        const before = changes.load(.acquire);
+        switch (call) {
+            .write => try write(io, a, f.p("w/one"), "1", .{}),
+            .replace => try replace(io, a, f.p("w/one"), "2", .{}),
+            .create_new => try createNew(io, a, f.p("w/two"), "3", .{}),
+            .append => _ = try append(io, a, f.p("w/one"), "4"),
+            .make_dir => try makeDir(io, a, f.p("w/d")),
+            .remove => try remove(io, a, f.p("w/two")),
+            .remove_tree => try removeTree(io, a, f.p("w/d")),
+        }
+        if (changes.load(.acquire) <= before) {
+            std.debug.print("{t} changed the disk and was not counted\n", .{call});
+            return error.TestUnexpectedResult;
+        }
+    }
+    const before = changes.load(.acquire);
+    _ = try read(io, a, f.p("w/one"), .unlimited);
+    _ = try list(io, a, f.p("w"));
+    _ = try statOrNull(io, a, f.p("w/none"));
+    try testing.expectError(error.BadName, write(io, a, f.p("w/what?"), "x", .{}));
+    try testing.expectEqual(before, changes.load(.acquire));
 }
