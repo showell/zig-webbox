@@ -158,12 +158,16 @@ fn keptPath(target: []const u8) Text {
     const path = target[0..q];
     var t: Text = .{};
     var w: std.Io.Writer = .fixed(&t.buf);
+    // The kernel's rule (`upload_id_cases`): after `/uploads/`, in any
+    // case, the slashes are kept and the next segment goes, up to `.`,
+    // `/`, `?`, `#`, a space or a quote.
     const key = "/uploads/";
-    if (std.mem.indexOf(u8, path, key)) |at| {
-        const from = at + key.len;
-        const end = std.mem.indexOfScalarPos(u8, path, from, '/') orelse path.len;
+    if (std.ascii.indexOfIgnoreCase(path, key)) |at| {
+        var from = at + key.len;
+        while (from < path.len and path[from] == '/') from += 1;
+        const end = std.mem.indexOfAnyPos(u8, path, from, "./?# \t\"'") orelse path.len;
         w.writeAll(path[0..from]) catch {};
-        w.writeAll("[redacted]") catch {};
+        if (end > from) w.writeAll("[redacted]") catch {};
         w.writeAll(path[end..]) catch {};
     } else w.writeAll(path) catch {};
     t.len = w.end;
@@ -224,7 +228,26 @@ test "traffic: the slowest five kept, slowest first, and every 5xx with its time
 test "traffic: a path is kept as the log keeps it: no query, no upload's name" {
     var t: Traffic = .{};
     t.note(.{ .family = "uploads", .status = 500, .took_ns = 0, .target = "/chat/c/1_2/T/uploads/0123456789abcdef.png?x=1" });
-    try testing.expectEqualStrings("/chat/c/1_2/T/uploads/[redacted]", t.newestError(0).?.path.slice());
+    try testing.expectEqualStrings("/chat/c/1_2/T/uploads/[redacted].png", t.newestError(0).?.path.slice());
     t.note(.{ .family = "uploads", .status = 500, .took_ns = 0, .target = "/chat/c/1_2/T/uploads/abc/more" });
     try testing.expectEqualStrings("/chat/c/1_2/T/uploads/[redacted]/more", t.newestError(0).?.path.slice());
+}
+
+/// **THE KERNEL'S RULE FOR AN UPLOAD'S ID** (metal-vmm QUEUE 194.3), and its
+/// table: zig-metal-unikernel's `log_ring.upload_id_cases` is this same
+/// table, run through its Redactor. Change both together.
+const upload_id_cases = [_][2][]const u8{
+    .{ "/c/T/uploads/00112233.png", "/c/T/uploads/[redacted].png" },
+    .{ "/c/T/uploads//00112233.png", "/c/T/uploads//[redacted].png" },
+    .{ "/c/T/uploads///00112233", "/c/T/uploads///[redacted]" },
+    .{ "/c/T/Uploads/00112233.png", "/c/T/Uploads/[redacted].png" },
+    .{ "/c/T/UPLOADS/00112233", "/c/T/UPLOADS/[redacted]" },
+    .{ "/c/T/uploads/abc/more", "/c/T/uploads/[redacted]/more" },
+    .{ "/c/T/uploads/", "/c/T/uploads/" },
+    .{ "/c/T/uploads/#x", "/c/T/uploads/#x" },
+    .{ "/c/T/nothing/here", "/c/T/nothing/here" },
+};
+
+test "traffic: a path is kept as the log keeps it: an upload's name after `//`, and in any case (metal-vmm QUEUE 194.3)" {
+    for (upload_id_cases) |c| try testing.expectEqualStrings(c[1], keptPath(c[0]).slice());
 }
