@@ -1,0 +1,13 @@
+.{
+    // The `webbox` library, a web server in a box: three modules an
+    // application built on it depends on: `webbox` (src/webbox.zig,
+    // portable, what its code imports), `webbox_linux` (src/webbox_linux.zig,
+    // the Linux host, for its Linux `main`) and `host_io` (src/host_io_std.zig,
+    // the standard library's `Io`; a unikernel's build hands the same sources
+    // its own).
+    .name = .webbox,
+    .version = "0.1.0",
+    .fingerprint = 0x90f0ca47715bdd8d,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
