@@ -69,3 +69,33 @@ fn expandHome(alloc: std.mem.Allocator, env: std.process.Environ.Map, p: []const
     }
     return alloc.dupe(u8, p);
 }
+
+test "linux_config: the real file read: roots from the file, ~ from HOME, an auth default, comments; unset is none; a missing file is an error (metal-vmm QUEUE 198.6)" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "x.conf", .data = "# a comment\ndata_dir = ~/x\n auth_dir=/y\n" });
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "x.conf" });
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("HOME", "/h");
+    try env.put("T_CONFIG", path);
+    const roots = (try load(io, a, env, "T_CONFIG", "~/auth-default")).?;
+    try testing.expectEqualStrings("/h/x", roots.data_dir);
+    try testing.expectEqualStrings("/y", roots.auth_dir);
+
+    // No auth_dir in the file: the default, its ~ expanded.
+    try tmp.dir.writeFile(io, .{ .sub_path = "y.conf", .data = "data_dir=/d\n" });
+    try env.put("T_CONFIG", try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "y.conf" }));
+    try testing.expectEqualStrings("/h/auth-default", (try load(io, a, env, "T_CONFIG", "~/auth-default")).?.auth_dir);
+
+    var unset: std.process.Environ.Map = .init(a);
+    try testing.expectEqual(@as(?Roots, null), try load(io, a, unset, "T_CONFIG", "/z"));
+    try unset.put("T_CONFIG", "/nonexistent/x.conf");
+    if (load(io, a, unset, "T_CONFIG", "/z")) |_| return error.TestUnexpectedResult else |_| {}
+}

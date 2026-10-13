@@ -358,6 +358,12 @@ pub const WriteOptions = struct {
 
 /// Makes `path` hold exactly `data`, making the folders above it.
 pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
+    // **A PRIVATE WRITE IS A REPLACE** (metal-vmm QUEUE 198.6): a mode
+    // given at open applies only to a file the open creates, so a private
+    // write over a file readable by all left it so. A replace creates its
+    // file afresh, 0600, and renames it over the old: private whatever was
+    // there, and never torn.
+    if (opts.private) return replace(io, alloc, path, data, opts);
     const p = try forWrite(io, alloc, path);
     defer changed();
     if (std.fs.path.dirname(p)) |d| try makeDir(io, alloc, d);
@@ -788,4 +794,47 @@ test "fs: every call that changes the disk is counted, after it; a read, or a na
     _ = try statOrNull(io, a, f.p("w/none"));
     try testing.expectError(error.BadName, write(io, a, f.p("w/what?"), "x", .{}));
     try testing.expectEqual(before, changes.load(.acquire));
+}
+
+test "a private write, replace or create leaves the file 0600, even over one that was 0644 (metal-vmm QUEUE 198.6, the real call)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Mode = struct {
+        fn of(io2: Io, path: []const u8) !u32 {
+            const st = try Io.Dir.cwd().statFile(io2, path, .{});
+            return @intFromEnum(st.permissions) & 0o777;
+        }
+    };
+    try write(io, a, f.p("data/s1"), "x", .{ .private = true });
+    try testing.expectEqual(@as(u32, 0o600), try Mode.of(io, f.p("data/s1")));
+    try replace(io, a, f.p("data/s2"), "x", .{ .private = true });
+    try testing.expectEqual(@as(u32, 0o600), try Mode.of(io, f.p("data/s2")));
+    try createNew(io, a, f.p("data/s3"), "x", .{ .private = true });
+    try testing.expectEqual(@as(u32, 0o600), try Mode.of(io, f.p("data/s3")));
+    // A file that was there, readable by all (a hand-seeded secret): a
+    // private write makes it private, where O_CREAT's mode, applying only
+    // to a file it creates, left it 0644.
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = f.p("data/seeded"), .data = "old", .flags = .{ .permissions = @enumFromInt(0o644) } });
+    try write(io, a, f.p("data/seeded"), "new", .{ .private = true });
+    try testing.expectEqual(@as(u32, 0o600), try Mode.of(io, f.p("data/seeded")));
+    try testing.expectEqualStrings("new", try read(io, a, f.p("data/seeded"), .unlimited));
+}
+
+test "a replace onto a folder fails, and leaves no temporary file beside it (the real rename's refusal)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try makeDir(io, a, f.p("data/x"));
+    if (replace(io, a, f.p("data/x"), "d", .{})) |_| return error.TestUnexpectedResult else |_| {}
+    for (try list(io, a, f.p("data"))) |e| try testing.expect(!std.mem.startsWith(u8, e.name, "~"));
 }

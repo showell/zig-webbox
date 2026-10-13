@@ -260,3 +260,63 @@ test "durable: the real sync on a root opened as openRoots opens it succeeds" {
     defer _ = std.os.linux.close(d.roots[0]);
     try testing.expect(syncRoots(&d));
 }
+
+test "durable: the real sync on a root opened O_PATH fails, and is counted: the ad144c7 bug, held by the syscall itself (metal-vmm QUEUE 198.6)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer testing.allocator.free(dir);
+    var d: Durable = .init(syncRoots, 0);
+    // An openDir that will not iterate: O_PATH, which syncfs refuses.
+    d.roots[0] = (try Io.Dir.cwd().openDir(io, dir, .{})).handle;
+    defer _ = std.os.linux.close(d.roots[0]);
+    try testing.expect(!syncRoots(&d));
+}
+
+test "durable: openRoots opens each root as syncfs takes it, or the working directory when there are none, and the real sync succeeds on them (metal-vmm QUEUE 198.6)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const base = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer testing.allocator.free(base);
+    const data = try std.fs.path.join(testing.allocator, &.{ base, "data" });
+    defer testing.allocator.free(data);
+    const auth = try std.fs.path.join(testing.allocator, &.{ base, "auth" });
+    defer testing.allocator.free(auth);
+    try tmp.dir.createDir(io, "data", .default_dir);
+    try tmp.dir.createDir(io, "auth", .default_dir);
+
+    const was_data = store.data_base;
+    const was_auth = store.auth_base;
+    defer {
+        store.data_base = was_data;
+        store.auth_base = was_auth;
+    }
+    {
+        store.data_base = data;
+        store.auth_base = auth;
+        var d: Durable = .init(syncRoots, 0);
+        _ = try d.openRoots(io);
+        defer for (d.roots) |fd| if (fd >= 0) {
+            _ = std.os.linux.close(fd);
+        };
+        try testing.expect(d.roots[0] >= 0 and d.roots[1] >= 0);
+        try testing.expect(syncRoots(&d));
+    }
+    {
+        store.data_base = null;
+        store.auth_base = null;
+        var d: Durable = .init(syncRoots, 0);
+        _ = try d.openRoots(io);
+        defer if (d.roots[0] >= 0) {
+            _ = std.os.linux.close(d.roots[0]);
+        };
+        try testing.expect(d.roots[0] >= 0 and d.roots[1] == -1);
+        try testing.expect(syncRoots(&d));
+    }
+}

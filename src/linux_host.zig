@@ -1830,3 +1830,33 @@ test "linux_host: /admin/host says how many syncs of the data failed, and how ma
     try std.testing.expect(std.mem.startsWith(u8, syncs.?, "3"));
     try std.testing.expect(streams != null);
 }
+
+test "linux_host: freeSpaceAt asks statfs itself: a real folder's volume has room and a size, and a missing one says nothing (metal-vmm QUEUE 198.6)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fs.path.join(std.testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer std.testing.allocator.free(dir);
+    const s = freeSpaceAt(dir).?;
+    try std.testing.expect(s.total > 0 and s.free <= s.total);
+    const missing = try std.fs.path.join(std.testing.allocator, &.{ dir, "missing" });
+    defer std.testing.allocator.free(missing);
+    try std.testing.expectEqual(@as(?free_space.Space, null), freeSpaceAt(missing));
+}
+
+test "linux_host: /admin/host's process facts come from the real getpid and /proc/self/status (metal-vmm QUEUE 198.6)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const facts = try linuxFacts(threaded.io(), arena.allocator());
+    var pid_seen = false;
+    var resident: ?[]const u8 = null;
+    const pid = try std.fmt.allocPrint(arena.allocator(), "pid {d}", .{std.os.linux.getpid()});
+    for (facts) |f| {
+        if (std.mem.eql(u8, f.label, "host") and std.mem.indexOf(u8, f.value, pid) != null) pid_seen = true;
+        if (std.mem.eql(u8, f.label, "memory now (resident)")) resident = f.value;
+        try std.testing.expect(!std.mem.eql(u8, f.label, "memory")); // the /proc read's failure
+    }
+    try std.testing.expect(pid_seen);
+    try std.testing.expect(std.mem.endsWith(u8, resident.?, "kB"));
+}
