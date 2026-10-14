@@ -72,6 +72,8 @@ pub const Run = struct {
     base: usize = 0,
     ret: Value = .nil,
     stop: ?diag.Stop = null,
+    /// The top-level `const`s, each null until its line has run.
+    consts: []?Value = &.{},
     /// The lowest frame address the walk reached: the Zig stack it took,
     /// measured (README, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
@@ -149,6 +151,11 @@ pub const Run = struct {
             .local => |*l| {
                 const v = if (l.value) |e| try self.eval(e) else .nil;
                 self.slot(l.slot).* = v;
+            },
+            .constant => |*c| {
+                const v = try self.eval(c.value);
+                self.slot(c.slot).* = v;
+                self.consts[c.index] = v;
             },
             .assign => |*a| try self.assign(a.target, a.value),
             .call => |c| _ = try self.eval(c),
@@ -327,6 +334,7 @@ pub const Run = struct {
             .int => |i| return .{ .int = i },
             .string => |s| return .{ .string = s },
             .local => |s| return self.slot(s).*,
+            .constant => |i| return self.consts[i] orelse self.constUnset(e.pos, i),
             .index => return self.indexExpr(e),
             .call => |*c| return self.call(e.pos, c),
             .unary => return self.unary(e),
@@ -335,6 +343,10 @@ pub const Run = struct {
             .map => |entries| return self.mapLiteral(e.pos, entries),
             .empty_table => return .{ .table = try self.newTable(e.pos) },
         }
+    }
+
+    noinline fn constUnset(self: *Run, pos: ast.Pos, i: u16) Error {
+        return self.fail(pos, .name, "the `const` {s} is read before its line has run", .{self.program.const_names[i]});
     }
 
     noinline fn indexExpr(self: *Run, e: *const ast.Expr) Error!Value {
@@ -560,6 +572,8 @@ pub const Run = struct {
 
     /// The script's own top level, its frame at the stack's foot.
     pub fn main(self: *Run) Error!void {
+        self.consts = self.alloc.alloc(?Value, self.program.const_names.len) catch return self.oom(self.program.main.pos);
+        @memset(self.consts, null);
         self.stack.appendNTimes(self.alloc, .nil, self.program.main.frame) catch return self.oom(self.program.main.pos);
         self.base = 0;
         _ = try self.block(self.program.main.body);

@@ -50,7 +50,8 @@ its outcome.
   - `for i = a, b[, step] do ... end`;
   - `for x in list do ... end`, which walks the list as it was when the loop began;
   - `break`, `do ... end`, and `return [e]` (at the top level it ends the script);
-  - `function name(a, b) ... end`, at the top level only. A function may recurse, and may be called before it is declared.
+  - `function name(a, b) ... end`, at the top level only. A function may recurse, and may be called before it is declared;
+  - `const NAME = e`, at the top level only: a name never assigned again, which the functions declared after it see too. A table it names can still change. A function that reads one before its line has run stops with an error.
 - **Values:**
   - `nil`, `true`/`false`;
   - 64-bit integers, checked: overflow stops the script;
@@ -77,7 +78,7 @@ its outcome.
   - there are no globals: an undeclared name is an error, found when the script is parsed;
   - locals are block-scoped;
   - `local x = x` reads the outer `x`;
-  - a function sees only its own parameters and locals, not the script's;
+  - a function sees only its own parameters and locals, and the `const`s declared above it, never the script's `local`s;
   - functions are not values.
 - **Refused, each by name:**
   - floats and `/`;
@@ -95,10 +96,12 @@ its outcome.
 
 | | |
 |---|---|
-| the store | `ls(p)` (a sorted list of names), `stat(p)` (`{size, kind}`, `kind` one of `"file"`, `"directory"` and `"other"`, with no time, so runs stay deterministic), `exists(p)`, `is_dir(p)`, `read(p)`, `replace(p, s)` (never a torn file; there is no plain `write`), `append(p, s)`, `mkdir(p)`, `remove(p)`, `remove_tree(p)` |
-| strings | `split(s, sep)` (an error when `sep` is `""`), `join(list, sep)`, `starts_with`, `ends_with`, `contains`, `find` (plain text, **not Lua's patterns**; nil when absent), `sub(s, i[, j])` (Lua's: 1-based, inclusive, negatives from the end, clamped), `trim`, `upper`, `lower`, `tostring` (scalars only), `tonumber` (an optional `-` and decimal digits; anything else is an error) |
-| lists and maps | `push(l, x)`, `sort(l)` (in place, all integers or all strings, no comparator), `keys(m)` (insertion order), `has_key(m, k)`, `count(m)` (maps; `#` for strings and lists) |
-| the host | `now()`, the integer the host handed in: the only time a script has |
+| the store | `ls(p)` (a sorted list of names), `stat(p)` (`{size, kind, modified}`, `kind` one of `"file"`, `"directory"` and `"other"`, `modified` the store's time in seconds since 1970: the same volume gives the same run), `walk(p)` (every entry under `p` as `{path, size, kind, modified}`, `path` from the root, depth first with each folder's names sorted and a folder before what it holds; a folder's size is 0; **one store read a folder**, not one an entry), `exists(p)`, `is_dir(p)`, `read(p)`, `replace(p, s)` (never a torn file; there is no plain `write`), `append(p, s)`, `mkdir(p)`, `remove(p)`, `remove_tree(p)` |
+| strings | `split(s, sep)` (an error when `sep` is `""`), `lines(s)` (split at `\n`, with no last empty piece after a final newline: `#lines("a\nb\n")` is 2), `words(s)` (the runs between ASCII whitespace), `join(list, sep)`, `starts_with`, `ends_with`, `contains`, `find` (plain text, **not Lua's patterns**; nil when absent), `like(s, pattern)` (the whole of `s` against `*`, any run of bytes, and `?`, one byte; every other byte is itself), `sub(s, i[, j])` (Lua's: 1-based, inclusive, negatives from the end, clamped), `trim`, `upper`, `lower`, `tostring` (scalars only), `tonumber` (an optional `-` and decimal digits; anything else is an error) |
+| dates | `date(seconds)` (`2026-10-14T03:00:00Z`, UTC, 1970 to 9999), `seconds(text)` (its inverse: an RFC 3339 time with `Z` or `±HH:MM`, a fraction of a second dropped, or a date alone, its midnight UTC; anything else, an unreal day among them, is an error) |
+| formatting | `human(bytes)` (`1.5 KiB`, one decimal, rounded half up, `B` to `EiB`), `pad(v, width)` (a string or an integer padded with spaces to `width` on the right, or to `-width` on the left; longer text kept whole), `table(rows, columns)` (rows, a list of maps, as aligned text: a line of the column names and one a row, columns two spaces apart, a column of integers aligned right; every row must have every column; no newline at the end, `print` adds it) |
+| lists and maps | `push(l, x)`, `sort(l)` (in place, all integers or all strings, no comparator), `sort(rows, key)` (a list of maps by each one's `key`, all integers or all strings, **stable**: equal keys keep their order), `reverse(l)` (in place), `keys(m)` (insertion order), `has_key(m, k)`, `count(t)` (a map's entries or a list's length; `#` for strings and lists) |
+| the host | `now()`, the integer the host handed in: the only time a script has; `budget()`, what is left of the `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output` budgets, so a script can stop at a point of its own |
 | output | `print(...)` takes scalars only; it evaluates every argument first, joins them with tabs, and ends with a newline |
 
 **Paths are confined to the root.**
@@ -125,7 +128,7 @@ run that hits one stops cleanly, naming it, with its line and column.
 | call depth | 64 |
 | depth: how many expressions and statements the walk is inside of at once, across all calls (see below) | 2,000 |
 | output (at most `out.len`) | 256 KiB |
-| store reads (`ls`, `stat`, `exists` and `is_dir` each count one) and read bytes (`read` gets what remains as its limit) | 10,000 and 64 MiB |
+| store reads (`ls`, `stat`, `exists`, `is_dir` and `read` each count one, `walk` one a folder) and read bytes (`read` gets what remains as its limit) | 10,000 and 64 MiB |
 | store changes, and the bytes they write | 1,000 and 16 MiB |
 | source size | 64 KiB |
 | parse nesting (a parenthesis costs two: an expression and its operand) | 200 |
@@ -162,9 +165,15 @@ the live data folder.
 
 The examples in `src/script/examples/` run as tests against a store
 shaped like angry-gopher's:
-- every topic with its message count;
-- files over a size;
-- deleting one topic.
+- every topic with its message count (`topics.shale`);
+- files over a size (`big_files.shale`);
+- deleting one topic (`delete_topic.shale`);
+- and the first three to run on lynrummy.com after v31 (metal-vmm QUEUE
+  204(a), in v31's builtins): where the data root's bytes are, folder by
+  folder, and the largest files (`where_the_bytes_are.shale`); the chat
+  topic by topic, the quiet ones and the count caches that disagree
+  (`chat_topics.shale`); and one small change, a folder and a file, easy
+  to check and to undo (`first_change.shale`).
 
 ### On the live site: `script_route` and the signer
 

@@ -16,6 +16,7 @@ pub const Builtin = enum {
     mkdir,
     remove,
     remove_tree,
+    walk,
     // strings
     split,
     join,
@@ -29,14 +30,25 @@ pub const Builtin = enum {
     lower,
     tostring,
     tonumber,
+    lines,
+    words,
+    like,
+    // dates and formatting
+    date,
+    seconds,
+    human,
+    pad,
+    table,
     // lists and maps
     push,
     sort,
     keys,
     has_key,
     count,
+    reverse,
     // the host
     now,
+    budget,
     print,
 };
 
@@ -53,6 +65,9 @@ pub const Expr = struct {
         int: i64,
         string: []const u8,
         local: u16,
+        /// A top-level `const`, read in a function: an index into the
+        /// run's constants (`Program.const_names`).
+        constant: u16,
         index: struct { obj: *Expr, key: *Expr },
         call: Call,
         binary: struct { op: BinOp, left: *Expr, right: *Expr },
@@ -83,6 +98,9 @@ pub const Stmt = struct {
 
     pub const Kind = union(enum) {
         local: struct { slot: u16, value: ?*Expr },
+        /// `const NAME = e`, at the top level: the script's own slot, and
+        /// the constant the functions declared after it read.
+        constant: struct { slot: u16, index: u16, value: *Expr },
         assign: struct { target: *Expr, value: *Expr },
         call: *Expr,
         @"if": struct { arms: []Arm, otherwise: ?[]Stmt },
@@ -108,6 +126,8 @@ pub const Function = struct {
 
 pub const Program = struct {
     functions: []Function,
+    /// The top-level `const`s, in order, by name.
+    const_names: []const []const u8 = &.{},
     /// The script's own top level, a function with no parameters.
     main: Function,
 };

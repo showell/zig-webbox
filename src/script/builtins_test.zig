@@ -209,7 +209,7 @@ test "builtins: lists and maps: push, sort, keys, has_key, count" {
     try f.expectOutput("local e = {} print(count(e), #keys(e)) sort(e)", "0\t0\n");
     try f.expectStop("sort({1, \"a\"})", .type);
     try f.expectStop("sort({true})", .type);
-    try f.expectStop("count({1})", .type);
+    try f.expectStop("count(\"s\")", .type);
     try f.expectStop("push({a = 1}, 2)", .type);
     try f.expectStop("push({}, nil)", .type);
     try f.expectStop("has_key({a = 1}, 1)", .type);
@@ -250,4 +250,108 @@ test "builtins: a change on the disk is in the effects log, however little arena
     }
     // Not vacuous: the sweep crossed from too little to enough.
     try testing.expect(finished > 0 and stopped_by_arena > 0);
+}
+
+// ── v31's builtins (metal-vmm QUEUE 206) ──────────────────────────────────
+
+test "builtins: walk lists every entry under a folder, depth first and sorted, for one read a folder" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("for e in walk(\"\") do print(e.path, e.size, e.kind) end", "chat\t0\tdirectory\nchat/a.md\t5\tfile\nchat/b.md\t6\tfile\ntop.txt\t3\tfile\n");
+    try f.expectOutput("for e in walk(\"chat\") do print(e.path) end", "chat/a.md\nchat/b.md\n");
+    try f.expectOutput("local w = walk(\"\") print(w[2].modified > 1000000000)", "true\n");
+    // Two folders, two reads: the root and chat.
+    {
+        var r = f.run("print(#walk(\"\"))", .{ .reads = 2 });
+        defer r.deinit();
+        try testing.expect(r.finished());
+    }
+    {
+        var r = f.run("print(#walk(\"\"))", .{ .reads = 1 });
+        defer r.deinit();
+        try testing.expectEqual(script.diag.Budget.reads, r.stop.?.budget.?);
+    }
+    try f.expectStop("walk(\"nope\")", .store);
+    try f.expectStop("walk(\"top.txt\")", .store);
+    try f.expectStop("walk(\"../auth\")", .argument);
+}
+
+test "builtins: budget says what is left of each budget" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("local b = budget() print(b.reads, b.read_bytes, b.changes, b.change_bytes)", "10000\t67108864\t1000\t16777216\n");
+    try f.expectOutput("print(exists(\"top.txt\")) print(budget().reads) read(\"top.txt\") print(budget().read_bytes)", "true\n9999\n67108861\n");
+    try f.expectOutput("local a = budget().steps local c = budget().steps print(a > c, a <= 5000000)", "true\ttrue\n");
+    try f.expectOutput("print(\"ab\") print(budget().output)", "ab\n65533\n");
+}
+
+test "builtins: lines without a last empty piece, words, and count on a list" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(#lines(\"a\\nb\\nc\\n\"), #lines(\"a\\nb\\nc\"), #lines(\"\"), #lines(\"\\n\"), join(lines(\"x\\n\\ny\\n\"), \"|\"))", "3\t3\t0\t1\tx||y\n");
+    try f.expectOutput("print(#words(\"  the quick\\tbrown\\n\\nfox  \"), join(words(\"a b\"), \",\"), #words(\"\"), #words(\" \\n\"))", "4\ta,b\t0\t0\n");
+    try f.expectOutput("print(count({1, 2, 3}), count({}), count({a = 1}))", "3\t0\t1\n");
+    try f.expectStop("lines(1)", .type);
+    try f.expectStop("words({})", .type);
+}
+
+test "builtins: sort by a key keeps equal keys in order; reverse" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const rows = "local rows = {{n = \"b\", v = 2}, {n = \"a\", v = 2}, {n = \"c\", v = 1}} ";
+    const names = " local o = {} for r in rows do push(o, r.n) end print(join(o, \",\"))";
+    try f.expectOutput(rows ++ "sort(rows, \"v\")" ++ names, "c,b,a\n");
+    try f.expectOutput(rows ++ "sort(rows, \"n\")" ++ names, "a,b,c\n");
+    try f.expectOutput(rows ++ "sort(rows, \"v\") reverse(rows)" ++ names, "a,b,c\n");
+    try f.expectOutput("local l = {1, 2, 3} reverse(l) print(join(l, \",\")) local e = {} reverse(e) sort(e, \"k\") print(#e)", "3,2,1\n0\n");
+    try f.expectStop("sort({{v = 1}, {w = 2}}, \"v\")", .index);
+    try f.expectStop("sort({{v = 1}, {v = \"x\"}}, \"v\")", .type);
+    try f.expectStop("sort({1, 2}, \"v\")", .type);
+    try f.expectStop("sort({{v = 1}}, 1)", .type);
+    try f.expectStop("reverse({a = 1})", .type);
+}
+
+test "builtins: date and seconds, each the other's inverse, in UTC" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(date(0), date(1700000000), date(951782400), date(253402300799))", "1970-01-01T00:00:00Z\t2023-11-14T22:13:20Z\t2000-02-29T00:00:00Z\t9999-12-31T23:59:59Z\n");
+    try f.expectOutput("print(seconds(\"2023-11-14T22:13:20Z\"), seconds(\"2000-02-29\"), seconds(\"2026-10-14T03:00:00+02:00\"), seconds(\"2026-10-14T03:00:00.123Z\"), seconds(\"2026-10-14T01:00:00-02:00\"))", "1700000000\t951782400\t1791939600\t1791946800\t1791946800\n");
+    try f.expectOutput("local ok = true for s = 0, 4000000000, 37777777 do if seconds(date(s)) ~= s then ok = false end end print(ok)", "true\n");
+    const bad = [_][]const u8{ "seconds(\"2023-02-29\")", "seconds(\"2026-10-14T03:00:00\")", "seconds(\"x\")", "seconds(\"2026-13-01\")", "seconds(\"2026-10-14T24:00:00Z\")", "seconds(\"2026-10-14 03:00:00Z\")", "seconds(\"2026-10-14T03:00:00+2:00\")", "date(-1)", "date(253402300800)" };
+    for (bad) |src| try f.expectStop(src, .argument);
+    try f.expectStop("seconds(1)", .type);
+}
+
+test "builtins: human sizes, pad either way, and a table of rows" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(human(0), human(1023), human(1024), human(1536), human(5000), human(1048575), human(-2048), human(9223372036854775807))", "0 B\t1023 B\t1.0 KiB\t1.5 KiB\t4.9 KiB\t1.0 MiB\t-2.0 KiB\t8.0 EiB\n");
+    try f.expectOutput("print(\"[\" .. pad(\"ab\", 5) .. \"]\", \"[\" .. pad(42, -5) .. \"]\", \"[\" .. pad(\"toolong\", 3) .. \"]\", \"[\" .. pad(\"\", 0) .. \"]\")", "[ab   ]\t[   42]\t[toolong]\t[]\n");
+    try f.expectOutput(
+        "local rows = {{name = \"chat\", files = 12, bytes = \"1.2 KiB\"}, {name = \"games\", files = 3, bytes = \"5 B\"}} print(table(rows, {\"name\", \"files\", \"bytes\"}))",
+        "name   files  bytes\nchat      12  1.2 KiB\ngames      3  5 B\n",
+    );
+    try f.expectOutput("print(table({}, {\"a\", \"b\"}))", "a  b\n");
+    try f.expectStop("table({{a = 1}}, {\"a\", \"b\"})", .index);
+    try f.expectStop("table({{a = {}}}, {\"a\"})", .type);
+    try f.expectStop("table({1}, {\"a\"})", .type);
+    try f.expectStop("pad({}, 3)", .type);
+    try f.expectStop("human(\"1\")", .type);
+}
+
+test "builtins: like, with * and ? only, the whole string" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(like(\"a.md\", \"*.md\"), like(\"a.md\", \"*.txt\"), like(\"abc\", \"a?c\"), like(\"ac\", \"a?c\"), like(\"\", \"*\"), like(\"x\", \"\"), like(\"aaa\", \"a*a*a\"), like(\"ab\", \"a*b*\"), like(\"a.md.bak\", \"*.md\"), like(\"[x]\", \"[x]\"))", "true\tfalse\ttrue\tfalse\ttrue\tfalse\ttrue\ttrue\tfalse\ttrue\n");
+    // Its work is charged: a long string against a pattern that backtracks.
+    var r = f.run("local s = \"a\" for i = 1, 16 do s = s .. s end print(like(s, \"*" ++ "a" ** 39 ++ "b\"))", .{ .steps = 400_000 });
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
 }

@@ -249,3 +249,22 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
 test "run: print evaluates all its arguments before it writes one, as Lua's" {
     try expectOutput("function f() print(\"inner\") return 2 end print(1, f())", "inner\n1\t2\n");
 }
+
+test "run: a top-level const is seen by the functions declared after it, and is never assigned (metal-vmm QUEUE 206)" {
+    try expectOutput("const LIMIT = 3 function f(n) return n + LIMIT end print(f(1), LIMIT)", "4\t3\n");
+    // A table a const names can still change; the name cannot.
+    try expectOutput("const SEEN = {} function mark(k) SEEN[k] = true end mark(\"a\") print(count(SEEN))", "1\n");
+    // A function's own local of the same name is its own.
+    try expectOutput("const N = 1 function f() local N = 2 return N end print(f(), N)", "2\t1\n");
+    try expectStop("const X = 1 X = 2", .name, null);
+    try expectStop("const X = 1 function f() X = 2 end", .name, null);
+    try expectStop("function f() const Y = 1 end", .refused, null);
+    try expectStop("if true then const Y = 1 end", .refused, null);
+    try expectStop("const X", .syntax, null);
+    try expectStop("const X = 1 const X = 2", .name, null);
+    try expectStop("const print = 1", .name, null);
+    // A function declared before the const does not see it.
+    try expectStop("function f() return A end const A = 1 print(f())", .name, null);
+    // Called before the const's line has run: an error, not nil.
+    try expectStop("const A = g() function g() return f() end function f() return A end", .name, null);
+}

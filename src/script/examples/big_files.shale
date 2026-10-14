@@ -2,13 +2,13 @@
 
 local over = 1000
 
-function walk(dir, over)
+function walk_dir(dir, over)
   local found = 0
   for name in ls(dir) do
     local path = name
     if dir ~= "" then path = dir .. "/" .. name end
     if is_dir(path) then
-      found = found + walk(path, over)
+      found = found + walk_dir(path, over)
     else
       local size = stat(path).size
       if size > over then
@@ -20,4 +20,4 @@ function walk(dir, over)
   return found
 end
 
-print("files over " .. over .. " bytes:", walk("", over))
+print("files over " .. over .. " bytes:", walk_dir("", over))

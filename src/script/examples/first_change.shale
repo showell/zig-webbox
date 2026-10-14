@@ -1,0 +1,35 @@
+-- One small change, easy to check and to undo: a folder of its own at the
+-- data root, shale-check/, holding one file, first-run.txt, that says when
+-- it was written and what the chat held then. Run again, it prints what the
+-- last run wrote before it replaces it. Nothing else is touched.
+--
+-- To undo: a script of one line, remove_tree("shale-check").
+
+const DIR = "shale-check"
+const PATH = DIR .. "/first-run.txt"
+
+-- What the chat holds, counted cheaply: its conversations and channels.
+local conversations = 0
+local channels = 0
+for name in ls("chat") do
+  if name == "channels" then
+    for ch in ls("chat/channels") do
+      if not like(ch, "*.channel") then channels = channels + 1 end
+    end
+  else
+    conversations = conversations + 1
+  end
+end
+
+if exists(PATH) then
+  print("the last run wrote:")
+  print(read(PATH))
+else
+  print("no " .. PATH .. " yet")
+end
+
+if not exists(DIR) then mkdir(DIR) end
+replace(PATH, "written by a signed Shale script at " .. date(now()) .. "\n" ..
+  "conversations " .. conversations .. ", channels " .. channels .. "\n")
+print("wrote " .. PATH .. ":")
+print(read(PATH))

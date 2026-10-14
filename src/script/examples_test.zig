@@ -8,6 +8,9 @@ const testing = std.testing;
 const topics = @embedFile("examples/topics.shale");
 const big_files = @embedFile("examples/big_files.shale");
 const delete_topic = @embedFile("examples/delete_topic.shale");
+const where_the_bytes_are = @embedFile("examples/where_the_bytes_are.shale");
+const chat_topics = @embedFile("examples/chat_topics.shale");
+const first_change = @embedFile("examples/first_change.shale");
 
 const sep = "\n\n-------------\n";
 
@@ -57,7 +60,11 @@ const Fixture = struct {
     }
 
     fn run(self: *Fixture, src: []const u8, out: []u8) script.Result {
-        return script.run(self.threaded.io(), testing.allocator, self.root, src, .{}, 0, out);
+        return self.runAt(src, 0, out);
+    }
+
+    fn runAt(self: *Fixture, src: []const u8, now: i64, out: []u8) script.Result {
+        return script.run(self.threaded.io(), testing.allocator, self.root, src, .{}, now, out);
     }
 };
 
@@ -125,4 +132,72 @@ test "example: delete one topic, its sidecars and uploads with it, every change 
     try finished(&twice);
     try testing.expectEqual(@as(usize, 0), twice.effects.len);
     try testing.expect(std.mem.startsWith(u8, twice.output, "no such topic"));
+}
+
+// ── 204(a)'s three scripts, in v31's builtins (metal-vmm QUEUE 206) ──────
+
+test "example: where the bytes are, folder by folder, then the largest files" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var r = f.run(where_the_bytes_are, &out_buf);
+    defer r.deinit();
+    try finished(&r);
+    errdefer std.debug.print("{s}", .{r.output});
+    try testing.expectEqual(@as(usize, 0), r.effects.len);
+    // The folders, the biggest first, then all of them.
+    try testing.expect(std.mem.startsWith(u8, r.output, "folder  files  bytes  size     empty\n"));
+    try testing.expect(std.mem.indexOf(u8, r.output, "\nchat        9  ") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "\ngames       1   5000  4.9 KiB      0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "\nall        10  ") != null);
+    // The largest: games/big.json, then the 40-message transcript.
+    try testing.expect(std.mem.indexOf(u8, r.output, "the largest files:\nbytes  size     path\n 5000  4.9 KiB  games/big.json\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "chat/channels/general/sessions/plans.md") != null);
+}
+
+test "example: chat topics by messages, the quiet ones, the caches that disagree" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // A count cache that lies, for the last section.
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "39\n" });
+    // 2027-02-02: the transcripts' 2026-10-13 is more than 90 days before.
+    var r = f.runAt(chat_topics, 1801526400, &out_buf);
+    defer r.deinit();
+    try finished(&r);
+    errdefer std.debug.print("{s}", .{r.output});
+    try testing.expectEqual(@as(usize, 0), r.effects.len);
+    try testing.expect(std.mem.startsWith(u8, r.output, "topics\t4\tmessages\t46\tbytes\t"));
+    try testing.expect(std.mem.indexOf(u8, r.output, "topic           messages  bytes  last\n#general plans        40   4166  2026-10-13T12:00:00Z\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "quiet for 90 days (since 2026-11-04T00:00:00Z): 4\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "count caches that disagree: 1\ntopic           transcript  cache\n#general plans          40     39\n") != null);
+    // The same run on the transcripts' own day: none is quiet.
+    var today = f.runAt(chat_topics, 1791936000, &out_buf);
+    defer today.deinit();
+    try finished(&today);
+    try testing.expect(std.mem.indexOf(u8, today.output, "): 0\n") != null);
+}
+
+test "example: the first change makes one folder and one file, and says what the last run wrote" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var r = f.runAt(first_change, 1791936000, &out_buf);
+    defer r.deinit();
+    try finished(&r);
+    errdefer std.debug.print("{s}", .{r.output});
+    try testing.expectEqual(@as(usize, 2), r.effects.len);
+    try testing.expectEqualStrings("mkdir", r.effects[0].op);
+    try testing.expectEqualStrings("shale-check", r.effects[0].path);
+    try testing.expectEqualStrings("replace", r.effects[1].op);
+    try testing.expectEqualStrings("shale-check/first-run.txt", r.effects[1].path);
+    try testing.expect(std.mem.startsWith(u8, r.output, "no shale-check/first-run.txt yet\n"));
+    try testing.expect(std.mem.indexOf(u8, r.output, "at 2026-10-14T00:00:00Z\nconversations 1, channels 2\n") != null);
+    // Again: the folder is there, only the file is replaced, and the
+    // last run's text is printed first.
+    var again = f.runAt(first_change, 1791936060, &out_buf);
+    defer again.deinit();
+    try finished(&again);
+    try testing.expectEqual(@as(usize, 1), again.effects.len);
+    try testing.expect(std.mem.startsWith(u8, again.output, "the last run wrote:\nwritten by a signed Shale script at 2026-10-14T00:00:00Z\n"));
 }

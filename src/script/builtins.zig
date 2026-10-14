@@ -9,6 +9,8 @@ const value = @import("value.zig");
 
 const store = @import("../store.zig");
 
+const v31 = @import("builtins_v31.zig");
+
 const Run = interp.Run;
 const Value = value.Value;
 const Error = interp.Error;
@@ -17,9 +19,10 @@ const B = ast.Builtin;
 /// How many arguments each takes: `at_least` to `at_most`.
 fn arity(b: B) struct { at_least: u8, at_most: u8 } {
     return switch (b) {
-        .now => .{ .at_least = 0, .at_most = 0 },
-        .ls, .stat, .exists, .is_dir, .read, .mkdir, .remove, .remove_tree, .trim, .upper, .lower, .tostring, .tonumber, .sort, .keys, .count => .{ .at_least = 1, .at_most = 1 },
-        .replace, .append, .split, .join, .starts_with, .ends_with, .contains, .find, .push, .has_key => .{ .at_least = 2, .at_most = 2 },
+        .now, .budget => .{ .at_least = 0, .at_most = 0 },
+        .ls, .stat, .exists, .is_dir, .read, .mkdir, .remove, .remove_tree, .walk, .trim, .upper, .lower, .tostring, .tonumber, .keys, .count, .lines, .words, .reverse, .date, .seconds, .human => .{ .at_least = 1, .at_most = 1 },
+        .replace, .append, .split, .join, .starts_with, .ends_with, .contains, .find, .push, .has_key, .like, .pad, .table => .{ .at_least = 2, .at_most = 2 },
+        .sort => .{ .at_least = 1, .at_most = 2 },
         .sub => .{ .at_least = 2, .at_most = 3 },
         .print => .{ .at_least = 0, .at_most = 255 },
     };
@@ -72,9 +75,13 @@ pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
             out.kind = .list;
             return .{ .table = out };
         },
+        // A map's entries, or a list's length (`#l` too).
         .count => {
-            const t = try mapArg(run, pos, b, args[0]);
-            return .{ .int = @intCast(t.map.count()) };
+            const t = switch (args[0]) {
+                .table => |t| t,
+                else => return run.fail(pos, .type, "`count` takes a map or a list, not {s}", .{args[0].typeName()}),
+            };
+            return .{ .int = @intCast(if (t.kind == .list) t.list.items.len else t.map.count()) };
         },
         .has_key => {
             const t = try mapArg(run, pos, b, args[0]);
@@ -84,6 +91,21 @@ pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
         },
         // ── the store ──
         .ls, .stat, .exists, .is_dir, .read => return storeRead(run, pos, b, args),
+        .walk => return walk(run, pos, args[0]),
+        .budget => return budgetLeft(run, pos),
+        .lines, .words => return v31.splitText(run, pos, b, args[0]),
+        .like => return v31.like(run, pos, args[0], args[1]),
+        .date => return v31.date(run, pos, args[0]),
+        .seconds => return v31.seconds(run, pos, args[0]),
+        .human => return v31.human(run, pos, args[0]),
+        .pad => return v31.pad(run, pos, args[0], args[1]),
+        .table => return v31.table(run, pos, args[0], args[1]),
+        .reverse => {
+            const t = try listArg(run, pos, b, args[0]);
+            try run.charge(pos, t.list.items.len);
+            std.mem.reverse(Value, t.list.items);
+            return .nil;
+        },
         .replace, .append, .mkdir, .remove, .remove_tree => return storeChange(run, pos, b, args),
         // ── strings ──
         .split => {
@@ -159,6 +181,7 @@ pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
         // ── lists ──
         .sort => {
             const t = try listArg(run, pos, b, args[0]);
+            if (args.len > 1) return v31.sortByKey(run, pos, t, args[1]);
             const items = t.list.items;
             if (items.len == 0) return .nil;
             const kind = std.meta.activeTag(items[0]);
@@ -217,11 +240,11 @@ pub fn mapArg(run: *Run, pos: ast.Pos, b: B, v: Value) Error!*value.Table {
     };
 }
 
-const SortContext = struct {
+pub const SortContext = struct {
     comparisons: u64 = 0,
     bytes: u64 = 0,
 
-    fn lessThan(ctx: *SortContext, a: Value, b: Value) bool {
+    pub fn lessThan(ctx: *SortContext, a: Value, b: Value) bool {
         ctx.comparisons += 1;
         return switch (a) {
             .int => |x| x < b.int,
@@ -324,6 +347,7 @@ fn storeRead(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
             const out = try run.newTable(pos);
             out.map.put(a, "size", .{ .int = @intCast(st.size) }) catch return run.oom(pos);
             out.map.put(a, "kind", .{ .string = @tagName(st.kind) }) catch return run.oom(pos);
+            out.map.put(a, "modified", .{ .int = modifiedSeconds(st.mtime) }) catch return run.oom(pos);
             out.kind = .map;
             return .{ .table = out };
         },
@@ -393,4 +417,88 @@ pub fn sortBound(n: usize, bytes: u64) u64 {
     if (n < 2) return 1;
     const lg: u64 = std.math.log2_int_ceil(usize, n);
     return 2 * @as(u64, n) * lg + bytes * lg;
+}
+
+/// The store's modification time, in whole seconds since the epoch (the
+/// floor: a time before 1970 stays before it).
+pub fn modifiedSeconds(mtime_ns: i96) i64 {
+    return @intCast(@divFloor(mtime_ns, 1_000_000_000));
+}
+
+/// What a folder holds, its names sorted, charged as `ls` is: an entry a
+/// step and the sort's bound. The read is the caller's to count.
+fn sortedEntries(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error![]store.Entry {
+    const entries = store.list(run.io, run.alloc, full) catch |e| return storeFailed(run, pos, b, rel, e);
+    var name_bytes: u64 = 0;
+    for (entries) |en| name_bytes += en.name.len;
+    try run.charge(pos, entries.len + sortBound(entries.len, name_bytes));
+    std.sort.pdq(store.Entry, entries, {}, struct {
+        fn lt(_: void, x: store.Entry, y: store.Entry) bool {
+            return std.mem.lessThan(u8, x.name, y.name);
+        }
+    }.lt);
+    return entries;
+}
+
+/// **`walk(p)`** (QUEUE 206): every entry under `p`, depth first, each
+/// folder's names sorted and a folder before what it holds, as `{path,
+/// size, kind, modified}` with `path` relative to the root. **ONE READ A
+/// FOLDER LISTED**, not one an entry: what a walk of the whole root costs
+/// is its folders. A folder's size is 0 (the hosts disagree on it). Kept on
+/// a stack of its own, not the Zig stack: a tree's depth is the store's.
+fn walk(run: *Run, pos: ast.Pos, arg: Value) Error!Value {
+    const p = try pathArg(run, pos, .walk, arg, true);
+    const a = run.alloc;
+    try countRead(run, pos);
+    const st = (store.statOrNull(run.io, a, p.full) catch |e| return storeFailed(run, pos, .walk, p.rel, e)) orelse return storeFailed(run, pos, .walk, p.rel, error.FileNotFound);
+    if (st.kind != .directory) return storeFailed(run, pos, .walk, p.rel, error.NotDir);
+    const Level = struct { rel: []const u8, entries: []store.Entry, at: usize = 0 };
+    var levels: std.ArrayList(Level) = .empty;
+    levels.append(a, .{ .rel = p.rel, .entries = try sortedEntries(run, pos, .walk, p.full, p.rel) }) catch return run.oom(pos);
+    const out = try run.newTable(pos);
+    out.kind = .list;
+    while (levels.items.len > 0) {
+        const top = &levels.items[levels.items.len - 1];
+        if (top.at == top.entries.len) {
+            _ = levels.pop();
+            continue;
+        }
+        const en = top.entries[top.at];
+        top.at += 1;
+        const rel = if (top.rel.len == 0) en.name else std.fmt.allocPrint(a, "{s}/{s}", .{ top.rel, en.name }) catch return run.oom(pos);
+        const full = std.fmt.allocPrint(a, "{s}/{s}", .{ run.root, rel }) catch return run.oom(pos);
+        try run.charge(pos, rel.len);
+        const es = store.stat(run.io, a, full) catch |e| return storeFailed(run, pos, .walk, rel, e);
+        const m = try run.newTable(pos);
+        m.map.put(a, "path", .{ .string = rel }) catch return run.oom(pos);
+        m.map.put(a, "size", .{ .int = if (es.kind == .directory) 0 else @intCast(es.size) }) catch return run.oom(pos);
+        m.map.put(a, "kind", .{ .string = @tagName(es.kind) }) catch return run.oom(pos);
+        m.map.put(a, "modified", .{ .int = modifiedSeconds(es.mtime) }) catch return run.oom(pos);
+        m.kind = .map;
+        out.list.append(a, .{ .table = m }) catch return run.oom(pos);
+        if (es.kind == .directory) {
+            try countRead(run, pos);
+            const entries = try sortedEntries(run, pos, .walk, full, rel);
+            levels.append(a, .{ .rel = rel, .entries = entries }) catch return run.oom(pos);
+        }
+    }
+    return .{ .table = out };
+}
+
+/// **`budget()`** (QUEUE 206): what is left of each budget a script spends
+/// as it runs, so it can stop at a point of its own.
+fn budgetLeft(run: *Run, pos: ast.Pos) Error!Value {
+    const a = run.alloc;
+    const out = try run.newTable(pos);
+    const left = [_]struct { []const u8, u64 }{
+        .{ "steps", run.budgets.steps -| run.steps },
+        .{ "reads", run.budgets.reads -| run.reads },
+        .{ "read_bytes", run.budgets.read_bytes -| run.read_bytes },
+        .{ "changes", run.budgets.changes -| run.changes },
+        .{ "change_bytes", run.budgets.change_bytes -| run.change_bytes },
+        .{ "output", run.out_cap -| run.out_len },
+    };
+    for (left) |kv| out.map.put(a, kv[0], .{ .int = @intCast(@min(kv[1], std.math.maxInt(i64))) }) catch return run.oom(pos);
+    out.kind = .map;
+    return .{ .table = out };
 }

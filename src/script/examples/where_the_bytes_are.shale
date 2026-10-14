@@ -1,0 +1,49 @@
+-- Where the data root's bytes are: each top-level folder's files, bytes and
+-- empty files, then the largest files. Reads only, one store read a folder
+-- (walk), so a site of any size gives the whole answer.
+
+const LARGEST = 15
+
+local folders = {}
+local order = {}
+local files = {}
+for e in walk("") do
+  if e.kind == "file" then
+    local parts = split(e.path, "/")
+    local top = "(the root)"
+    if #parts > 1 then top = parts[1] end
+    if not has_key(folders, top) then
+      folders[top] = {folder = top, files = 0, bytes = 0, empty = 0}
+      push(order, top)
+    end
+    local f = folders[top]
+    f.files = f.files + 1
+    f.bytes = f.bytes + e.size
+    if e.size == 0 then f.empty = f.empty + 1 end
+    push(files, {path = e.path, bytes = e.size})
+  end
+end
+
+local rows = {}
+local all = {folder = "all", files = 0, bytes = 0, empty = 0}
+for top in order do
+  local f = folders[top]
+  push(rows, {folder = f.folder, files = f.files, bytes = f.bytes, size = human(f.bytes), empty = f.empty})
+  all.files = all.files + f.files
+  all.bytes = all.bytes + f.bytes
+  all.empty = all.empty + f.empty
+end
+sort(rows, "bytes")
+reverse(rows)
+push(rows, {folder = all.folder, files = all.files, bytes = all.bytes, size = human(all.bytes), empty = all.empty})
+print(table(rows, {"folder", "files", "bytes", "size", "empty"}))
+
+sort(files, "bytes")
+reverse(files)
+local largest = {}
+for f in files do
+  if #largest < LARGEST then push(largest, {bytes = f.bytes, size = human(f.bytes), path = f.path}) end
+end
+print("")
+print("the largest files:")
+print(table(largest, {"bytes", "size", "path"}))

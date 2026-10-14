@@ -12,6 +12,7 @@ pub const Tag = enum {
     // keywords
     kw_and,
     kw_break,
+    kw_const,
     kw_do,
     kw_else,
     kw_elseif,
@@ -74,13 +75,13 @@ pub const Error = struct {
 };
 
 const keywords = std.StaticStringMap(Tag).initComptime(.{
-    .{ "and", .kw_and },       .{ "break", .kw_break },   .{ "do", .kw_do },
-    .{ "else", .kw_else },     .{ "elseif", .kw_elseif }, .{ "end", .kw_end },
-    .{ "false", .kw_false },   .{ "for", .kw_for },       .{ "function", .kw_function },
-    .{ "if", .kw_if },         .{ "in", .kw_in },         .{ "local", .kw_local },
-    .{ "nil", .kw_nil },       .{ "not", .kw_not },       .{ "or", .kw_or },
-    .{ "return", .kw_return }, .{ "then", .kw_then },     .{ "true", .kw_true },
-    .{ "while", .kw_while },
+    .{ "and", .kw_and },           .{ "break", .kw_break },   .{ "do", .kw_do },
+    .{ "const", .kw_const },       .{ "else", .kw_else },     .{ "elseif", .kw_elseif },
+    .{ "end", .kw_end },           .{ "false", .kw_false },   .{ "for", .kw_for },
+    .{ "function", .kw_function }, .{ "if", .kw_if },         .{ "in", .kw_in },
+    .{ "local", .kw_local },       .{ "nil", .kw_nil },       .{ "not", .kw_not },
+    .{ "or", .kw_or },             .{ "return", .kw_return }, .{ "then", .kw_then },
+    .{ "true", .kw_true },         .{ "while", .kw_while },
 });
 
 /// Lua's words this language refuses, each with why.

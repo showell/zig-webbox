@@ -41,7 +41,7 @@ const lua_names = std.StaticStringMap([]const u8).initComptime(.{
     .{ "rawset", "metatables are not in this language" },
 });
 
-const Local = struct { name: []const u8, slot: u16, depth: u16 };
+const Local = struct { name: []const u8, slot: u16, depth: u16, constant: bool = false };
 
 /// One function's names: a stack of locals, each in the block it was
 /// declared in.
@@ -68,6 +68,9 @@ pub const Parser = struct {
     functions: std.ArrayList(ast.Function) = .empty,
     function_names: std.StringHashMapUnmanaged(u32) = .empty,
     pending: std.ArrayList(PendingCall) = .empty,
+    /// The top-level `const`s declared so far: what a function declared
+    /// after them sees (QUEUE 206).
+    consts: std.ArrayList([]const u8) = .empty,
     /// The lowest frame address the parse reached (README, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
 
@@ -166,9 +169,21 @@ pub const Parser = struct {
         return slot;
     }
 
+    /// A top-level `const` by name, among those declared so far.
+    fn constant(self: *const Parser, name: []const u8) ?u16 {
+        for (self.consts.items, 0..) |c, i| if (std.mem.eql(u8, c, name)) return @intCast(i);
+        return null;
+    }
+
+    /// Whether the local in `slot` of this frame is a `const`.
+    fn isConst(self: *const Parser, slot: u16) bool {
+        for (self.frame.locals.items) |l| if (l.slot == slot) return l.constant;
+        return false;
+    }
+
     fn unknownName(self: *Parser, name: []const u8, pos: ast.Pos) Error {
         if (lua_names.get(name)) |why| return self.failAt(pos, .refused, why);
-        if (self.in_function) return self.failf(pos, .name, "no local `{s}` here: a function sees only its own parameters and locals, not the script's", .{name});
+        if (self.in_function) return self.failf(pos, .name, "no local `{s}` here: a function sees only its own parameters and locals, and the script's `const`s declared above it", .{name});
         return self.failf(pos, .name, "no local `{s}`: declare it with `local {s} = ...` (there are no globals)", .{ name, name });
     }
 
@@ -229,6 +244,21 @@ pub const Parser = struct {
                 const slot = try self.declare(name, pos);
                 return .{ .pos = pos, .kind = .{ .local = .{ .slot = slot, .value = value } } };
             },
+            .kw_const => {
+                if (self.in_function or self.frame.depth > 1) return self.failAt(pos, .refused, "`const` is a top-level statement only: a function or a block declares `local`s");
+                try self.advance();
+                const name = (try self.expect(.name, "a name after `const`")).text;
+                if (self.tok.tag != .assign) return self.failAt(self.here(), .syntax, "a `const` needs its value: `const NAME = ...`");
+                try self.advance();
+                const value = try self.expr();
+                if (self.tok.tag == .comma) return self.failAt(self.here(), .refused, "multiple values are not in this language");
+                const slot = try self.declare(name, pos);
+                self.frame.locals.items[self.frame.locals.items.len - 1].constant = true;
+                if (self.consts.items.len == std.math.maxInt(u16)) return self.failAt(pos, .syntax, "too many constants");
+                const index: u16 = @intCast(self.consts.items.len);
+                try self.consts.append(self.alloc, name);
+                return .{ .pos = pos, .kind = .{ .constant = .{ .slot = slot, .index = index, .value = value } } };
+            },
             .kw_if => return self.ifStatement(pos),
             .kw_while => {
                 try self.advance();
@@ -270,7 +300,9 @@ pub const Parser = struct {
                 const target = try self.suffixed();
                 if (self.tok.tag == .assign) {
                     switch (target.kind) {
-                        .local, .index => {},
+                        .local => |sl| if (self.isConst(sl)) return self.failAt(target.pos, .name, "a `const` is never assigned: declare a `local` to change it"),
+                        .index => {},
+                        .constant => return self.failAt(target.pos, .name, "a `const` is never assigned: declare a `local` to change it"),
                         else => return self.failAt(target.pos, .syntax, "only a local or an element `t[k]`, `t.k` can be assigned"),
                     }
                     try self.advance();
@@ -522,8 +554,13 @@ pub const Parser = struct {
                 try self.advance();
                 if (self.tok.tag == .lparen) return self.call(t.text, pos);
                 if (self.tok.tag == .string or self.tok.tag == .lbrace) return self.failAt(self.here(), .refused, "a call needs its parentheses: `f(\"x\")`, not `f \"x\"`");
+                // `table.insert` is Lua's library, though `table` is a builtin.
+                if (self.tok.tag == .dot) if (lua_names.get(t.text)) |why| return self.failAt(pos, .refused, why);
                 if (std.meta.stringToEnum(ast.Builtin, t.text) != null) return self.failf(pos, .refused, "`{s}` is a builtin, not a value: call it, `{s}(...)`", .{ t.text, t.text });
-                const slot = self.lookup(t.text) orelse return self.unknownName(t.text, pos);
+                const slot = self.lookup(t.text) orelse {
+                    if (self.in_function) if (self.constant(t.text)) |ci| return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .constant = ci } });
+                    return self.unknownName(t.text, pos);
+                };
                 return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .local = slot } });
             },
             else => return self.failf(pos, .syntax, "expected a value, found {s}", .{describe(t)}),
@@ -631,5 +668,5 @@ pub fn parseMeasured(alloc: std.mem.Allocator, source: []const u8, max_nesting: 
         const f = p.functions.items[i];
         if (pc.call.args.len != f.params) return p.failf(pc.pos, .argument, "`{s}` takes {d} arguments, given {d}", .{ pc.name, f.params, pc.call.args.len });
     }
-    return .{ .functions = p.functions.items, .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
+    return .{ .functions = p.functions.items, .const_names = p.consts.items, .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
 }

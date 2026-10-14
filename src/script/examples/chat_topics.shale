@@ -1,0 +1,72 @@
+-- The chat, topic by topic: messages, bytes and the last message's date;
+-- the topics with the most messages; those quiet for QUIET_DAYS; and any
+-- topic whose message-count cache (<sid>.count) disagrees with its
+-- transcript. Reads only.
+--
+-- A transcript is messages, each starting "MSG_<sid>_<n>", then
+-- "from: <name>", then "date: <RFC 3339>". A topic is chat/<a>_<b>/sessions/
+-- <sid>.md (a conversation) or chat/channels/<name>/sessions/<sid>.md.
+
+const MOST = 15
+const QUIET_DAYS = 90
+
+-- One transcript: {messages, last}, last the last "date: " value.
+function scan(text)
+  local n = 0
+  local last = ""
+  for line in lines(text) do
+    if starts_with(line, "MSG_") then n = n + 1 end
+    if starts_with(line, "date: ") then last = sub(line, 7) end
+  end
+  return {messages = n, last = last}
+end
+
+-- The topic's label from its path's parts, or nil when it is no topic.
+function label(parts)
+  local n = #parts
+  if n < 4 or parts[n - 1] ~= "sessions" or not like(parts[n], "*.md") then return nil end
+  local sid = sub(parts[n], 1, #parts[n] - 3)
+  if n == 4 then return parts[2] .. " " .. sid end
+  if n == 5 and parts[2] == "channels" then return "#" .. parts[3] .. " " .. sid end
+  return nil
+end
+
+local quiet_before = now() - QUIET_DAYS * 86400
+local rows = {}
+local quiet = {}
+local wrong = {}
+local messages = 0
+local bytes = 0
+for e in walk("chat") do
+  local topic = nil
+  if e.kind == "file" then topic = label(split(e.path, "/")) end
+  if topic ~= nil then
+    local s = scan(read(e.path))
+    local row = {topic = topic, messages = s.messages, bytes = e.size, last = s.last}
+    push(rows, row)
+    messages = messages + s.messages
+    bytes = bytes + e.size
+    if s.last ~= "" and seconds(s.last) < quiet_before then push(quiet, row) end
+    local count_path = sub(e.path, 1, #e.path - 3) .. ".count"
+    if exists(count_path) then
+      local cached = tonumber(trim(read(count_path)))
+      if cached ~= s.messages then push(wrong, {topic = topic, transcript = s.messages, cache = cached}) end
+    end
+  end
+end
+
+print("topics", #rows, "messages", messages, "bytes", human(bytes))
+print("")
+sort(rows, "messages")
+reverse(rows)
+local most = {}
+for r in rows do
+  if #most < MOST then push(most, r) end
+end
+print(table(most, {"topic", "messages", "bytes", "last"}))
+print("")
+print("quiet for " .. QUIET_DAYS .. " days (since " .. date(quiet_before) .. "): " .. #quiet)
+if #quiet > 0 then print(table(quiet, {"topic", "messages", "last"})) end
+print("")
+print("count caches that disagree: " .. #wrong)
+if #wrong > 0 then print(table(wrong, {"topic", "transcript", "cache"})) end
