@@ -203,7 +203,6 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
     defer w.deinit();
     try testing.expectEqual(script.diag.Budget.depth, w.stop.?.budget.?);
     if (p.stop) |s| std.debug.print("{s}\n", .{s.message});
-    if (@import("builtin").mode == .Debug) std.debug.print("script stack: deepest parse {d} bytes ({d} a level of 200), deepest walk {d} bytes ({d} a level of 2,000)\n", .{ p.stack_bytes, p.stack_bytes / 200, w.stack_bytes, w.stack_bytes / 2000 });
     // Linux's main thread has 8 MiB, metal's 16 MiB: the worst of both,
     // in Debug (the largest frames), within half the smaller.
     try testing.expect(p.stack_bytes < 4 * 1024 * 1024);
