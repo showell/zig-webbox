@@ -23,16 +23,6 @@ fn transcript(alloc: std.mem.Allocator, sid: []const u8, n: usize) ![]u8 {
     return out.items;
 }
 
-fn countCache(alloc: std.mem.Allocator, n: usize, size: usize) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{d} {d}\n{d} 1\n", .{ n, size, size -| 60 });
-}
-
-/// Now, in seconds: the fixture's files were just written, so their
-/// modified times are about this.
-fn wallNow(io: std.Io) i64 {
-    return @intCast(@divFloor(std.Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
-}
-
 const Fixture = struct {
     tmp: std.testing.TmpDir,
     threaded: std.Io.Threaded,
@@ -54,12 +44,18 @@ const Fixture = struct {
             .{ .path = "data/chat/channels/general/sessions/lunch.md", .sid = "lunch", .n = 1 },
             .{ .path = "data/chat/channels/random/sessions/misc.md", .sid = "misc", .n = 2 },
         };
-        for (files) |f| try d.writeFile(io, .{ .sub_path = f.path, .data = try transcript(a, f.sid, f.n) });
-        // Count caches as the server writes them (angry-gopher
-        // chat_count.zig): "<count> <size>\n", then the last message's
-        // place and author. lunch and misc have none.
-        try d.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/hello.count", .data = try countCache(a, 3, (try transcript(a, "hello", 3)).len) });
-        try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = try countCache(a, 40, (try transcript(a, "plans", 40)).len) });
+        for (files) |f| {
+            const text = try transcript(a, f.sid, f.n);
+            try d.writeFile(io, .{ .sub_path = f.path, .data = text });
+            // **THE SIDECAR AS THE SITE WRITES IT** (angry-gopher
+            // chat_count.zig): "<count> <size>", the transcript's size when
+            // counted, then "<offset> <uid>" of its last message. misc has
+            // none, as a topic not yet read since the server started.
+            if (std.mem.eql(u8, f.sid, "misc")) continue;
+            const last = std.mem.lastIndexOf(u8, text, "MSG_").?;
+            const sidecar = try std.fmt.allocPrint(a, "{d} {d}\n{d} 7\n", .{ f.n, text.len, last });
+            try d.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}.count", .{f.path[0 .. f.path.len - 3]}), .data = sidecar });
+        }
         try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.reactions.jsonl", .data = "{}\n" });
         try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.uploads/1.png", .data = "png" });
         try d.writeFile(io, .{ .sub_path = "data/chat/channels/general.channel", .data = "1\n2\n" });
@@ -160,37 +156,36 @@ test "example: where the bytes are, folder by folder, then the largest files" {
     try testing.expectEqual(@as(usize, 0), r.effects.len);
     // The folders, the biggest first, then all of them.
     try testing.expect(std.mem.startsWith(u8, r.output, "folder  files  bytes  size     empty\n"));
-    try testing.expect(std.mem.indexOf(u8, r.output, "\nchat        9  ") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "\nchat       10   4780  4.7 KiB      0\n") != null);
     try testing.expect(std.mem.indexOf(u8, r.output, "\ngames       1   5000  4.9 KiB      0\n") != null);
-    try testing.expect(std.mem.indexOf(u8, r.output, "\nall        10  ") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "\nall        11   9780  9.6 KiB      0\n") != null);
     // The largest: games/big.json, then the 40-message transcript.
     try testing.expect(std.mem.indexOf(u8, r.output, "the largest files:\nbytes  size     path\n 5000  4.9 KiB  games/big.json\n") != null);
     try testing.expect(std.mem.indexOf(u8, r.output, "chat/channels/general/sessions/plans.md") != null);
 }
 
-test "example: chat topics from the count caches, the untouched ones, the stale caches; a transcript read only when it has no cache" {
+test "example: chat topics from their count caches, the quiet ones, the caches stale or missing, and no transcript read" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
-    const io = f.threaded.io();
-    // A stale cache: taken when plans.md was a byte shorter.
-    const plans_size = (try transcript(f.arena.allocator(), "plans", 40)).len;
-    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = try countCache(f.arena.allocator(), 40, plans_size - 1) });
-    // 100 days on, every transcript is untouched for 90.
-    var r = f.runAt(chat_topics, wallNow(io) + 100 * 86400, &out_buf);
+    // A cache taken before the last messages: stale, as the site's can be.
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "39 4000\n3900 7\n" });
+    // Far ahead of the fixture's files' times: every topic is quiet.
+    var r = f.runAt(chat_topics, 253402300000, &out_buf);
     defer r.deinit();
     try finished(&r);
     errdefer std.debug.print("{s}", .{r.output});
     try testing.expectEqual(@as(usize, 0), r.effects.len);
-    // 3 and 40 from the caches; lunch's 1 and misc's 2 counted by the
-    // separator, since they have none.
-    try testing.expect(std.mem.startsWith(u8, r.output, "topics\t4\tmessages\t46\tbytes\t"));
-    try testing.expect(std.mem.indexOf(u8, r.output, "topic           messages  bytes\n#general plans        40   4166\n") != null);
-    try testing.expect(std.mem.indexOf(u8, r.output, "#general lunch         1     87\n") != null);
+    // Counts from the caches: 3 + 39 + 1, and misc has none.
+    try testing.expect(std.mem.startsWith(u8, r.output, "topics\t4\tmessages\t43\tbytes\t4.6 KiB\n"));
+    try testing.expect(std.mem.indexOf(u8, r.output, "topic           messages  size     changed\n#general plans        39  4.1 KiB  ") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "unchanged since 9999-10-02T23:46:40Z): 4\n") != null);
     try testing.expect(std.mem.indexOf(u8, r.output, "): 4\n") != null);
-    try testing.expect(std.mem.indexOf(u8, r.output, "count caches that are stale: 1\ntopic           cache  taken_at  size\n#general plans     40      4165  4166\n") != null);
-    // Today: nothing is untouched.
-    var today = f.runAt(chat_topics, wallNow(io), &out_buf);
+    try testing.expect(std.mem.indexOf(u8, r.output, "count caches that are stale or missing (the server recounts them): 2\ntopic           bytes  cache\n#general plans   4166  39 at 4000\n#random misc      188  none\n") != null);
+    // Not one transcript read: the walk's folders and the caches, read one each.
+    try testing.expect(r.steps < 20_000);
+    // On 2026-10-14, the files (written today or later) are not quiet.
+    var today = f.runAt(chat_topics, 1791936000, &out_buf);
     defer today.deinit();
     try finished(&today);
     try testing.expect(std.mem.indexOf(u8, today.output, "): 0\n") != null);
