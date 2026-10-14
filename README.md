@@ -175,7 +175,12 @@ the expiry and a rising sequence number, the number written durably before
 the script runs (`store.makeDurable`, which each host sets), the run, its
 log under `{auth}/shale/`, and the reply in the runner's layout. The format
 is in the file's header; refusals are 4xx with the reason, any run that
-started is 200.
+started is 200. A key is set only by `installKey` (angry-gopher's
+`/admin/script-key`), which raises the sequence to the clock's seconds with
+it: a missing sequence file is refused, never read as 0, and a key set again
+reopens nothing signed before. The route refuses when the auth root and the
+data root nest, by their spellings; symlinks inside the data root are not
+checked (metal has none).
 
 `zig build shale-sign -- keygen | pubkey | sign <file.shale> <target>
 [minutes]` (`src/shale_sign.zig`) makes the key pair once (the private key
