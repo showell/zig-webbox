@@ -84,6 +84,43 @@ test "run: functions, recursion, forward calls, and a frame of their own" {
     try expectOutput("function f(n) local x = n if n > 0 then f(n - 1) end return x end print(f(3))", "3\n");
 }
 
+test "run: a local whose value is a call keeps it, when the call grows the locals' stack (the stack moved under the slot's pointer)" {
+    // `local s = f()` took the slot's address before the call, and the
+    // call's frame, appended, could move the stack: the value went to the
+    // old memory and the slot stayed nil. A frame and nested locals enough
+    // that the call's frame outgrows the stack's capacity.
+    try expectOutput(
+        \\function scan(t)
+        \\  return {messages = 1}
+        \\end
+        \\function topics(rows)
+        \\  for name in {"a.md", "b.md"} do
+        \\    if true then
+        \\      local sid = 1
+        \\      local text = "hello"
+        \\      local s = scan(text)
+        \\      print(s.messages)
+        \\    end
+        \\  end
+        \\end
+        \\local rows = {}
+        \\topics(rows)
+    , "1\n1\n");
+    // And deeper: every frame size from 1 to 40, each local a call's value.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator, "function one(x)\n  return {v = x}\nend\n");
+    for (1..41) |n| {
+        try src.print(testing.allocator, "function f{d}(p)\n", .{n});
+        for (1..n + 1) |k| try src.print(testing.allocator, "  local a{d} = one({d})\n", .{ k, k });
+        try src.print(testing.allocator, "  print(a{d}.v)\nend\nf{d}(0)\n", .{ n, n });
+        try want.print(testing.allocator, "{d}\n", .{n});
+    }
+    try expectOutput(src.items, want.items);
+}
+
 test "run: lists and maps, their kinds, keys in insertion order, a list as it was when its loop began" {
     try expectOutput("local l = {} l[1] = \"a\" l[#l + 1] = \"b\" l[1] = \"c\" print(l[1], l[2], #l)", "c\tb\t2\n");
     try expectOutput("local m = {} m.b = 1 m[\"a\"] = 2 m.b = 3 for k in keys(m) do print(k, m[k]) end", "b\t3\na\t2\n");

@@ -132,6 +132,8 @@ pub const Run = struct {
         return .normal;
     }
 
+    /// Good only until the stack next grows (a call appends a frame):
+    /// evaluate a value before taking the address it goes to.
     fn slot(self: *Run, s: u16) *Value {
         return &self.stack.items[self.base + s];
     }
@@ -141,7 +143,13 @@ pub const Run = struct {
         try self.enter(s.pos);
         defer self.walk -= 1;
         switch (s.kind) {
-            .local => |*l| self.slot(l.slot).* = if (l.value) |e| try self.eval(e) else .nil,
+            // The value first: a call in it appends a frame, which can move
+            // the stack, and a slot's address taken before would be the
+            // old memory's.
+            .local => |*l| {
+                const v = if (l.value) |e| try self.eval(e) else .nil;
+                self.slot(l.slot).* = v;
+            },
             .assign => |*a| try self.assign(a.target, a.value),
             .call => |c| _ = try self.eval(c),
             .@"if" => |*i| return self.ifStmt(i.arms, i.otherwise),
