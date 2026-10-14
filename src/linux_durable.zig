@@ -57,6 +57,19 @@ pub const Durable = struct {
         _ = self.synced.fetchMax(want, .acq_rel);
     }
 
+    /// **NOW, AND WHETHER IT HELD** (store.makeDurable): what
+    /// `beforeBytes` does, answering whether every write so far is durable.
+    pub fn now(self: *Durable) bool {
+        const want = store.changes.load(.acquire);
+        if (self.synced.load(.acquire) >= want) return true;
+        if (!self.sync(self)) {
+            _ = self.failures.fetchAdd(1, .acq_rel);
+            return false;
+        }
+        _ = self.synced.fetchMax(want, .acq_rel);
+        return true;
+    }
+
     /// Opens the directories whose filesystems hold the data: the store's two
     /// roots, or, when the host has none (a development run on the
     /// repository's defaults, which resolve from the working directory), the

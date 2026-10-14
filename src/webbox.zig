@@ -41,6 +41,10 @@ pub const mem_meter = @import("mem_meter.zig");
 /// `script.run` parses and runs one script inside its budgets, every effect
 /// through `store`.
 pub const script = @import("script/script.zig");
+/// A signed script run on the live site: the envelope, its signature, the
+/// sequence number, the log and the reply behind an application's
+/// `POST /admin/script` (metal-vmm QUEUE 200).
+pub const script_route = @import("script_route.zig");
 /// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
@@ -60,6 +64,7 @@ pub const free_space = @import("free_space.zig");
 
 test {
     _ = script;
+    _ = script_route;
     _ = site;
     _ = body;
     _ = http;

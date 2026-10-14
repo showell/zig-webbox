@@ -43,6 +43,21 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_script.addArgs(a);
     b.step("script", "run a Shale script: SHALE_ROOT=<data folder> zig build script -- <file.shale>").dependOn(&run_script.step);
 
+    // **THE SHALE SIGNER** (src/shale_sign.zig, metal-vmm QUEUE 200): the
+    // key pair, made once, and a script signed for a target.
+    //   zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
+    const signer = b.addExecutable(.{ .name = "shale-sign", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/shale_sign.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "webbox", .module = webbox }},
+    }) });
+    b.installArtifact(signer);
+    const run_signer = b.addRunArtifact(signer);
+    if (b.args) |a| run_signer.addArgs(a);
+    b.step("shale-sign", "the Shale signer: zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]").dependOn(&run_signer.step);
+    const signer_test = b.addTest(.{ .root_module = signer.root_module });
+
     const test_step = b.step("test", "Run unit tests");
     // **THE SCRIPT FUZZER'S COUNT** (src/script/fuzz_test.zig): a few hundred
     // sources in the tests, as many as asked for with -Dscript-fuzz.
@@ -62,4 +77,5 @@ pub fn build(b: *std.Build) void {
         unit.root_module.addImport("script_test_options", script_options.createModule());
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+    test_step.dependOn(&b.addRunArtifact(signer_test).step);
 }

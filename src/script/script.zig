@@ -49,6 +49,18 @@ pub const Result = struct {
     }
 };
 
+/// **WHAT A RUN DID, IN THE ONE LAYOUT** (metal-vmm QUEUE 200): its effects,
+/// a line each, then how it ended, the stop named as `name:line:column`.
+/// The Linux runner and the script route both print it, so a run reads the
+/// same on the box as on the site.
+pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.print("── effects ({d}) ──\n", .{r.effects.len});
+    for (r.effects) |e| try w.print("{s} {s}: {s}\n", .{ e.op, e.path, e.outcome });
+    if (r.stop) |s| {
+        try w.print("── stopped at {s}:{d}:{d}: {s}{s}{s}: {s} ({d} steps)\n", .{ name, s.line, s.column, @tagName(s.class), if (s.budget != null) " " else "", if (s.budget) |b| @tagName(b) else "", s.message, r.steps });
+    } else try w.print("── finished ({d} steps)\n", .{r.steps});
+}
+
 /// **THE ONE ENTRY**: parse `source` and run it against the store under
 /// `root`, inside `budgets`, with `now` the only time it can know. Every
 /// value it makes comes from one arena over `backing`; `print` writes into
