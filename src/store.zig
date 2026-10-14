@@ -81,6 +81,23 @@ fn changed() void {
     _ = changes.fetchAdd(1, .acq_rel);
 }
 
+/// **DURABLE NOW, OR SAY SO** (metal-vmm QUEUE 200): what a caller that may
+/// not go on until its writes are on the disk calls (the script route's
+/// sequence number, written before the script runs). Every other write is
+/// made durable before the next response (`changes`), which a failed sync
+/// does not hold up; this one answers whether it held. The host sets it as
+/// it starts: Linux, a sync of the roots' filesystems
+/// (linux_durable.zig); the bare-metal host, a flush of its disks. Null
+/// until a host has: `makeDurable` then says false, never true.
+pub var durable_now: ?*const fn () bool = null;
+
+/// Every write so far on the disk: true only when the host's `durable_now`
+/// says so.
+pub fn makeDurable() bool {
+    const f = durable_now orelse return false;
+    return f();
+}
+
 /// The two roots, as this host spells them; null until the host sets them.
 pub var data_base: ?[]const u8 = null;
 pub var auth_base: ?[]const u8 = null;

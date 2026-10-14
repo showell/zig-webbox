@@ -106,6 +106,9 @@ pub fn Server(comptime S: type) type {
             // data's filesystems, opened once, are synced before a response
             // that follows a write (linux_durable.zig).
             const synced = try durable.openRoots(io);
+            // And on demand, answering whether it held (store.makeDurable:
+            // the script route's sequence number, before the script runs).
+            @import("webbox").store.durable_now = durableNow;
             std.debug.print("{s}: before a response that follows a write, syncs {s}\n", .{ options.name, synced });
             // The pub/sub fan-out shared across all connections, for the
             // process's lifetime. Each request gets its own handle on it (a
@@ -824,6 +827,10 @@ const Whole = struct {
 /// `run` opens the roots it syncs nothing, which is what a test's server,
 /// with none, wants.
 var durable: linux_durable.Durable = .init(linux_durable.syncRoots, 0);
+
+fn durableNow() bool {
+    return durable.now();
+}
 
 /// **ONE HANDLER AT A TIME**: held while `route` runs, so no two handlers
 /// interleave, as on the bare-metal host, where one loop runs each to its

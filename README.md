@@ -166,6 +166,23 @@ shaped like angry-gopher's:
 - files over a size;
 - deleting one topic.
 
+### On the live site: `script_route` and the signer
+
+`webbox.script_route` (`src/script_route.zig`) is the reusable half of an
+application's `POST /admin/script` (angry-gopher mounts it): the envelope
+read, its Ed25519 signature checked against `{auth}/shale.conf`, the target,
+the expiry and a rising sequence number, the number written durably before
+the script runs (`store.makeDurable`, which each host sets), the run, its
+log under `{auth}/shale/`, and the reply in the runner's layout. The format
+is in the file's header; refusals are 4xx with the reason, any run that
+started is 200.
+
+`zig build shale-sign -- keygen | pubkey | sign <file.shale> <target>
+[minutes]` (`src/shale_sign.zig`) makes the key pair once (the private key
+at `~/.shale_signing_key`, mode 600, never printed) and signs a script with
+the next sequence number. The steps for the site are in
+zig-metal-unikernel's README, "Release notes: the script route".
+
 ## Checks
 
     zig build test

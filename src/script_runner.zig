@@ -56,12 +56,6 @@ pub fn main(init: std.process.Init) !u8 {
     const w = &ow.interface;
     try w.writeAll(result.output);
     try w.flush();
-    try err.print("── effects ({d}) ──\n", .{result.effects.len});
-    for (result.effects) |e| try err.print("{s} {s}: {s}\n", .{ e.op, e.path, e.outcome });
-    if (result.stop) |s| {
-        try err.print("── stopped at {s}:{d}:{d}: {s}{s}{s}: {s} ({d} steps)\n", .{ args[1], s.line, s.column, @tagName(s.class), if (s.budget != null) " " else "", if (s.budget) |b| @tagName(b) else "", s.message, result.steps });
-        return 1;
-    }
-    try err.print("── finished ({d} steps)\n", .{result.steps});
-    return 0;
+    try script.report(&result, args[1], err);
+    return if (result.finished()) 0 else 1;
 }
