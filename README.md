@@ -95,7 +95,7 @@ its outcome.
 
 | | |
 |---|---|
-| the store | `ls(p)` (a sorted list of names), `stat(p)` (`{size, kind}`, with no time, so runs stay deterministic), `exists(p)`, `is_dir(p)`, `read(p)`, `replace(p, s)` (never a torn file; there is no plain `write`), `append(p, s)`, `mkdir(p)`, `remove(p)`, `remove_tree(p)` |
+| the store | `ls(p)` (a sorted list of names), `stat(p)` (`{size, kind}`, `kind` one of `"file"`, `"directory"` and `"other"`, with no time, so runs stay deterministic), `exists(p)`, `is_dir(p)`, `read(p)`, `replace(p, s)` (never a torn file; there is no plain `write`), `append(p, s)`, `mkdir(p)`, `remove(p)`, `remove_tree(p)` |
 | strings | `split(s, sep)` (an error when `sep` is `""`), `join(list, sep)`, `starts_with`, `ends_with`, `contains`, `find` (plain text, **not Lua's patterns**; nil when absent), `sub(s, i[, j])` (Lua's: 1-based, inclusive, negatives from the end, clamped), `trim`, `upper`, `lower`, `tostring` (scalars only), `tonumber` (an optional `-` and decimal digits; anything else is an error) |
 | lists and maps | `push(l, x)`, `sort(l)` (in place, all integers or all strings, no comparator), `keys(m)` (insertion order), `has_key(m, k)`, `count(m)` (maps; `#` for strings and lists) |
 | the host | `now()`, the integer the host handed in: the only time a script has |
