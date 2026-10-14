@@ -66,7 +66,7 @@ const Fixture = struct {
     fn configure(f: *Fixture, target: []const u8, key: Ed25519.PublicKey) !void {
         const a = f.arena.allocator();
         const hex = std.fmt.bytesToHex(key.toBytes(), .lower);
-        try store.replace(f.threaded.io(), a, f.paths.config, try std.fmt.allocPrint(a, "# the script route\npublic_key = {s}\ntarget = {s}\n", .{ &hex, target }), .{});
+        try route.installKey(f.threaded.io(), a, f.paths, try std.fmt.allocPrint(a, "# the script route\npublic_key = {s}\ntarget = {s}\n", .{ &hex, target }), 0);
     }
 
     fn body(f: *Fixture, kp: Ed25519.KeyPair, target: []const u8, sequence: u64, expires: i64, source: []const u8) ![]u8 {
@@ -265,4 +265,61 @@ test "the envelope reads back what was signed, and the header has one spelling" 
     try testing.expectEqualStrings("print(\"hi\")\n", env.source);
     try testing.expectEqualSlices(u8, signed, env.signed);
     try testing.expectEqualSlices(u8, &sig, &env.signature);
+}
+
+test "refused, and not run: a key with no sequence file beside it (lost, never 0)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    const a = f.arena.allocator();
+    var first = try f.send(try f.body(f.kp, "test.example", 4, now + 60, "print(1)\n"));
+    first.deinit();
+    try store.remove(io, a, f.paths.sequence);
+    try f.expectRefused(try f.body(f.kp, "test.example", 4, now + 60, "remove(\"chat/a.md\")\n"), .sequence_unreadable);
+    try testing.expect(try store.has(io, a, try std.fs.path.join(a, &.{ f.data, "chat", "a.md" })));
+}
+
+test "installKey: the sequence rises to the clock and never falls, so a key set again reopens nothing" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    const a = f.arena.allocator();
+    const hex = std.fmt.bytesToHex(f.kp.public_key.toBytes(), .lower);
+    const conf = try std.fmt.allocPrint(a, "public_key = {s}\ntarget = test.example\n", .{&hex});
+    // Signed before the key was set again, after the sequence was lost.
+    const old = try f.body(f.kp, "test.example", 9, now + 60, "print(1)\n");
+    try store.remove(io, a, f.paths.sequence);
+    try route.installKey(io, a, f.paths, conf, now);
+    try testing.expectEqual(@as(u64, now), try f.last());
+    try f.expectRefused(old, .replayed);
+    // Set again with an older clock: the sequence stays.
+    try route.installKey(io, a, f.paths, conf, 5);
+    try testing.expectEqual(@as(u64, now), try f.last());
+    // Not a config: nothing written.
+    try testing.expectError(error.BadConfig, route.installKey(io, a, f.paths, "public_key = zz\n", now + 100));
+    try testing.expectEqual(@as(u64, now), try f.last());
+}
+
+test "refused: the auth root inside the data root, or the other way, or the same" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const b = try f.body(f.kp, "test.example", 1, now + 60, "print(1)\n");
+    const inside = try route.Paths.under(a, try std.fs.path.join(a, &.{ f.data, "auth" }));
+    for ([_]route.Request{
+        .{ .paths = inside, .data_root = f.data, .budgets = .{}, .now = now, .out = &out_buf },
+        .{ .paths = f.paths, .data_root = try std.fs.path.join(a, &.{ f.auth, "data" }), .budgets = .{}, .now = now, .out = &out_buf },
+        .{ .paths = try route.Paths.under(a, try std.fmt.allocPrint(a, "{s}/", .{f.data})), .data_root = try std.fmt.allocPrint(a, "{s}/./", .{f.data}), .budgets = .{}, .now = now, .out = &out_buf },
+    }) |req| {
+        var o = try route.handle(f.threaded.io(), a, b, req);
+        defer o.deinit();
+        try testing.expectEqual(route.Refusal.bad_config, o.refused.why);
+    }
+    // Siblings whose names share a prefix do not nest.
+    try testing.expect(!try route.nested(a, "x/data", "x/data2"));
+    try testing.expect(!try route.nested(a, "data", "auth"));
+    try testing.expect(try route.nested(a, "x/data", "x/data/auth"));
 }

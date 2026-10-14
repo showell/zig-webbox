@@ -361,6 +361,10 @@ fn storeChange(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
     const io = run.io;
     const a = run.alloc;
     const op: []const u8 = @tagName(b);
+    // **ITS LOG ENTRY'S ROOM FIRST**: a change made and then not logged
+    // (the arena full) would be on the disk but missing from `effects`,
+    // which is how a host knows to rebuild what it remembers.
+    run.effects.ensureUnusedCapacity(a, 1) catch return run.oom(pos);
     // The store takes removing what is not there as done; a script's
     // removal of a missing path is an error, logged (README, "The store").
     const missing: bool = switch (b) {
@@ -377,7 +381,7 @@ fn storeChange(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
     };
     // **EVERY CHANGE ATTEMPTED IS LOGGED**, its outcome with it: a failed
     // one is also why the run stopped.
-    run.effects.append(a, .{ .op = op, .path = p.rel, .outcome = if (outcome) |e| @errorName(e) else "ok" }) catch return run.oom(pos);
+    run.effects.appendAssumeCapacity(.{ .op = op, .path = p.rel, .outcome = if (outcome) |e| @errorName(e) else "ok" });
     if (outcome) |e| return storeFailed(run, pos, b, p.rel, e);
     return .nil;
 }

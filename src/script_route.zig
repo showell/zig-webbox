@@ -199,6 +199,9 @@ pub fn parseConfig(text: []const u8) error{BadConfig}!Config {
 /// Where the route keeps what it keeps: under the auth root, which a
 /// script cannot reach.
 pub const Paths = struct {
+    /// The auth root itself: never inside the data root, nor it inside
+    /// this (`handle` refuses), or a script could rewrite its own key.
+    root: []const u8,
     config: []const u8,
     sequence: []const u8,
     log: []const u8,
@@ -206,6 +209,7 @@ pub const Paths = struct {
 
     pub fn under(alloc: std.mem.Allocator, auth_root: []const u8) !Paths {
         return .{
+            .root = auth_root,
             .config = try std.fs.path.join(alloc, &.{ auth_root, "shale.conf" }),
             .sequence = try std.fs.path.join(alloc, &.{ auth_root, "shale", "sequence" }),
             .log = try std.fs.path.join(alloc, &.{ auth_root, "shale", "log" }),
@@ -264,6 +268,8 @@ pub const Outcome = union(enum) {
 /// `alloc` is the request's (the detail strings live there); the run's own
 /// memory is its result's arena, given back by `Outcome.deinit`.
 pub fn handle(io: Io, alloc: std.mem.Allocator, body: []const u8, req: Request) !Outcome {
+    if (try nested(alloc, req.data_root, req.paths.root))
+        return refuse(.bad_config, "the auth root and the data root nest: a script could rewrite the key or the sequence");
     const env = parse(body) catch return refuse(.malformed, "the body is not a shale-1 envelope (shale-signature line, shale-1 line, script)");
     // absent-ok: a config that cannot be read refuses (bad_config), never runs.
     const conf_text = (store.readOrNull(io, alloc, req.paths.config, .limited(4096)) catch |e|
@@ -303,10 +309,41 @@ fn refuse(why: Refusal, detail: []const u8) Outcome {
     return .{ .refused = .{ .why = why, .detail = detail } };
 }
 
-/// The last sequence number accepted: 0 when none ever was.
+/// The last sequence number accepted. **A MISSING FILE IS AN ERROR, NOT
+/// 0**: `installKey` writes it with the key, so one missing beside a key
+/// was lost, and reading it as 0 would run again every signed request
+/// still unexpired.
 pub fn lastSequence(io: Io, alloc: std.mem.Allocator, path: []const u8) !u64 {
-    const text = (try store.readOrNull(io, alloc, path, .limited(64))) orelse return 0;
+    const text = (try store.readOrNull(io, alloc, path, .limited(64))) orelse return error.NoSequenceFile;
     return std.fmt.parseInt(u64, std.mem.trimEnd(u8, text, "\n"), 10) catch error.BadSequenceFile;
+}
+
+/// **THE ONE WAY A KEY IS SET**: the sequence first, at least `floor` (the
+/// clock's seconds: the signer numbers from them, so nothing signed before
+/// now runs after) and never lower than it was, then the config. A key set
+/// again after the sequence was lost reopens nothing.
+pub fn installKey(io: Io, alloc: std.mem.Allocator, paths: Paths, config_text: []const u8, floor: u64) !void {
+    _ = try parseConfig(config_text);
+    const was: u64 = lastSequence(io, alloc, paths.sequence) catch |e| switch (e) {
+        error.NoSequenceFile => 0,
+        else => return e,
+    };
+    try store.replace(io, alloc, paths.sequence, try std.fmt.allocPrint(alloc, "{d}\n", .{@max(was, floor)}), .{});
+    try store.replace(io, alloc, paths.config, config_text, .{ .private = true });
+}
+
+/// Whether one of two folders is the other or inside it, by their
+/// resolved spellings (a symlink is not followed: neither host's roots
+/// are links).
+pub fn nested(alloc: std.mem.Allocator, a: []const u8, b: []const u8) !bool {
+    const ra = try std.fs.path.resolve(alloc, &.{a});
+    const rb = try std.fs.path.resolve(alloc, &.{b});
+    return within(ra, rb) or within(rb, ra);
+}
+
+fn within(inner: []const u8, outer: []const u8) bool {
+    if (!std.mem.startsWith(u8, inner, outer)) return false;
+    return inner.len == outer.len or inner[outer.len] == '/' or std.mem.endsWith(u8, outer, "/");
 }
 
 fn record(io: Io, alloc: std.mem.Allocator, req: Request, env: Envelope, sha: [Sha256.digest_length]u8) !void {
