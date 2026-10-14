@@ -273,6 +273,11 @@ test "builtins: walk lists every entry under a folder, depth first and sorted, f
         try testing.expectEqual(script.diag.Budget.reads, r.stop.?.budget.?);
     }
     try f.expectStop("walk(\"nope\")", .store);
+    // A symlink is listed as other and never entered: one to / doesn't walk
+    // the host, and one to its own folder doesn't loop.
+    try f.tmp.dir.symLink(f.threaded.io(), "/", "data/chat/host", .{});
+    try f.tmp.dir.symLink(f.threaded.io(), ".", "data/chat/loop", .{});
+    try f.expectOutput("for e in walk(\"chat\") do print(e.path, e.size, e.kind) end", "chat/a.md\t5\tfile\nchat/b.md\t6\tfile\nchat/host\t0\tother\nchat/loop\t0\tother\n");
     try f.expectStop("walk(\"top.txt\")", .store);
     try f.expectStop("walk(\"../auth\")", .argument);
 }
@@ -338,6 +343,13 @@ test "builtins: human sizes, pad either way, and a table of rows" {
         "name   files  bytes\nchat      12  1.2 KiB\ngames      3  5 B\n",
     );
     try f.expectOutput("print(table({}, {\"a\", \"b\"}))", "a  b\n");
+    // Every cell costs a step, empty or not, before the grid is made.
+    {
+        const src = "local m = {[\"\"] = \"\"} local rows = {} local cols = {} for i = 1, 3000 do push(rows, m) push(cols, \"\") end print(#table(rows, cols))";
+        var r = f.run(src, .{ .steps = 1_000_000 });
+        defer r.deinit();
+        try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
+    }
     try f.expectStop("table({{a = 1}}, {\"a\", \"b\"})", .index);
     try f.expectStop("table({{a = {}}}, {\"a\"})", .type);
     try f.expectStop("table({1}, {\"a\"})", .type);

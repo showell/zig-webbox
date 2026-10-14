@@ -277,6 +277,11 @@ pub fn table(run: *Run, pos: ast.Pos, rows_arg: Value, cols_arg: Value) Error!Va
         else => return run.fail(pos, .type, "`table`: column {d} must be a string, not {s}", .{ i + 1, c.typeName() }),
     };
     const nr = rows.list.items.len;
+    // **EVERY CELL COSTS A STEP, CHARGED BEFORE THE GRID IS MADE**: an empty
+    // cell's text is 0 bytes, so charging only text would let a few
+    // thousand rows and columns buy millions of uncharged lookups and the
+    // grid's allocation.
+    try run.charge(pos, nr * nc);
     const cells = a.alloc([]const u8, nr * nc) catch return run.oom(pos);
     const widths = a.alloc(usize, nc) catch return run.oom(pos);
     const numeric = a.alloc(bool, nc) catch return run.oom(pos);

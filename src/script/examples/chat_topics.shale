@@ -1,24 +1,30 @@
--- The chat, topic by topic: messages, bytes and the last message's date;
--- the topics with the most messages; those quiet for QUIET_DAYS; and any
--- topic whose message-count cache (<sid>.count) disagrees with its
--- transcript. Reads only.
+-- The chat, topic by topic: messages and bytes; the topics with the most
+-- messages; those untouched for QUIET_DAYS; and any topic whose count
+-- cache is stale. Reads only, and cheap enough for the whole live chat
+-- (about 190 MB): a transcript is read only when it has no count cache
+-- and is small.
 --
--- A transcript is messages, each starting "MSG_<sid>_<n>", then
--- "from: <name>", then "date: <RFC 3339>". A topic is chat/<a>_<b>/sessions/
--- <sid>.md (a conversation) or chat/channels/<name>/sessions/<sid>.md.
+-- A topic is chat/<a>_<b>/sessions/<sid>.md (a conversation) or
+-- chat/channels/<name>/sessions/<sid>.md. Beside it, the server keeps
+-- <sid>.count: "<count> <size>\n" and a second line (the last message's
+-- place and author). The count is its first word; the size is the
+-- transcript's size when it was taken, so a size that differs from the
+-- transcript's now means the cache is stale.
 
 const MOST = 15
 const QUIET_DAYS = 90
+-- A transcript with no count cache is counted only below this size.
+const SCAN_MOST = 262144
+-- Messages are joined by the server's separator; a piece with anything
+-- in it is a message (angry-gopher's countBlocks).
+const SEP = "\n\n-------------\n"
 
--- One transcript: {messages, last}, last the last "date: " value.
-function scan(text)
+function count_messages(text)
   local n = 0
-  local last = ""
-  for line in lines(text) do
-    if starts_with(line, "MSG_") then n = n + 1 end
-    if starts_with(line, "date: ") then last = sub(line, 7) end
+  for piece in split(text, SEP) do
+    if trim(piece) ~= "" then n = n + 1 end
   end
-  return {messages = n, last = last}
+  return n
 end
 
 -- The topic's label from its path's parts, or nil when it is no topic.
@@ -31,31 +37,48 @@ function label(parts)
   return nil
 end
 
+-- now() is 0 where the host gives no clock (the Linux runner): then
+-- nothing is untouched.
 local quiet_before = now() - QUIET_DAYS * 86400
+if quiet_before < 0 then quiet_before = 0 end
 local rows = {}
 local quiet = {}
-local wrong = {}
+local stale = {}
+local uncounted = 0
 local messages = 0
 local bytes = 0
+local cut = false
 for e in walk("chat") do
   local topic = nil
   if e.kind == "file" then topic = label(split(e.path, "/")) end
   if topic ~= nil then
-    local s = scan(read(e.path))
-    local row = {topic = topic, messages = s.messages, bytes = e.size, last = s.last}
-    push(rows, row)
-    messages = messages + s.messages
-    bytes = bytes + e.size
-    if s.last ~= "" and seconds(s.last) < quiet_before then push(quiet, row) end
-    local count_path = sub(e.path, 1, #e.path - 3) .. ".count"
-    if exists(count_path) then
-      local cached = tonumber(trim(read(count_path)))
-      if cached ~= s.messages then push(wrong, {topic = topic, transcript = s.messages, cache = cached}) end
+    if budget().reads < 4 then
+      cut = true
+      break
     end
+    local count_path = sub(e.path, 1, #e.path - 3) .. ".count"
+    local n = -1
+    if exists(count_path) then
+      local w = words(read(count_path))
+      n = tonumber(w[1])
+      if tonumber(w[2]) ~= e.size then push(stale, {topic = topic, cache = n, taken_at = tonumber(w[2]), size = e.size}) end
+    elseif e.size <= SCAN_MOST then
+      n = count_messages(read(e.path))
+    else
+      uncounted = uncounted + 1
+    end
+    local row = {topic = topic, messages = n, bytes = e.size}
+    push(rows, row)
+    if n > 0 then messages = messages + n end
+    bytes = bytes + e.size
+    -- A modified time of 0 is one the host doesn't know.
+    if e.modified > 0 and e.modified < quiet_before then push(quiet, row) end
   end
 end
 
 print("topics", #rows, "messages", messages, "bytes", human(bytes))
+if uncounted > 0 then print("(" .. uncounted .. " large topics with no count cache are left out of the messages)") end
+if cut then print("(stopped at the read budget: the counts above are a part)") end
 print("")
 sort(rows, "messages")
 reverse(rows)
@@ -63,10 +86,10 @@ local most = {}
 for r in rows do
   if #most < MOST then push(most, r) end
 end
-print(table(most, {"topic", "messages", "bytes", "last"}))
+print(table(most, {"topic", "messages", "bytes"}))
 print("")
-print("quiet for " .. QUIET_DAYS .. " days (since " .. date(quiet_before) .. "): " .. #quiet)
-if #quiet > 0 then print(table(quiet, {"topic", "messages", "last"})) end
+print("untouched for " .. QUIET_DAYS .. " days (since " .. date(quiet_before) .. "): " .. #quiet)
+if #quiet > 0 then print(table(quiet, {"topic", "messages", "bytes"})) end
 print("")
-print("count caches that disagree: " .. #wrong)
-if #wrong > 0 then print(table(wrong, {"topic", "transcript", "cache"})) end
+print("count caches that are stale: " .. #stale)
+if #stale > 0 then print(table(stale, {"topic", "cache", "taken_at", "size"})) end

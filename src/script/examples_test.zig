@@ -23,6 +23,16 @@ fn transcript(alloc: std.mem.Allocator, sid: []const u8, n: usize) ![]u8 {
     return out.items;
 }
 
+fn countCache(alloc: std.mem.Allocator, n: usize, size: usize) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{d} {d}\n{d} 1\n", .{ n, size, size -| 60 });
+}
+
+/// Now, in seconds: the fixture's files were just written, so their
+/// modified times are about this.
+fn wallNow(io: std.Io) i64 {
+    return @intCast(@divFloor(std.Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
+}
+
 const Fixture = struct {
     tmp: std.testing.TmpDir,
     threaded: std.Io.Threaded,
@@ -45,8 +55,11 @@ const Fixture = struct {
             .{ .path = "data/chat/channels/random/sessions/misc.md", .sid = "misc", .n = 2 },
         };
         for (files) |f| try d.writeFile(io, .{ .sub_path = f.path, .data = try transcript(a, f.sid, f.n) });
-        try d.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/hello.count", .data = "3\n" });
-        try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "40\n" });
+        // Count caches as the server writes them (angry-gopher
+        // chat_count.zig): "<count> <size>\n", then the last message's
+        // place and author. lunch and misc have none.
+        try d.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/hello.count", .data = try countCache(a, 3, (try transcript(a, "hello", 3)).len) });
+        try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = try countCache(a, 40, (try transcript(a, "plans", 40)).len) });
         try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.reactions.jsonl", .data = "{}\n" });
         try d.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.uploads/1.png", .data = "png" });
         try d.writeFile(io, .{ .sub_path = "data/chat/channels/general.channel", .data = "1\n2\n" });
@@ -155,24 +168,29 @@ test "example: where the bytes are, folder by folder, then the largest files" {
     try testing.expect(std.mem.indexOf(u8, r.output, "chat/channels/general/sessions/plans.md") != null);
 }
 
-test "example: chat topics by messages, the quiet ones, the caches that disagree" {
+test "example: chat topics from the count caches, the untouched ones, the stale caches; a transcript read only when it has no cache" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
-    // A count cache that lies, for the last section.
-    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "39\n" });
-    // 2027-02-02: the transcripts' 2026-10-13 is more than 90 days before.
-    var r = f.runAt(chat_topics, 1801526400, &out_buf);
+    const io = f.threaded.io();
+    // A stale cache: taken when plans.md was a byte shorter.
+    const plans_size = (try transcript(f.arena.allocator(), "plans", 40)).len;
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = try countCache(f.arena.allocator(), 40, plans_size - 1) });
+    // 100 days on, every transcript is untouched for 90.
+    var r = f.runAt(chat_topics, wallNow(io) + 100 * 86400, &out_buf);
     defer r.deinit();
     try finished(&r);
     errdefer std.debug.print("{s}", .{r.output});
     try testing.expectEqual(@as(usize, 0), r.effects.len);
+    // 3 and 40 from the caches; lunch's 1 and misc's 2 counted by the
+    // separator, since they have none.
     try testing.expect(std.mem.startsWith(u8, r.output, "topics\t4\tmessages\t46\tbytes\t"));
-    try testing.expect(std.mem.indexOf(u8, r.output, "topic           messages  bytes  last\n#general plans        40   4166  2026-10-13T12:00:00Z\n") != null);
-    try testing.expect(std.mem.indexOf(u8, r.output, "quiet for 90 days (since 2026-11-04T00:00:00Z): 4\n") != null);
-    try testing.expect(std.mem.indexOf(u8, r.output, "count caches that disagree: 1\ntopic           transcript  cache\n#general plans          40     39\n") != null);
-    // The same run on the transcripts' own day: none is quiet.
-    var today = f.runAt(chat_topics, 1791936000, &out_buf);
+    try testing.expect(std.mem.indexOf(u8, r.output, "topic           messages  bytes\n#general plans        40   4166\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "#general lunch         1     87\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "): 4\n") != null);
+    try testing.expect(std.mem.indexOf(u8, r.output, "count caches that are stale: 1\ntopic           cache  taken_at  size\n#general plans     40      4165  4166\n") != null);
+    // Today: nothing is untouched.
+    var today = f.runAt(chat_topics, wallNow(io), &out_buf);
     defer today.deinit();
     try finished(&today);
     try testing.expect(std.mem.indexOf(u8, today.output, "): 0\n") != null);

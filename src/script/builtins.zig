@@ -468,15 +468,25 @@ fn walk(run: *Run, pos: ast.Pos, arg: Value) Error!Value {
         const rel = if (top.rel.len == 0) en.name else std.fmt.allocPrint(a, "{s}/{s}", .{ top.rel, en.name }) catch return run.oom(pos);
         const full = std.fmt.allocPrint(a, "{s}/{s}", .{ run.root, rel }) catch return run.oom(pos);
         try run.charge(pos, rel.len);
-        const es = store.stat(run.io, a, full) catch |e| return storeFailed(run, pos, .walk, rel, e);
+        // **THE LISTING'S KIND, NEVER A STAT'S**: a stat follows a link, so
+        // a symlink inside the root to `/` would walk the host's files, and
+        // a link loop would recurse. The listing names a link `other`; it
+        // is reported, not stat'ed, and never entered. (Metal's FAT has no
+        // links, so both hosts walk the same tree.)
         const m = try run.newTable(pos);
         m.map.put(a, "path", .{ .string = rel }) catch return run.oom(pos);
-        m.map.put(a, "size", .{ .int = if (es.kind == .directory) 0 else @intCast(es.size) }) catch return run.oom(pos);
-        m.map.put(a, "kind", .{ .string = @tagName(es.kind) }) catch return run.oom(pos);
-        m.map.put(a, "modified", .{ .int = modifiedSeconds(es.mtime) }) catch return run.oom(pos);
+        m.map.put(a, "kind", .{ .string = @tagName(en.kind) }) catch return run.oom(pos);
+        if (en.kind == .other) {
+            m.map.put(a, "size", .{ .int = 0 }) catch return run.oom(pos);
+            m.map.put(a, "modified", .{ .int = 0 }) catch return run.oom(pos);
+        } else {
+            const es = store.stat(run.io, a, full) catch |e| return storeFailed(run, pos, .walk, rel, e);
+            m.map.put(a, "size", .{ .int = if (en.kind == .directory) 0 else @intCast(es.size) }) catch return run.oom(pos);
+            m.map.put(a, "modified", .{ .int = modifiedSeconds(es.mtime) }) catch return run.oom(pos);
+        }
         m.kind = .map;
         out.list.append(a, .{ .table = m }) catch return run.oom(pos);
-        if (es.kind == .directory) {
+        if (en.kind == .directory) {
             try countRead(run, pos);
             const entries = try sortedEntries(run, pos, .walk, full, rel);
             levels.append(a, .{ .rel = rel, .entries = entries }) catch return run.oom(pos);
