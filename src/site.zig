@@ -134,7 +134,10 @@ pub fn Site(comptime App: type) type {
         pub fn route(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, b: *Bus) !?Kept {
             var path_buf: [traffic.Text.capacity]u8 = undefined;
             const kept_path = @import("http.zig").pathInto(req, &path_buf);
-            const family = familyName(App, req.head.target);
+            // The family from the whole path: a buffer the size of a head
+            // holds any target (the counted path above may be cut short).
+            var family_buf: [@import("http.zig").head_bytes]u8 = undefined;
+            const family = familyName(App, @import("http.zig").pathInto(req, &family_buf));
             const began = Io.Clock.now(.awake, io).nanoseconds;
             const out = answer(req, io, alloc, b);
             const took = Io.Clock.now(.awake, io).nanoseconds - began;

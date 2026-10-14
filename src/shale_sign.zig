@@ -26,7 +26,6 @@ const std = @import("std");
 const webbox = @import("webbox");
 const route = webbox.script_route;
 const Ed25519 = std.crypto.sign.Ed25519;
-const Io = std.Io;
 
 const key_name = ".shale_signing_key";
 const sequences_name = ".shale_sequences";
@@ -35,11 +34,11 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const arena = init.arena.allocator();
     var out_buf: [4096]u8 = undefined;
-    var ow = Io.File.stdout().writer(io, &out_buf);
+    var ow = std.Io.File.stdout().writer(io, &out_buf);
     const out = &ow.interface;
     defer out.flush() catch {};
     var err_buf: [1024]u8 = undefined;
-    var ew = Io.File.stderr().writer(io, &err_buf);
+    var ew = std.Io.File.stderr().writer(io, &err_buf);
     const err = &ew.interface;
     defer err.flush() catch {};
 
@@ -71,9 +70,9 @@ pub fn main(init: std.process.Init) !u8 {
     return 2;
 }
 
-fn keygen(io: Io, key_path: []const u8, out: *Io.Writer, err: *Io.Writer) !u8 {
+fn keygen(io: std.Io, key_path: []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
     const kp = Ed25519.KeyPair.generate(io);
-    const file = Io.Dir.cwd().createFile(io, key_path, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch |e| switch (e) {
+    const file = std.Io.Dir.cwd().createFile(io, key_path, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch |e| switch (e) {
         error.PathAlreadyExists => {
             try err.print("shale-sign: {s} is already there; it is not replaced (remove it yourself to make a new pair, and change the server's shale.conf)\n", .{key_path});
             return 2;
@@ -91,13 +90,13 @@ fn keygen(io: Io, key_path: []const u8, out: *Io.Writer, err: *Io.Writer) !u8 {
     return 0;
 }
 
-fn printConfig(key: Ed25519.PublicKey, out: *Io.Writer) !void {
+fn printConfig(key: Ed25519.PublicKey, out: *std.Io.Writer) !void {
     const hex = std.fmt.bytesToHex(key.toBytes(), .lower);
     try out.print("public_key = {s}\n", .{&hex});
 }
 
-fn loadKey(io: Io, arena: std.mem.Allocator, key_path: []const u8, err: *Io.Writer) !Ed25519.KeyPair {
-    const file = Io.Dir.cwd().openFile(io, key_path, .{}) catch |e| {
+fn loadKey(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, err: *std.Io.Writer) !Ed25519.KeyPair {
+    const file = std.Io.Dir.cwd().openFile(io, key_path, .{}) catch |e| {
         try err.print("shale-sign: cannot open {s}: {s} (make it with `keygen`)\n", .{ key_path, @errorName(e) });
         return e;
     };
@@ -123,13 +122,13 @@ fn loadKey(io: Io, arena: std.mem.Allocator, key_path: []const u8, err: *Io.Writ
     return Ed25519.KeyPair.generateDeterministic(seed);
 }
 
-fn sign(io: Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []const u8, file_path: []const u8, target: []const u8, minutes: i64, out: *Io.Writer, err: *Io.Writer) !u8 {
+fn sign(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []const u8, file_path: []const u8, target: []const u8, minutes: i64, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
     if (!route.validTarget(target)) {
         try err.print("shale-sign: {s} is not a host name (a-z 0-9 . -)\n", .{target});
         return 2;
     }
     const kp = loadKey(io, arena, key_path, err) catch return 2;
-    const source = Io.Dir.cwd().readFileAlloc(io, file_path, arena, .limited(webbox.script.Budgets.default_source_bytes + 1)) catch |e| {
+    const source = std.Io.Dir.cwd().readFileAlloc(io, file_path, arena, .limited(webbox.script.Budgets.default_source_bytes + 1)) catch |e| {
         try err.print("shale-sign: cannot read {s}: {s}\n", .{ file_path, @errorName(e) });
         return 2;
     };
@@ -137,8 +136,8 @@ fn sign(io: Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []cons
         try err.print("shale-sign: {s} is past the {d} bytes a script may be\n", .{ file_path, webbox.script.Budgets.default_source_bytes });
         return 2;
     }
-    const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
-    const seqs = Io.Dir.cwd().readFileAlloc(io, seq_path, arena, .limited(1 << 20)) catch |e| switch (e) {
+    const now: i64 = @intCast(@divFloor(std.Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
+    const seqs = std.Io.Dir.cwd().readFileAlloc(io, seq_path, arena, .limited(1 << 20)) catch |e| switch (e) {
         error.FileNotFound => "",
         else => return e,
     };
@@ -151,9 +150,9 @@ fn sign(io: Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []cons
     const body = try route.envelope(arena, sig.toBytes(), signed);
     // The number is kept before the request leaves: one signed and never
     // sent is a number spent, never one signed twice.
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = seq_path, .data = try withSequence(arena, seqs, target, sequence) });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = seq_path, .data = try withSequence(arena, seqs, target, sequence) });
     const req_path = try std.fmt.allocPrint(arena, "{s}.{d}.req", .{ file_path, sequence });
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = req_path, .data = body });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = req_path, .data = body });
     try err.print("shale-sign: {s} for {s}, sequence {d}, good until {d} ({d} minutes): {s}\n", .{ file_path, target, sequence, expires, minutes, req_path });
     try out.print("curl -sS --fail-with-body -H \"Authorization: Bearer $SHALE_ADMIN_KEY\" --data-binary @{s} https://{s}/admin/script\n", .{ req_path, target });
     return 0;

@@ -265,6 +265,7 @@ pub const Outcome = union(enum) {
 /// memory is its result's arena, given back by `Outcome.deinit`.
 pub fn handle(io: Io, alloc: std.mem.Allocator, body: []const u8, req: Request) !Outcome {
     const env = parse(body) catch return refuse(.malformed, "the body is not a shale-1 envelope (shale-signature line, shale-1 line, script)");
+    // absent-ok: a config that cannot be read refuses (bad_config), never runs.
     const conf_text = (store.readOrNull(io, alloc, req.paths.config, .limited(4096)) catch |e|
         return refuse(.bad_config, try std.fmt.allocPrint(alloc, "the script config cannot be read: {s}", .{@errorName(e)}))) orelse
         return refuse(.no_key, "no public key is configured: the route is off");
@@ -277,6 +278,7 @@ pub fn handle(io: Io, alloc: std.mem.Allocator, body: []const u8, req: Request) 
         return refuse(.expired, try std.fmt.allocPrint(alloc, "expired at {d}; it is {d}", .{ env.expires, req.now }));
     if (env.expires - req.now > max_ahead_s)
         return refuse(.expires_too_far, try std.fmt.allocPrint(alloc, "expires {d} s from now, past the {d} s allowed", .{ env.expires - req.now, max_ahead_s }));
+    // absent-ok: a sequence that cannot be read refuses (sequence_unreadable), never runs.
     const last = lastSequence(io, alloc, req.paths.sequence) catch |e|
         return refuse(.sequence_unreadable, try std.fmt.allocPrint(alloc, "the last sequence number cannot be read: {s}", .{@errorName(e)}));
     if (env.sequence <= last)
@@ -363,8 +365,4 @@ pub fn writeReply(o: *const Outcome, w: *std.Io.Writer) std.Io.Writer.Error!void
             if (r.log_failed) |e| try w.print("── THE LOG WAS NOT WRITTEN ({s}) ──\n", .{@errorName(e)});
         },
     }
-}
-
-test {
-    _ = @import("script_route_test.zig");
 }

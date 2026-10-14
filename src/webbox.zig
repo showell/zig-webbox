@@ -65,6 +65,7 @@ pub const free_space = @import("free_space.zig");
 test {
     _ = script;
     _ = script_route;
+    _ = @import("script_route_test.zig");
     _ = site;
     _ = body;
     _ = http;
