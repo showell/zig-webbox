@@ -90,6 +90,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     var r: interp.Run = .{
         .io = io,
         .alloc = alloc,
+        .machine = backing,
         .budgeted = budgeted,
         .budgets = budgets,
         .root = root,
@@ -98,6 +99,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
         .out = out,
         .out_cap = @min(out.len, budgets.output_bytes),
     };
+    defer r.deinit();
     r.main() catch |e| switch (e) {
         error.Stop => {},
         // An allocation that failed outside a builtin's own check.

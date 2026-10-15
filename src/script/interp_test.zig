@@ -423,6 +423,10 @@ test "run: 208's cold review: attempt needs its commas; a long chain in a loop c
     try testing.expectEqual(@as(u32, 33), m.stop.?.column);
 }
 
+/// The machine's memory a shape of a few locals and no calls may take
+/// beside its arena (metal-vmm QUEUE 211).
+const machine_most = 4 * 1024;
+
 test "run: the arena budget bounds the memory a run takes: the backing allocator's peak stays under it, for the review's shapes (209)" {
     // At 208, std's arena held 1.7x and 2.0x what was counted: 14.1 MB
     // for 200,000 tables against 8 MiB, 12.7 MB for 400,000 pushes.
@@ -440,7 +444,10 @@ test "run: the arena budget bounds the memory a run takes: the backing allocator
         var r = script.run(threaded.io(), peak.allocator(), ".zig-cache/no-root", src, .{ .arena_bytes = limit, .steps = 100_000_000 }, 0, &out_buf);
         defer r.deinit();
         errdefer std.debug.print("{s}: peak {d}\n", .{ src, peak.most });
-        try testing.expect(peak.most <= limit);
+        // The arena, and the machine's own memory beside it (211: the
+        // frames' slots and the `..` chains' parts, outside the arena),
+        // which for these shapes is a frame of a few slots.
+        try testing.expect(peak.most <= limit + machine_most);
         try testing.expect(r.arena_bytes <= limit);
     }
 }
