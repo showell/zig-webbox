@@ -422,3 +422,20 @@ test "a background run that changes the store stops, naming atomic, and changes 
     const signed = try std.mem.concat(a, u8, &.{ "shale-1 target=test.example sequence=3 expires=1800000600 mode=atomic\n", walk_source });
     try f.expectRefused(try route.envelope(a, (try f.kp.sign(signed, null)).toBytes(), signed), .malformed);
 }
+
+test "a background run takes the background budgets when the host gives them, the atomic run the site's own" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    defer route.background.reset();
+    const reads = "for e in walk(\"chat\") do print(e.path) end\n";
+    const few: @import("script/script.zig").Budgets = .{ .reads = 2 };
+    const many: @import("script/script.zig").Budgets = .{ .reads = 10_000 };
+    var atomic = try route.handle(f.threaded.io(), f.arena.allocator(), try f.body(f.kp, "test.example", 1, now + 600, reads), .{ .paths = f.paths, .data_root = f.data, .budgets = few, .now = now, .out = &out_buf, .backing = testing.allocator, .background_budgets = many });
+    defer atomic.deinit();
+    try testing.expectEqual(@import("script/script.zig").diag.Budget.reads, atomic.ran.result.stop.?.budget.?);
+    var bg = try route.handle(f.threaded.io(), f.arena.allocator(), try f.bodyIn(2, .background, reads), .{ .paths = f.paths, .data_root = f.data, .budgets = few, .now = now, .out = &out_buf, .backing = testing.allocator, .background_budgets = many });
+    defer bg.deinit();
+    while (route.sliceBackground(f.threaded.io(), now)) {}
+    try testing.expect(std.mem.startsWith(u8, try Fixture.status(), "background seq=2 finished: "));
+}

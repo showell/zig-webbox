@@ -38,6 +38,17 @@ const site_budgets: script.Budgets = .{
     .changes = 100,
 };
 
+/// **A BACKGROUND RUN'S** (Steve, 2026-10-15): the site's, but for its
+/// reads, which may be many, since it only fills the gaps between requests.
+const background_budgets: script.Budgets = blk: {
+    var b = site_budgets;
+    b.reads = 10_000;
+    break :blk b;
+};
+
+const Mode = struct { name: []const u8, budgets: script.Budgets };
+const modes = [_]Mode{ .{ .name = "atomic", .budgets = site_budgets }, .{ .name = "background", .budgets = background_budgets } };
+
 /// The fixture's clock (examples_test.zig): 2026-10-14.
 const now: i64 = 1791936000;
 
@@ -137,8 +148,8 @@ const Site = struct {
 
 const Outcome = struct { fits: bool, why: []const u8 };
 
-fn tryScript(io: Io, gpa: std.mem.Allocator, root: []const u8, s: Script, out: []u8, why_buf: []u8) Outcome {
-    var r = script.run(io, gpa, root, s.src, site_budgets, now, out);
+fn tryScript(io: Io, gpa: std.mem.Allocator, root: []const u8, s: Script, budgets: script.Budgets, out: []u8, why_buf: []u8) Outcome {
+    var r = script.run(io, gpa, root, s.src, budgets, now, out);
     defer r.deinit();
     if (r.stop) |stop| {
         const why = if (stop.budget) |b|
@@ -161,10 +172,10 @@ pub fn main(init: std.process.Init) !void {
     var buf: [4096]u8 = undefined;
     var ow = Io.File.stdout().writer(io, &buf);
     const w = &ow.interface;
-    try w.print("| script | messages a topic | largest site that fits | its transcripts | past it |\n|---|---|---|---|---|\n", .{});
+    try w.print("| mode | script | messages a topic | largest site that fits | its transcripts | past it |\n|---|---|---|---|---|---|\n", .{});
     try w.flush();
     const root = ".zig-cache/shale-scale/data";
-    for (profiles) |m| {
+    for (modes) |mode| for (profiles) |m| {
         for ([_]bool{ true, false }) |reads| {
             var site: Site = .{ .root = root, .messages = m, .sparse = !reads };
             var arena = std.heap.ArenaAllocator.init(gpa);
@@ -183,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
                 var all_done = true;
                 for (scripts, 0..) |s, i| {
                     if (done[i]) continue;
-                    const o = tryScript(io, gpa, root, s, out, &why[i]);
+                    const o = tryScript(io, gpa, root, s, mode.budgets, out, &why[i]);
                     if (o.fits) {
                         best[i] = .{ .topics = n, .bytes = site.bytes };
                         all_done = false;
@@ -205,11 +216,11 @@ pub fn main(init: std.process.Init) !void {
                 const bytes = if (best[i]) |b| try human(&bytes_buf, b.bytes) else "";
                 const past = if (why_len[i] > 0) why[i][0..why_len[i]] else "more than tried";
                 var each_buf: [32]u8 = undefined;
-                try w.print("| `{s}` | {d} (~{s} each) | {s} | {s} | {s} |\n", .{ s.name, m, try human(&each_buf, site.bytes / @max(site.topics, 1)), fit, bytes, past });
+                try w.print("| {s} | `{s}` | {d} (~{s} each) | {s} | {s} | {s} |\n", .{ mode.name, s.name, m, try human(&each_buf, site.bytes / @max(site.topics, 1)), fit, bytes, past });
                 try w.flush();
             }
         }
-    }
+    };
     Io.Dir.cwd().deleteTree(io, ".zig-cache/shale-scale") catch {};
 }
 

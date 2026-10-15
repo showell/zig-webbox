@@ -260,6 +260,11 @@ pub const Request = struct {
     /// **A BACKGROUND RUN'S MEMORY**, the host's own allocator, never a
     /// request's heap: null on a host that steps no background run.
     backing: ?std.mem.Allocator = null,
+    /// **A BACKGROUND RUN'S BUDGETS**, when they are not `budgets` (Steve,
+    /// 2026-10-15: an atomic run holds up requests, so the site's reads stay
+    /// few; a background run only fills the gaps between them, so it may
+    /// read far more).
+    background_budgets: ?script.Budgets = null,
 };
 
 pub const Ran = struct {
@@ -447,7 +452,8 @@ fn startBackground(io: Io, req: Request, env: Envelope, sha: [Sha256.digest_leng
     errdefer a.free(root);
     const log = try a.dupe(u8, req.paths.log);
     errdefer a.free(log);
-    const p = try script.process.Process.start(io, a, root, env.source, .background, req.budgets, req.now, req.budgets.output_bytes);
+    const budgets = req.background_budgets orelse req.budgets;
+    const p = try script.process.Process.start(io, a, root, env.source, .background, budgets, req.now, budgets.output_bytes);
     background = .{ .process = p, .backing = a, .sequence = env.sequence, .root = root, .log = log, .last_logged = req.now };
 }
 

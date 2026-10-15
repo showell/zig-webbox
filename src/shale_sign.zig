@@ -12,6 +12,12 @@
 //!     zig build shale-sign -- sign <file.shale> <target> [minutes]
 //!         writes <file.shale>.<sequence>.req, the signed body, good for
 //!         `minutes` (default 10), and prints the curl line that sends it
+//!     zig build shale-sign -- background <file.shale> <target> [minutes]
+//!         the same, as a `mode=background` run: it only reads, a slice at
+//!         a time between requests, and is answered with its number
+//!     zig build shale-sign -- kill <target> [minutes]
+//!         a signed `mode=kill`, ending the background run going: written to
+//!         kill.<sequence>.req
 //!
 //! **THE NEXT SEQUENCE NUMBER** is one past the last this program signed
 //! for the target (~/.shale_sequences, a line per target), and never less
@@ -55,18 +61,25 @@ pub fn main(init: std.process.Init) !u8 {
         try printConfig(kp.public_key, out);
         return 0;
     }
-    if ((args.len == 4 or args.len == 5) and std.mem.eql(u8, args[1], "sign")) {
-        const minutes: i64 = if (args.len == 5) std.fmt.parseInt(i64, args[4], 10) catch {
-            try err.print("shale-sign: {s} is not a number of minutes\n", .{args[4]});
-            return 2;
-        } else 10;
-        if (minutes < 1 or minutes * 60 > route.max_ahead_s) {
-            try err.print("shale-sign: an expiry of 1 to {d} minutes\n", .{@divFloor(route.max_ahead_s, 60)});
-            return 2;
+    const signing: ?route.Mode = if (args.len >= 2) (if (std.mem.eql(u8, args[1], "sign")) route.Mode.atomic else if (std.mem.eql(u8, args[1], "background")) route.Mode.background else if (std.mem.eql(u8, args[1], "kill")) route.Mode.kill else null) else null;
+    if (signing) |mode| {
+        // A kill names no file: its script is empty.
+        const fixed: usize = if (mode == .kill) 3 else 4;
+        if (args.len == fixed or args.len == fixed + 1) {
+            const minutes: i64 = if (args.len == fixed + 1) std.fmt.parseInt(i64, args[fixed], 10) catch {
+                try err.print("shale-sign: {s} is not a number of minutes\n", .{args[fixed]});
+                return 2;
+            } else 10;
+            if (minutes < 1 or minutes * 60 > route.max_ahead_s) {
+                try err.print("shale-sign: an expiry of 1 to {d} minutes\n", .{@divFloor(route.max_ahead_s, 60)});
+                return 2;
+            }
+            const file = if (mode == .kill) "" else args[2];
+            const target = if (mode == .kill) args[2] else args[3];
+            return sign(io, arena, key_path, seq_path, file, target, minutes, mode, out, err);
         }
-        return sign(io, arena, key_path, seq_path, args[2], args[3], minutes, out, err);
     }
-    try err.writeAll("usage: shale-sign keygen | pubkey | sign <file.shale> <target> [minutes]\n");
+    try err.writeAll("usage: shale-sign keygen | pubkey | sign <file.shale> <target> [minutes] | background <file.shale> <target> [minutes] | kill <target> [minutes]\n");
     return 2;
 }
 
@@ -122,13 +135,13 @@ fn loadKey(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, err: *std
     return Ed25519.KeyPair.generateDeterministic(seed);
 }
 
-fn sign(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []const u8, file_path: []const u8, target: []const u8, minutes: i64, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
+fn sign(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []const u8, file_path: []const u8, target: []const u8, minutes: i64, mode: route.Mode, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
     if (!route.validTarget(target)) {
         try err.print("shale-sign: {s} is not a host name (a-z 0-9 . -)\n", .{target});
         return 2;
     }
     const kp = loadKey(io, arena, key_path, err) catch return 2;
-    const source = std.Io.Dir.cwd().readFileAlloc(io, file_path, arena, .limited(webbox.script.Budgets.default_source_bytes + 1)) catch |e| {
+    const source = if (mode == .kill) "" else std.Io.Dir.cwd().readFileAlloc(io, file_path, arena, .limited(webbox.script.Budgets.default_source_bytes + 1)) catch |e| {
         try err.print("shale-sign: cannot read {s}: {s}\n", .{ file_path, @errorName(e) });
         return 2;
     };
@@ -145,15 +158,15 @@ fn sign(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []
     const sequence: u64 = @max(last + 1, @as(u64, @intCast(now)));
     const expires = now + minutes * 60;
 
-    const signed = try route.signedBytes(arena, target, sequence, expires, source);
+    const signed = try route.signedBytesIn(arena, target, sequence, expires, mode, source);
     const sig = try kp.sign(signed, null);
     const body = try route.envelope(arena, sig.toBytes(), signed);
     // The number is kept before the request leaves: one signed and never
     // sent is a number spent, never one signed twice.
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = seq_path, .data = try withSequence(arena, seqs, target, sequence) });
-    const req_path = try std.fmt.allocPrint(arena, "{s}.{d}.req", .{ file_path, sequence });
+    const req_path = try std.fmt.allocPrint(arena, "{s}.{d}.req", .{ if (mode == .kill) "kill" else file_path, sequence });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = req_path, .data = body });
-    try err.print("shale-sign: {s} for {s}, sequence {d}, good until {d} ({d} minutes): {s}\n", .{ file_path, target, sequence, expires, minutes, req_path });
+    try err.print("shale-sign: {s} for {s} ({t}), sequence {d}, good until {d} ({d} minutes): {s}\n", .{ if (mode == .kill) "a kill" else file_path, target, mode, sequence, expires, minutes, req_path });
     try out.print("curl -sS --fail-with-body -H \"Authorization: Bearer $SHALE_ADMIN_KEY\" --data-binary @{s} https://{s}/admin/script\n", .{ req_path, target });
     return 0;
 }
