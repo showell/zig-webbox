@@ -131,4 +131,5 @@ test {
     _ = @import("fuzz_test.zig");
     _ = @import("charge_test.zig");
     _ = @import("errors_test.zig");
+    _ = @import("props_test.zig");
 }
