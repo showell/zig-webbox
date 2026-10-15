@@ -23,22 +23,35 @@ const corpus = [_][]const u8{
     "mkdir(\"a/b\") print(is_dir(\"a\"), exists(\"a/b\")) remove_tree(\"a\")",
     "print(sub(\"hello\", -3, -2), upper(trim(\"  x \")), find(\"abc\", \"c\"), tonumber(\"-12\"))",
     "local t = {} t[1] = 1 t[2] = 2 print(#t, t[1] + t[#t])",
+    // 208's: the reading builtins, the language's additions, `..` in place.
+    @embedFile("examples/where_the_bytes_are.shale"),
+    @embedFile("examples/chat_topics.shale"),
+    @embedFile("examples/first_change.shale"),
+    "replace(\"z\", rep(\"ab\\n\", 50)) print(read(\"z\", 3, 4), count_lines(\"z\"), count_in(\"z\", \"ba\"), find_in(\"z\", \"b\\na\"))",
+    "for e in walk(\"\", {depth = 2, like = \"*\", kind = \"file\"}) do print(e.path, e.size) end",
+    "function g(x) return tonumber(x) end local r = attempt(g, \"q\") print(r.ok, r.class, r.in_function)",
+    "for i = 1, 9 do if i % 2 == 0 then continue end print(i) end",
+    "local s = \"\" local t = s for i = 1, 50 do s = s .. \"\\x41\\r\" .. i if i == 25 then t = s end end print(#s, #t, sub(t, -2))",
+    "print(min(1, 2, 3), max(-1, 0), abs(-7), substitute(\"a-b-c\", \"-\", \"--\"))",
 };
 
 /// Pieces a mutation splices in: the language's words and symbols, the
 /// extremes of its numbers, and the calls that reach for what they must not.
 const fragments = [_][]const u8{
-    "local ",   " = ",                      "if ",               " then ",              " else ",                " elseif ",                           " end ",                                   "while ",
-    " do ",     "for ",                     " in ",              "function ",           "return ",               "break ",                             " and ",                                   " or ",
-    "not ",     "nil",                      "true",              "false",               "(",                     ")",                                  "{",                                       "}",
-    "[",        "]",                        ",",                 ".",                   "..",                    "#",                                  "+",                                       "-",
-    "*",        "//",                       "%",                 "==",                  "~=",                    "<",                                  "<=",                                      ">",
-    ";",        "x",                        "y",                 "l",                   "m",                     "f",                                  "s",                                       "i",
-    "0",        "1",                        "-1",                "9223372036854775807", "\"str\"",               "\"\"",                               "\"a\\nb\"",                               "print(",
-    "ls(\"\")", "read(\"../auth/secret\")", "remove_tree(\"\")", "remove_tree(\"..\")", "read(\"/etc/passwd\")", "replace(\"z\", \"v\")",              "append(\"z\", s)",                        "push(l, ",
-    "sort(",    "keys(m)",                  "split(s, \",\")",   "join(l, \"-\")",      "sub(s, ",               "tonumber(",                          "tostring(",                               "f(f(f(",
-    "s .. s",   "{{{{",                     "))))",              "x = x + 1 ",          "while true do ",        "for i = 1, 9223372036854775807 do ", "function f(n) return f(n + 1) end f(1) ", "1.5",
-    "a:b()",    "...",                      "[[x]]",             "goto x",              "\x00",                  "\xff",                               "\n",                                      "--",
+    "local ",                   " = ",                                 "if ",               " then ",                           " else ",                 " elseif ",                           " end ",                                   "while ",
+    " do ",                     "for ",                                " in ",              "function ",                        "return ",                "break ",                             " and ",                                   " or ",
+    "not ",                     "nil",                                 "true",              "false",                            "(",                      ")",                                  "{",                                       "}",
+    "[",                        "]",                                   ",",                 ".",                                "..",                     "#",                                  "+",                                       "-",
+    "*",                        "//",                                  "%",                 "==",                               "~=",                     "<",                                  "<=",                                      ">",
+    ";",                        "x",                                   "y",                 "l",                                "m",                      "f",                                  "s",                                       "i",
+    "0",                        "1",                                   "-1",                "9223372036854775807",              "\"str\"",                "\"\"",                               "\"a\\nb\"",                               "print(",
+    "ls(\"\")",                 "read(\"../auth/secret\")",            "remove_tree(\"\")", "remove_tree(\"..\")",              "read(\"/etc/passwd\")",  "replace(\"z\", \"v\")",              "append(\"z\", s)",                        "push(l, ",
+    "sort(",                    "keys(m)",                             "split(s, \",\")",   "join(l, \"-\")",                   "sub(s, ",                "tonumber(",                          "tostring(",                               "f(f(f(",
+    "s .. s",                   "{{{{",                                "))))",              "x = x + 1 ",                       "while true do ",         "for i = 1, 9223372036854775807 do ", "function f(n) return f(n + 1) end f(1) ", "1.5",
+    "continue ",                "attempt(f, ",                         "attempt(g, s) ",    "function g(x) return x .. x end ", "rep(s, 1000000)",        "rep(\"x\", 9223372036854775807)",    "count_in(\"z\", \"a\")",                  "count_lines(\"z\")",
+    "read(\"z\", 0, 99999999)", "read(\"z\", 9223372036854775807, 1)", "find_in(\"z\", s)", "walk(\"\", {depth = 1})",          "walk(\"\", {like = s})", "substitute(s, s, s .. s)",           "s = s .. s .. s ",                        "\"\\x4",
+    "\"\\xff\\0\"",             "min(",                                "max(1, ",           "abs(",                             "a:b()",                  "...",                                "[[x]]",                                   "goto x",
+    "\x00",                     "\xff",                                "\n",                "--",
 };
 
 fn mutate(r: std.Random, alloc: std.mem.Allocator, src: []const u8) ![]u8 {

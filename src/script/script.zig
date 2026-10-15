@@ -125,4 +125,5 @@ test {
     _ = @import("portable_test.zig");
     _ = builtins;
     _ = @import("fuzz_test.zig");
+    _ = @import("charge_test.zig");
 }
