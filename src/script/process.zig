@@ -73,6 +73,8 @@ pub const Process = struct {
     task: vm.Task = undefined,
     /// Whether `task` was made (a run stopped before it was has none).
     tasked: bool = false,
+    /// Whether `code` was made, its lists the machine's to give back.
+    coded: bool = false,
     out: []u8,
     state: State = .running,
     slices: u64 = 0,
@@ -122,12 +124,13 @@ pub const Process = struct {
         const tree = p.machine.tree.allocator();
         const program = tree.create(ast.Program) catch return p.stopWith(machine_stop);
         var stop: ?Stop = null;
-        program.* = parse.parseMeasured(tree, source, budgets.nesting, &stop, &p.parse_stack) catch |e| return p.stopWith(switch (e) {
+        program.* = parse.parseMeasured(tree, p.machine.budget.allocator(), source, budgets.nesting, &stop, &p.parse_stack) catch |e| return p.stopWith(switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => machine_stop,
         });
         p.run.program = program;
-        p.code = compile.compile(p.code_arena.allocator(), program, builtins.most_args) catch return p.stopWith(machine_stop);
+        p.code = compile.compile(p.code_arena.allocator(), p.machine.budget.allocator(), program, builtins.most_args, budgets.depth) catch return p.stopWith(machine_stop);
+        p.coded = true;
         p.task = vm.Task.init(&p.run, &p.code) catch {
             if (p.run.stop == null) p.run.stop = machine_stop;
             p.state = .stopped;
@@ -195,6 +198,8 @@ pub const Process = struct {
     fn release(p: *Process) void {
         if (p.tasked) p.task.deinit();
         p.tasked = false;
+        if (p.coded) p.code.deinit(p.machine.budget.allocator());
+        p.coded = false;
         p.run.deinit();
         p.code_arena.deinit();
     }

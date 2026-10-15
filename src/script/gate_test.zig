@@ -70,10 +70,13 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     // Counted on the run, never searched for in the source: a comment or a
     // string saying "yield" exempts nothing (the box's review).
     const yields = v.collections > 0;
-    // **THE MACHINE'S MEMORY** (the box's review): the walker's and the VM's
-    // machinery differ, so a stop on its budget comes at different places.
-    const machine_shaped = isBudget(v.stop, .machine) or isBudget(w.stop, .machine);
-    const arena_shaped = machine_shaped or (yields and (isArenaShaped(v.stop) or isArenaShaped(w.stop)));
+    // **THE MACHINE'S MEMORY** (the box's re-review, FEEDBACK 1599c8f: a
+    // blanket exemption hid the machine budget refusing valid sources): only
+    // a machine stop BOTH engines make is exempt, and only from what their
+    // machinery spends differently on the way there (the steps, the work,
+    // the arena); the stop, its place included, and the output are held.
+    const machine_shaped = isBudget(v.stop, .machine) and isBudget(w.stop, .machine);
+    const arena_shaped = yields and (isArenaShaped(v.stop) or isArenaShaped(w.stop));
     if (!arena_shaped) {
         if (!std.mem.eql(u8, v.output, w.output)) why = "the output";
         if (!sameStop(v.stop, w.stop)) why = "the stop";

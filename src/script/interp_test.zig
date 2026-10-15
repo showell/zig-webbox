@@ -519,3 +519,37 @@ test "run: the machine's memory has a budget: 5,500 parameters 63 calls deep sto
     // Both budgets, and the two structs that hold them.
     try testing.expect(peak.most <= budgets.arena_bytes + budgets.machine_bytes + 4096);
 }
+
+test "run: a 64 KiB chain the parse takes as one level, `1+1+...+1` and its kin, stops on the depth budget at the walker's place, never crashing the compiler (the box's re-review, FEEDBACK 1599c8f, item 2)" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const Shape = struct { head: []const u8, part: []const u8, tail: []const u8 };
+    for ([_]Shape{
+        .{ .head = "print(", .part = "1+", .tail = "1)" },
+        .{ .head = "print(", .part = "1<", .tail = "1)" },
+        .{ .head = "print(", .part = "true and ", .tail = "true)" },
+        .{ .head = "local x = {} print(x", .part = "[1]", .tail = ")" },
+        .{ .head = "local x = {} print(x", .part = ".a", .tail = ")" },
+        .{ .head = "print(", .part = "- ", .tail = "1)" },
+        .{ .head = "print(", .part = "not ", .tail = "true)" },
+        .{ .head = "print(", .part = "\"a\" .. ", .tail = "\"a\")" },
+    }) |shape| {
+        const room = script.Budgets.default_source_bytes - shape.head.len - shape.tail.len;
+        var src: std.ArrayList(u8) = .empty;
+        defer src.deinit(testing.allocator);
+        try src.appendSlice(testing.allocator, shape.head);
+        for (0..room / shape.part.len) |_| try src.appendSlice(testing.allocator, shape.part);
+        try src.appendSlice(testing.allocator, shape.tail);
+        // Through the gate: the VM's stop is the walker's, place and all.
+        var r = script.run(threaded.io(), testing.allocator, ".zig-cache/no-root", src.items, .{}, 0, &out_buf);
+        defer r.deinit();
+        const s = r.stop orelse {
+            std.debug.print("{s}...: finished\n", .{shape.part});
+            return error.TestUnexpectedResult;
+        };
+        if (s.class != .budget or (s.budget.? != .depth and s.budget.? != .nesting)) {
+            std.debug.print("{s}...: stopped {t} {?t}: {s}\n", .{ shape.part, s.class, s.budget, s.message });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

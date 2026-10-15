@@ -145,7 +145,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         result.stop = machine_stop;
         return result;
     };
-    program.* = parse.parseMeasured(tree, source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
+    program.* = parse.parseMeasured(tree, mm.budget.allocator(), source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
         result.stop = switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => machine_stop,
@@ -165,16 +165,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .out_cap = @min(out.len, budgets.output_bytes),
     };
     defer r.deinit();
-    // The code in the machine's memory, never the arena (`compile.compile`).
-    var code_arena = std.heap.ArenaAllocator.init(mm.budget.allocator());
-    defer code_arena.deinit();
-    const ran = switch (engine) {
-        .walker => r.main(),
-        // The code is the machine's: compiling past its budget is that stop.
-        .vm => if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| vm.main(&r, &code) else |_| r.machineOom(program.main.pos),
-        .vm_sliced => |n| if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| runSliced(&r, &code, n) else |_| r.machineOom(program.main.pos),
-    };
-    ran catch |e| switch (e) {
+    // The VM's runs went through its Process above: here, the walker's.
+    std.debug.assert(engine == .walker);
+    r.main() catch |e| switch (e) {
         error.Stop => {},
         // An allocation that failed outside a builtin's own check.
         error.OutOfMemory => r.stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" },
@@ -188,16 +181,6 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
     result.arena_bytes = budgeted.held;
     return result;
-}
-
-fn runSliced(r: *interp.Run, code: *const compile.Code, steps: u64) interp.Error!void {
-    var t = try vm.Task.init(r, code);
-    defer t.deinit();
-    while (true) switch (t.step(.{ .steps = steps })) {
-        .finished => return,
-        .stopped => return if (r.stop != null) error.Stop else error.OutOfMemory,
-        .paused => {},
-    };
 }
 
 fn arenaStop(result: *Result) Result {

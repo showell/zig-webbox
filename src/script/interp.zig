@@ -43,7 +43,12 @@ pub const Budgets = struct {
     /// past an 8 MiB arena): the parse's tree, the compiled code, the
     /// frames' slots, the operand stack, the `..` chains' parts and a
     /// yield's copying, all from one arena of this size beside the values'.
-    machine_bytes: usize = 4 * 1024 * 1024,
+    /// **EVERY SOURCE WITHIN THE SOURCE BUDGET COMPILES IN HALF OF IT** (the
+    /// box's re-review, FEEDBACK 1599c8f): the worst shapes, short
+    /// statements and list literals, take about 113 bytes of tree and code
+    /// a byte of source, 7.4 MB for 64 KiB; the other half is for the
+    /// frames and the operands (`process_test.zig` holds both).
+    machine_bytes: usize = 16 * 1024 * 1024,
     /// **WHAT ONE CALL BRINGS FROM THE STORE** (metal-vmm QUEUE 211, the
     /// caps: builtins stay atomic, so each one's work is capped): the most
     /// bytes one `read` (or one scan) takes from the store in one call. A

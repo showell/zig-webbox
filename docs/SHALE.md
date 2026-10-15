@@ -530,6 +530,12 @@ differ is `modified` (above).
 Each budget has a default, and the caller can override any of them. A run
 that hits one stops cleanly, naming it, with its line and column.
 
+**What metal passes** (the box's re-review, item 4): the route is the
+application's, not the kernel's, so zig-metal-unikernel sets no budgets of
+its own. The site's column is angry-gopher's `admin_script.budgets`, which
+lynrummy.com's route hands `script_route.handle` on metal; a budget it does
+not name is Shale's default, the machine's included.
+
 | budget | what it counts | default | the site's (angry-gopher v30) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
@@ -541,7 +547,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | read bytes | what the reads bring; `read` gets what remains as its limit | 64 MiB | 16 MiB |
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
-| machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two) | 4 MiB | 4 MiB |
+| machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two). **Every source within the source budget compiles in half of it** (tested: the worst shapes, short statements and list literals, take about 113 bytes of tree and code a byte of source, 7.4 MB for 64 KiB); the other half is for the frames and the operands | 16 MiB | 16 MiB (the route sets none; with its 8 MiB arena, a run takes at most 24 MiB of the host's memory) |
 | call bytes | **what one builtin call brings from the store** (QUEUE 211, the caps: a builtin is never cut, so its work is bounded instead). A `read` or a scan past it is an `argument` error; a bigger file is read or scanned in parts, `read(p, offset, n)` or `count_in(p, s, offset, n)`, a call each, so a host can let a request in between | 1 MiB | 1 MiB |
 | kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |

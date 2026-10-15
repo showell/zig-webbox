@@ -135,6 +135,15 @@ pub const Code = struct {
     positions: []const ast.Pos,
     functions: []const Func,
     main: Func,
+
+    /// Its lists given back to the allocator `compile` kept them in.
+    pub fn deinit(code: *const Code, keep: std.mem.Allocator) void {
+        keep.free(code.ops);
+        keep.free(code.enters);
+        keep.free(code.ints);
+        keep.free(code.strings);
+        keep.free(code.positions);
+    }
 };
 
 pub const Error = error{OutOfMemory};
@@ -149,9 +158,22 @@ const Loop = struct {
 };
 
 const Compiler = struct {
+    /// What compiling uses and drops: the loops' jumps, a chain's places.
     a: std.mem.Allocator,
+    /// **WHAT THE CODE KEEPS** (the box's re-review, FEEDBACK 1599c8f): its
+    /// five growing lists, from the machine's own allocator, which gives a
+    /// big list's old room back as it grows. In the arena, each growth left
+    /// its old copy behind: a 64 KiB list literal's 3 MB of code held 26 MB.
+    keep: std.mem.Allocator,
     /// The most arguments a builtin takes (`builtins.most_args`).
     most_args: usize,
+    /// **THE DEPTH BUDGET** (the box's re-review, FEEDBACK 1599c8f): a node
+    /// at this static depth or past it stops any run that reaches it
+    /// (`walk + depth >= budget`, whatever its frame's walk), so it is
+    /// compiled as its enter and nothing under it. The compiler's own
+    /// recursion is bounded as the walker's is: a 64 KiB `1+1+...+1`,
+    /// which the parse takes as one level, overflowed the Zig stack.
+    depth_most: u32,
     ops: std.ArrayList(Op) = .empty,
     enters: std.ArrayList(Enter) = .empty,
     ints: std.ArrayList(i64) = .empty,
@@ -167,7 +189,7 @@ const Compiler = struct {
     loops: std.ArrayList(Loop) = .empty,
 
     fn enter(c: *Compiler, pos: ast.Pos, depth: u32) Error!void {
-        try c.enters.append(c.a, .{ .pos = pos, .depth = depth });
+        try c.enters.append(c.keep, .{ .pos = pos, .depth = depth });
     }
 
     /// An op, the pending enters hung on it; its index.
@@ -179,7 +201,7 @@ const Compiler = struct {
         o.deepest = 0;
         for (c.enters.items[c.pending..n]) |e| o.deepest = @max(o.deepest, e.depth);
         c.pending = n;
-        try c.ops.append(c.a, o);
+        try c.ops.append(c.keep, o);
         return @intCast(c.ops.items.len - 1);
     }
 
@@ -214,7 +236,7 @@ const Compiler = struct {
     }
 
     fn position(c: *Compiler, pos: ast.Pos) Error!u32 {
-        try c.positions.append(c.a, pos);
+        try c.positions.append(c.keep, pos);
         return @intCast(c.positions.items.len - 1);
     }
 
@@ -243,6 +265,10 @@ const Compiler = struct {
 
     fn stmt(c: *Compiler, s: *const ast.Stmt, d: u32) Error!void {
         try c.enter(s.pos, d);
+        if (d >= c.depth_most) {
+            _ = try c.emit(.{ .tag = .nop, .pos = s.pos });
+            return;
+        }
         switch (s.kind) {
             .local => |l| {
                 if (l.value) |e| try c.expr(e, d + 1) else {
@@ -376,6 +402,13 @@ const Compiler = struct {
 
     fn expr(c: *Compiler, e: *const ast.Expr, d: u32) Error!void {
         try c.enter(e.pos, d);
+        if (d >= c.depth_most) {
+            // Never run past its enter: a value in its place keeps the
+            // operands' count.
+            _ = try c.emit(.{ .tag = .push_nil, .pos = e.pos });
+            c.push(1);
+            return;
+        }
         switch (e.kind) {
             .nil => {
                 _ = try c.emit(.{ .tag = .push_nil, .pos = e.pos });
@@ -386,12 +419,12 @@ const Compiler = struct {
                 c.push(1);
             },
             .int => |i| {
-                try c.ints.append(c.a, i);
+                try c.ints.append(c.keep, i);
                 _ = try c.emit(.{ .tag = .push_int, .a = @intCast(c.ints.items.len - 1), .pos = e.pos });
                 c.push(1);
             },
             .string => |s| {
-                try c.strings.append(c.a, s);
+                try c.strings.append(c.keep, s);
                 _ = try c.emit(.{ .tag = .push_string, .a = @intCast(c.strings.items.len - 1), .pos = e.pos });
                 c.push(1);
             },
@@ -445,7 +478,7 @@ const Compiler = struct {
                 const at = try c.position(e.pos);
                 for (entries) |en| {
                     try c.expr(en.value, d + 1);
-                    try c.strings.append(c.a, en.key);
+                    try c.strings.append(c.keep, en.key);
                     _ = try c.emit(.{ .tag = .map_entry, .a = @intCast(c.strings.items.len - 1), .b = at, .pos = en.pos });
                     c.pop(1);
                 }
@@ -477,7 +510,7 @@ const Compiler = struct {
         try c.expr(r, d + 1);
         const n: u32 = @intCast(at.items.len);
         const first: u32 = @intCast(c.positions.items.len);
-        try c.positions.appendSlice(c.a, at.items);
+        try c.positions.appendSlice(c.keep, at.items);
         _ = try c.emit(.{ .tag = .concat, .a = n, .b = first, .pos = pos });
         c.pop(n - 1);
     }
@@ -488,7 +521,7 @@ const Compiler = struct {
             .builtin => |b| {
                 if (b == .print) {
                     const at: u32 = @intCast(c.positions.items.len);
-                    for (call.args) |a| try c.positions.append(c.a, a.pos);
+                    for (call.args) |a| try c.positions.append(c.keep, a.pos);
                     for (call.args) |a| try c.expr(a, d + 1);
                     _ = try c.emit(.{ .tag = .print, .a = argc, .b = at, .pos = pos });
                     c.pop(argc);
@@ -530,18 +563,28 @@ const Compiler = struct {
 /// The program's code, in `a`: **NEVER THE RUN'S ARENA**, which holds
 /// only what the script makes, so a compiled run and a walked one take the
 /// same arena (`interp.Run.machine`).
-pub fn compile(a: std.mem.Allocator, program: *const ast.Program, most_args: usize) Error!Code {
-    var c: Compiler = .{ .a = a, .most_args = most_args };
+/// The program's code: its lists in `keep`, exactly their size (the
+/// caller gives them back with `Code.deinit`), and what compiling drops in
+/// `a`. A failure leaves nothing in `keep`.
+pub fn compile(a: std.mem.Allocator, keep: std.mem.Allocator, program: *const ast.Program, most_args: usize, depth_most: u32) Error!Code {
+    var c: Compiler = .{ .a = a, .keep = keep, .most_args = most_args, .depth_most = depth_most };
+    errdefer {
+        c.ops.deinit(keep);
+        c.enters.deinit(keep);
+        c.ints.deinit(keep);
+        c.strings.deinit(keep);
+        c.positions.deinit(keep);
+    }
     const funcs = try a.alloc(Func, program.functions.len);
     for (program.functions, funcs) |*f, *out| out.* = try c.function(f);
     const main = try c.function(&program.main);
-    return .{
-        .ops = c.ops.items,
-        .enters = c.enters.items,
-        .ints = c.ints.items,
-        .strings = c.strings.items,
-        .positions = c.positions.items,
-        .functions = funcs,
-        .main = main,
-    };
+    // Each list exactly its size; a shrink that cannot be made in place
+    // keeps the list as it is.
+    var code: Code = .{ .ops = &.{}, .enters = &.{}, .ints = &.{}, .strings = &.{}, .positions = &.{}, .functions = funcs, .main = main };
+    code.ops = try c.ops.toOwnedSlice(keep);
+    code.enters = try c.enters.toOwnedSlice(keep);
+    code.ints = try c.ints.toOwnedSlice(keep);
+    code.strings = try c.strings.toOwnedSlice(keep);
+    code.positions = try c.positions.toOwnedSlice(keep);
+    return code;
 }

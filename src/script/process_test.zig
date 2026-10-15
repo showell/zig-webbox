@@ -146,3 +146,50 @@ test "process: an ended run says so again and runs nothing" {
     try testing.expectEqual(process.Outcome.stopped, bad.step(.{}));
     try testing.expectEqual(script.diag.Class.syntax, bad.status().stop.?.class);
 }
+
+test "process: every source within the source budget compiles, in at most half the default machine budget, and runs (the box's re-review, FEEDBACK 1599c8f, item 3)" {
+    // The shapes that take the most of the machine a byte of source: short
+    // statements, a list literal of ints or strings, calls, `if`s. At 4 MiB
+    // and with the parse's and the code's growth left in their arenas,
+    // `x = x + 1` and a list literal stopped `budget machine` at 1:1.
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const Shape = struct { head: []const u8, part: []const u8, tail: []const u8 };
+    for ([_]Shape{
+        .{ .head = "local x = 0\n", .part = "x=x+1\n", .tail = "" },
+        .{ .head = "local x = 0\n", .part = "x = x + 1\n", .tail = "" },
+        .{ .head = "local x = 0\n", .part = "x=1\n", .tail = "" },
+        .{ .head = "local l = {", .part = "1,", .tail = "1}" },
+        .{ .head = "local l = {", .part = "\"\",", .tail = "1}" },
+        .{ .head = "local l = {", .part = "{},", .tail = "1}" },
+        .{ .head = "function f() end\n", .part = "f()\n", .tail = "" },
+        .{ .head = "function f(a) end\n", .part = "f(1)\n", .tail = "" },
+        .{ .head = "", .part = "print(1)\n", .tail = "" },
+        .{ .head = "local x = 1\n", .part = "if x then end\n", .tail = "" },
+    }) |shape| {
+        const room = script.Budgets.default_source_bytes - shape.head.len - shape.tail.len;
+        var src: std.ArrayList(u8) = .empty;
+        defer src.deinit(testing.allocator);
+        try src.appendSlice(testing.allocator, shape.head);
+        for (0..room / shape.part.len) |_| try src.appendSlice(testing.allocator, shape.part);
+        try src.appendSlice(testing.allocator, shape.tail);
+        const budgets: script.Budgets = .{ .steps = 100_000_000, .output_bytes = 1024 * 1024 };
+        const p = try process.Process.start(threaded.io(), testing.allocator, ".zig-cache/no-root", src.items, .atomic, budgets, 0, 16);
+        const compiled = p.machine.budget.held;
+        const stop = p.status().stop;
+        p.kill();
+        if (stop != null or compiled > budgets.machine_bytes / 2) {
+            std.debug.print("{s}...: {d} bytes compiled to {d} of the machine's {d}, stop {?s}\n", .{ shape.part, src.items.len, compiled, budgets.machine_bytes, if (stop) |s| s.message else null });
+            return error.TestUnexpectedResult;
+        }
+        // And it runs, the walker beside it (the gate).
+        var r = script.run(threaded.io(), testing.allocator, ".zig-cache/no-root", src.items, budgets, 0, &big_out);
+        defer r.deinit();
+        if (r.stop) |s| {
+            std.debug.print("{s}...: stopped {d}:{d} {?t}: {s}\n", .{ shape.part, s.line, s.column, s.budget, s.message });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+var big_out: [1024 * 1024]u8 = undefined;
