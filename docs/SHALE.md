@@ -264,11 +264,18 @@ Two things it does not do:
 
 **What a builtin costs:**
 - **Steps.** Every builtin charges steps in proportion to the work it does:
-  a step for each byte or item it touches. A sort is charged its bound
-  before it runs (n log n comparisons, and every byte in each of the log n
-  passes). `charge_test.zig` holds every builtin to this: its own steps at
-  N and at 4N must grow by at least a step a unit. The ones whose work
-  does not grow say why.
+  a step for each byte or item it touches, except **bulk byte work, a
+  step for every 16 bytes** (or part of 16): what a `read` brings, what a
+  scan (`count_lines`, `count_in`, `find_in`) looks at, and the haystack
+  a search (`find`, `contains`, `starts_with`, `ends_with`, `split`,
+  `substitute`) runs over. The bench prices that: a byte read whole costs
+  0.4 ns and a byte scanned 3.7 ns, against 7-15 ns for an interpreted
+  step. The operators are held to it too: a map's key is charged its
+  length wherever it is hashed. A sort is charged its bound before it
+  runs (n log n comparisons, and every byte in each of the log n passes).
+  `charge_test.zig` holds every builtin and operator to this: its own
+  steps at N and at 4N must grow by at least a step a unit (a step for 16,
+  for bulk work). The ones whose work does not grow say why.
 - **Reads** count store calls that look, and **read bytes** the bytes they
   bring.
 - **Changes** count store calls that change, and **change bytes** the bytes
@@ -285,16 +292,16 @@ names the builtin and the argument.
 | `stat(p)` | `{size, kind, modified}`. `kind` is `"file"`, `"directory"` or `"other"`. `modified` is in seconds since 1970, as the host keeps it: metal's FAT to 2 s, and 0 where it keeps none | a read | `store` |
 | `exists(p)` | whether anything is there | a read | `store`, only for a failure other than absence |
 | `is_dir(p)` | whether a folder is there | a read | `store` |
-| `read(p)` | the whole file | a read; each byte a read byte and a step | `budget read_bytes` when the file is longer than what is left; `store` |
+| `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `budget read_bytes` when the file is longer than what is left; `store` |
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count; `store` for a folder or a missing file |
-| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte and a step; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
+| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte, and a step for 16; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
 | `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines` | `argument` for "" or a needle over 64 KiB |
 | `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_lines`, stopping at the first | as `count_in` |
 | `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **one read a folder listed**, not one an entry; a step an entry and each path's bytes | `store`; `argument` for an unknown option |
 | `replace(p, s)` | writes the file whole: never a torn file. There is no plain `write` | a change; each byte a change byte and a step | `store`, logged |
 | `append(p, s)` | adds to the end | as `replace` | `store`, logged |
 | `mkdir(p)` | a folder, and its parents | a change | `store`, logged |
-| `remove(p)`, `remove_tree(p)` | a file, or a folder and everything in it | a change | `store` for a missing path (logged) |
+| `remove(p)`, `remove_tree(p)` | a file, or a folder and everything in it | **a change, however big the tree**: its size is the store's to bound (its depth, the volume), and a script may call it at most `changes` times | `store` for a missing path (logged). A tree the store fails partway through is logged as one effect with the store's error, and what it had removed by then is gone |
 
 **`walk`'s options:**
 - `depth`: 1 lists only the folder's own entries, which is `ls` with each
@@ -416,8 +423,10 @@ that hits one stops cleanly, naming it, with its line and column.
 chat is about 190 MB. Use what the site keeps instead (the `.count`
 sidecars, `walk`'s sizes and times), read parts of files, and use
 `budget()` to stop at a point of your own. The cookbook does all three.
-At a step a byte, the site's 2M steps cover at most about 2 MB of
-scanning or reading in one run.
+At a step for 16 bytes, the site's whole read budget is in reach: its
+16 MiB of read bytes cost 1M of its 2M steps, read or scanned. On a
+site-shaped folder of 3.9 MB, the cookbook's scans went from about 2.8M
+steps at a step a byte to about 0.26M.
 
 ### The Zig stack
 
@@ -529,12 +538,12 @@ budgets, and changes nothing.
 - **No dry run.** Scripts just run (Steve).
 - **No effects beyond the store.** No network, no clock but `now()`, no
   host.
-- **A step a byte** for every builtin's work: simple, and the same
-  everywhere. The bench says bulk byte work (a whole read, a scan) is
-  cheaper than an interpreted step, so this overprices it 3 to 30 times.
-  The site's step budget is the place to account for that, if ever.
-- **New builtins never break a script.** A script's own names take
-  precedence; Lua's library names and `attempt` are the exceptions.
+- **A step a byte for a builtin's work, and a step for 16 bytes of bulk
+  byte work** (Steve, 209): reads, scans and the haystacks of searches,
+  which the bench measures at 3 to 30 times cheaper than a step.
+- **A function is called only after it is declared,** and a name that is
+  a value in scope can't be called (Steve, 209). So a new builtin never
+  changes what a script does.
 - **`continue` is in; `goto` is not.** `continue` is the one new keyword,
   added while scripts are few. No more keywords are planned.
 - **Errors are values only through `attempt`**, and budgets never.

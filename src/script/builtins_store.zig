@@ -159,7 +159,7 @@ fn readPart(run: *Run, pos: ast.Pos, p: Path, offset: u64, n: ?u64) Error!Value 
     const buf = run.alloc.alloc(u8, @intCast(want)) catch return run.oom(pos);
     const got = store.readAt(run.io, run.alloc, p.full, offset, buf) catch |e| return storeFailed(run, pos, .read, p.rel, e);
     run.read_bytes += got;
-    try run.charge(pos, got);
+    try bi.chargeBytes(run, pos, got);
     return .{ .string = buf[0..got] };
 }
 
@@ -225,7 +225,7 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
         if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
         const got = store.readAt(run.io, run.alloc, p.full, at, buf[kept..][0..want]) catch |e| return storeFailed(run, pos, b, p.rel, e);
         run.read_bytes += got;
-        try run.charge(pos, got);
+        try bi.chargeBytes(run, pos, got);
         if (got == 0) break; // the file shrank under the scan
         at += got;
         const window = buf[0 .. kept + got];

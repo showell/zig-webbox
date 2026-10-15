@@ -144,6 +144,17 @@ pub fn listOf(run: *Run, pos: ast.Pos, items: []const Value) Error!Value {
     return .{ .table = out };
 }
 
+/// **THE PRICE OF A BYTE OF BULK WORK** (metal-vmm QUEUE 209, Steve): a
+/// step for every 16 bytes, or part of 16, that a read brings, a scan looks
+/// at or a search runs over. Measured: a byte read whole costs 0.4 ns, a
+/// byte scanned 3.7 ns, an interpreted step 7-15 ns. Everything else a
+/// builtin touches stays a step a byte.
+pub const bytes_per_step = 16;
+
+pub fn chargeBytes(run: *Run, pos: ast.Pos, n: u64) Error!void {
+    return run.charge(pos, std.math.divCeil(u64, n, bytes_per_step) catch unreachable);
+}
+
 /// An optional `-`, then decimal digits, within 64 bits; null otherwise.
 pub fn parseInteger(s: []const u8) ?i64 {
     const digits = if (s.len > 0 and s[0] == '-') s[1..] else s;

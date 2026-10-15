@@ -57,7 +57,7 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const old = try bi.stringArg(run, pos, .substitute, args[1], "what it replaces");
     const new = try bi.stringArg(run, pos, .substitute, args[2], "what it puts instead");
     if (old.len == 0) return run.fail(pos, .argument, "`substitute` of \"\" is an error: there is nothing to replace", .{});
-    try run.charge(pos, str.len);
+    try bi.chargeBytes(run, pos, str.len);
     const finder = try Finder.init(run, pos, old);
     var n: usize = 0;
     var at: usize = 0;
@@ -84,13 +84,14 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// the search must cost about that. std's search costs up to haystack ×
 /// needle (a long near-match, `rep("a", 30000) .. "b"` in a run of `a`,
 /// took 75 s inside the step budget). A needle of up to `short` bytes is
-/// searched by std (at most `short` compares a byte); a longer one by
-/// Knuth-Morris-Pratt, linear, its table charged a step a byte.
+/// searched by std (at most `short` compares a byte, which a step for 16
+/// bytes still covers); a longer one by Knuth-Morris-Pratt, linear, its
+/// table charged a step a byte.
 pub const Finder = struct {
     needle: []const u8,
     table: ?[]u32 = null,
 
-    pub const short = 16;
+    pub const short = 4;
 
     pub fn init(run: *Run, pos: ast.Pos, needle: []const u8) Error!Finder {
         if (needle.len <= short) return .{ .needle = needle };
@@ -127,11 +128,15 @@ fn split(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .split, args[0], "its string");
     const sep = try bi.stringArg(run, pos, .split, args[1], "its separator");
     if (sep.len == 0) return run.fail(pos, .argument, "`split` by \"\" is an error: there is no empty separator", .{});
-    try run.charge(pos, str.len);
+    try bi.chargeBytes(run, pos, str.len);
     const finder = try Finder.init(run, pos, sep);
     const out = try run.newTable(pos);
     var at: usize = 0;
-    while (finder.find(str, at)) |i| : (at = i + sep.len) out.list.append(run.alloc, .{ .string = str[at..i] }) catch return run.oom(pos);
+    while (finder.find(str, at)) |i| : (at = i + sep.len) {
+        // A piece is an item made: a step each, as the haystack is cheap.
+        try run.charge(pos, 1);
+        out.list.append(run.alloc, .{ .string = str[at..i] }) catch return run.oom(pos);
+    }
     out.list.append(run.alloc, .{ .string = str[at..] }) catch return run.oom(pos);
     out.kind = .list;
     return .{ .table = out };
@@ -193,7 +198,7 @@ fn looks(comptime l: Look) bi.Impl {
             };
             const str = try bi.stringArg(run, pos, b, args[0], "its string");
             const sub_s = try bi.stringArg(run, pos, b, args[1], "what it looks for");
-            try run.charge(pos, str.len);
+            try bi.chargeBytes(run, pos, str.len);
             return .{ .boolean = switch (l) {
                 .starts_with => std.mem.startsWith(u8, str, sub_s),
                 .ends_with => std.mem.endsWith(u8, str, sub_s),
@@ -207,7 +212,7 @@ fn looks(comptime l: Look) bi.Impl {
 fn find(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .find, args[0], "its string");
     const sub_s = try bi.stringArg(run, pos, .find, args[1], "what it looks for");
-    try run.charge(pos, str.len);
+    try bi.chargeBytes(run, pos, str.len);
     const at = (try Finder.init(run, pos, sub_s)).find(str, 0) orelse return .nil;
     return .{ .int = @intCast(at + 1) };
 }

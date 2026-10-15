@@ -220,12 +220,13 @@ test "builtins: every builtin's work is charged, so one call cannot hide a milli
     try f.init();
     defer f.deinit();
     // A string of a million bytes built in twenty doublings, then searched:
-    // the steps the search takes are counted. The build alone, measured,
-    // then the build and the search with half a million steps to spare.
+    // the steps the search takes are counted (a step for 16 bytes: 65,536
+    // for the million). The build alone, measured, then the build and the
+    // search with 30,000 steps to spare.
     var built = f.run("local s = \"x\" for i = 1, 20 do s = s .. s end", .{});
     defer built.deinit();
     try testing.expect(built.finished());
-    var r = f.run("local s = \"x\" for i = 1, 20 do s = s .. s end print(contains(s, \"y\"))", .{ .steps = built.steps + 500_000 });
+    var r = f.run("local s = \"x\" for i = 1, 20 do s = s .. s end print(contains(s, \"y\"))", .{ .steps = built.steps + 30_000 });
     defer r.deinit();
     try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
 }
@@ -467,7 +468,7 @@ test "builtins: count_in, find_in and count_lines agree with the whole file's ow
     try f.expectStop("print(count_in(\"top.txt\", \"\"))", .argument);
 }
 
-test "builtins: a scan is one store read, every byte counted against the read budget and charged a step" {
+test "builtins: a scan is one store read, every byte counted against the read budget, and charged a step for 16" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -476,7 +477,8 @@ test "builtins: a scan is one store read, every byte counted against the read bu
     var r = f.run("print(count_lines(\"big.txt\")) print(budget().reads, budget().read_bytes)", .{ .reads = 10, .read_bytes = 1_000_000 });
     defer r.deinit();
     try testing.expect(std.mem.endsWith(u8, r.output, "\t800000\n") and std.mem.indexOf(u8, r.output, "\n9\t") != null);
-    try testing.expect(r.steps > 200_000);
+    // 200,000 bytes at a step for 16.
+    try testing.expect(r.steps > 200_000 / 16);
     var over = f.run("print(count_lines(\"big.txt\"))", .{ .read_bytes = 150_000 });
     defer over.deinit();
     try testing.expectEqual(script.diag.Budget.read_bytes, over.stop.?.budget.?);

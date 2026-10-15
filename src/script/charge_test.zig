@@ -32,6 +32,9 @@ const Case = struct {
     call: []const u8 = "",
     store: Setup = .none,
     why: []const u8 = "",
+    /// How many units of N a step must cover at most: 1, or for bulk byte
+    /// work (`bi.bytes_per_step`) 16.
+    per: u64 = 1,
 };
 
 const cases = [_]Case{
@@ -40,10 +43,10 @@ const cases = [_]Case{
     .{ .b = .stat, .grows = .constant, .why = "one stat, its path's bytes charged" },
     .{ .b = .exists, .grows = .constant, .why = "one lookup, its path's bytes charged" },
     .{ .b = .is_dir, .grows = .constant, .why = "one stat, its path's bytes charged" },
-    .{ .b = .read, .grows = .scales, .store = .big_file, .call = "local x = read(\"big\")" },
-    .{ .b = .count_lines, .grows = .scales, .store = .big_file, .call = "local x = count_lines(\"big\")" },
-    .{ .b = .count_in, .grows = .scales, .store = .big_file, .call = "local x = count_in(\"big\", \"ab\")" },
-    .{ .b = .find_in, .grows = .scales, .store = .big_file, .call = "local x = find_in(\"big\", \"zz\")" },
+    .{ .b = .read, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = read(\"big\")" },
+    .{ .b = .count_lines, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = count_lines(\"big\")" },
+    .{ .b = .count_in, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = count_in(\"big\", \"ab\")" },
+    .{ .b = .find_in, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = find_in(\"big\", \"zz\")" },
     .{ .b = .replace, .grows = .scales, .setup = "local s = rep(\"x\", N)", .call = "replace(\"out\", s)" },
     .{ .b = .append, .grows = .scales, .setup = "local s = rep(\"x\", N)", .call = "append(\"out\", s)" },
     .{ .b = .mkdir, .grows = .constant, .why = "one folder, its path's bytes charged" },
@@ -51,12 +54,12 @@ const cases = [_]Case{
     .{ .b = .remove_tree, .grows = .constant, .why = "the tree's size is the store's to bound (max_depth, the volume); a script may call it at most `changes` times" },
     .{ .b = .walk, .grows = .scales, .store = .many_files, .call = "local x = walk(\"many\")" },
     // strings
-    .{ .b = .split, .grows = .scales, .setup = "local s = rep(\"a,\", N)", .call = "local x = split(s, \",\")" },
+    .{ .b = .split, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a,\", N)", .call = "local x = split(s, \",\")" },
     .{ .b = .join, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, \"ab\") end", .call = "local x = join(l, \",\")" },
-    .{ .b = .starts_with, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = starts_with(s, \"b\")" },
-    .{ .b = .ends_with, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = ends_with(s, \"b\")" },
-    .{ .b = .contains, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = contains(s, \"b\")" },
-    .{ .b = .find, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = find(s, \"b\")" },
+    .{ .b = .starts_with, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a\", N)", .call = "local x = starts_with(s, \"b\")" },
+    .{ .b = .ends_with, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a\", N)", .call = "local x = ends_with(s, \"b\")" },
+    .{ .b = .contains, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a\", N)", .call = "local x = contains(s, \"b\")" },
+    .{ .b = .find, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a\", N)", .call = "local x = find(s, \"b\")" },
     .{ .b = .sub, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = sub(s, 1, -1)" },
     .{ .b = .trim, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = trim(s)" },
     .{ .b = .upper, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = upper(s)" },
@@ -67,7 +70,7 @@ const cases = [_]Case{
     .{ .b = .words, .grows = .scales, .setup = "local s = rep(\"a \", N)", .call = "local x = words(s)" },
     .{ .b = .like, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = like(s, \"*b\")" },
     .{ .b = .rep, .grows = .scales, .call = "local x = rep(\"ab\", N)" },
-    .{ .b = .substitute, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = substitute(s, \"a\", \"b\")" },
+    .{ .b = .substitute, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a\", N)", .call = "local x = substitute(s, \"a\", \"b\")" },
     // numbers
     .{ .b = .min, .grows = .constant, .why = "at most four integers" },
     .{ .b = .max, .grows = .constant, .why = "at most four integers" },
@@ -185,15 +188,15 @@ test "every operator whose work grows with a value charges at least a step a byt
     }
 }
 
-test "every builtin whose work grows charges at least a step for each byte or item more (each constant one says why)" {
+test "every builtin whose work grows charges at least a step for each byte or item more, or for each 16 of bulk byte work (each constant one says why)" {
     const n = 500;
     for (cases) |c| switch (c.grows) {
         .constant => try testing.expect(c.why.len > 0),
         .scales => {
             const small = try callSteps(c, n);
             const large = try callSteps(c, 4 * n);
-            if (large < small + 3 * n) {
-                std.debug.print("`{s}`: {d} steps at {d}, {d} at {d}: less than a step a unit more\n", .{ @tagName(c.b), small, n, large, 4 * n });
+            if (large < small + 3 * n / c.per) {
+                std.debug.print("`{s}`: {d} steps at {d}, {d} at {d}: less than a step for {d} units more\n", .{ @tagName(c.b), small, n, large, 4 * n, c.per });
                 return error.TestUnexpectedResult;
             }
         },
