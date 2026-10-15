@@ -155,3 +155,14 @@ test "yield: inside a list or map literal being built, the literal goes on (the 
     try expectOutput("function f() yield() return 3 end local l = {1, f(), f(), 4} print(l[2] + l[3] + #l)", "10\n");
     try expectOutput("function f() yield() return \"v\" end local m = {a = f(), b = 2, c = f()} print(m.a .. m.c, m.b)", "vv\t2\n");
 }
+
+test "yield: a string reached many times is kept once (the box's review of M1)" {
+    // 160 KB pushed 200 times is 32 MB copied apiece, past the kept budget;
+    // shared, it is 160 KB.
+    var r = runWith("local s = rep(\"x\", 160000) local l = {} for i = 1, 200 do push(l, s) end yield() print(#l, #l[200])", .{ .steps = 100_000_000 });
+    defer r.deinit();
+    if (r.stop) |s| std.debug.print("{s}\n", .{s.message});
+    try testing.expect(r.finished());
+    try testing.expectEqualStrings("200\t160000\n", r.output);
+    try testing.expect(r.arena_bytes < 512 * 1024);
+}

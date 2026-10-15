@@ -10,8 +10,9 @@
 //!   yield: the code and its literals live in the parse's own arena, and
 //!   a builtin's buffers (`Run.scan_buf`) are made again when next needed.
 //! - **Shared stays shared:** a table reached twice is copied once, and
-//!   both references go to the copy. Strings have no identity a script can
-//!   see, so each is copied where it is reached.
+//!   both references go to the copy. A string (a start and a length)
+//!   reached twice is copied once, too: strings have no identity a script
+//!   can see, but a copy of each reference would multiply what is kept.
 //! - **No recursion:** a table's contents are copied from a worklist, so a
 //!   list nested a million deep is copied in a loop.
 //! - **Charged and capped:** a step for each value copied and each 16 bytes
@@ -34,6 +35,10 @@ const Copier = struct {
     pos: ast.Pos,
     /// Old table -> its copy.
     seen: std.AutoHashMapUnmanaged(*Table, *Table) = .empty,
+    /// **A STRING REACHED TWICE IS COPIED ONCE** (the box's review of M1: a
+    /// 160 KB string in a list 200 times was copied 200 times, past the
+    /// kept budget): by where it starts and how long it is.
+    strings: std.AutoHashMapUnmanaged(struct { ptr: usize, len: usize }, []const u8) = .empty,
     /// Copies whose contents still point into the old arena.
     todo: std.ArrayList(struct { old: *Table, new: *Table }) = .empty,
     values: u64 = 0,
@@ -41,12 +46,19 @@ const Copier = struct {
 
     fn deinit(c: *Copier) void {
         c.seen.deinit(c.r.machine);
+        c.strings.deinit(c.r.machine);
         c.todo.deinit(c.r.machine);
     }
 
     fn string(c: *Copier, s: []const u8) Error![]const u8 {
+        const g = c.strings.getOrPut(c.r.machine, .{ .ptr = @intFromPtr(s.ptr), .len = s.len }) catch return c.r.oom(c.pos);
+        if (g.found_existing) return g.value_ptr.*;
         c.bytes += s.len;
-        return c.r.alloc.dupe(u8, s) catch c.r.budgetStop(c.pos, .kept);
+        g.value_ptr.* = c.r.alloc.dupe(u8, s) catch {
+            _ = c.strings.remove(.{ .ptr = @intFromPtr(s.ptr), .len = s.len });
+            return c.r.budgetStop(c.pos, .kept);
+        };
+        return g.value_ptr.*;
     }
 
     /// `v` in the fresh arena; a table's contents follow from `todo`.
