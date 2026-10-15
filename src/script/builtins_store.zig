@@ -395,11 +395,13 @@ fn storeChange(run: *Run, pos: ast.Pos, c: Change, args: []const Value) Error!Va
     run.effects.ensureUnusedCapacity(a, 1) catch return run.oom(pos);
     // The store takes removing what is not there as done; a script's
     // removal of a missing path is an error, logged (docs/SHALE.md, "The store").
-    const missing: bool = switch (c) {
-        .remove, .remove_tree => (store.statOrNull(io, a, p.full) catch null) == null,
-        else => false,
+    // **ONLY WHAT ISN'T THERE IS MISSING** (209(a)): any other failure to
+    // look is the store's own, named, logged, and why the run stopped.
+    const looked: ?anyerror = switch (c) {
+        .remove, .remove_tree => if (store.statOrNull(io, a, p.full)) |st| (if (st == null) error.FileNotFound else null) else |e| e,
+        else => null,
     };
-    const outcome: ?anyerror = if (missing) error.FileNotFound else switch (c) {
+    const outcome: ?anyerror = if (looked) |e| e else switch (c) {
         .replace => if (store.replace(io, a, p.full, data, .{})) |_| null else |e| e,
         .append => if (store.append(io, a, p.full, data)) |_| null else |e| e,
         .mkdir => if (store.makeDir(io, a, p.full)) |_| null else |e| e,

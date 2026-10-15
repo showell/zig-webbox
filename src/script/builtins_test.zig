@@ -624,3 +624,22 @@ test "builtins: every scan of a run reuses one buffer: five hundred files scanne
     try testing.expect(r.finished());
     try testing.expect(r.arena_bytes < 2 * 1024 * 1024);
 }
+
+test "builtins: a store error is never read as missing: a remove that can't look names the store's own error (209(a))" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    // A link that loops: stat fails with SymLinkLoop, not FileNotFound.
+    try f.tmp.dir.symLink(io, "loop", "data/loop", .{});
+    var r = f.run("remove(\"loop/x\")", .{});
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Class.store, r.stop.?.class);
+    try testing.expectEqual(@as(usize, 1), r.effects.len);
+    try testing.expect(!std.mem.eql(u8, "FileNotFound", r.effects[0].outcome));
+    try testing.expect(std.mem.indexOf(u8, r.stop.?.message, r.effects[0].outcome) != null);
+    // What isn't there is still missing.
+    var m = f.run("remove(\"chat/none.md\")", .{});
+    defer m.deinit();
+    try testing.expectEqualStrings("FileNotFound", m.effects[0].outcome);
+}
