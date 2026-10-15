@@ -72,6 +72,11 @@ pub const Run = struct {
     base: usize = 0,
     ret: Value = .nil,
     stop: ?diag.Stop = null,
+    /// **THE LAST STRING A `..` CHAIN BUILT** (`concatChain`): its buffer,
+    /// how much of it the string fills, and how big it is.
+    tail_ptr: ?[*]u8 = null,
+    tail_used: usize = 0,
+    tail_cap: usize = 0,
     /// The top-level `const`s, each null until its line has run.
     consts: []?Value = &.{},
     /// The lowest frame address the walk reached: the Zig stack it took,
@@ -230,23 +235,26 @@ pub const Run = struct {
         return .normal;
     }
 
+    /// **`for x in l`**: the first `#l` items, `#l` as it was when the loop
+    /// began (an item pushed meanwhile is not visited), each as it is when
+    /// the loop reaches it. In place: a loop copies nothing, so a loop over
+    /// a list inside another costs no arena (metal-vmm QUEUE 208(a)).
     noinline fn listFor(self: *Run, pos: ast.Pos, f: *const ListFor) Error!Flow {
         const l = try self.eval(f.list);
-        const items: []const Value = switch (l) {
+        const t = switch (l) {
             .table => |t| switch (t.kind) {
-                .empty => &.{},
-                .list => blk: {
-                    // As the list was when the loop began.
-                    try self.charge(pos, t.list.items.len);
-                    break :blk self.alloc.dupe(Value, t.list.items) catch return self.oom(pos);
-                },
+                .empty => return .normal,
+                .list => t,
                 .map => return self.fail(f.list.pos, .type, "`for x in` a map: walk `keys(m)` instead", .{}),
             },
             else => return self.fail(f.list.pos, .type, "`for x in` takes a list, given {s}", .{l.typeName()}),
         };
-        for (items) |x| {
+        const n = t.list.items.len;
+        try self.charge(pos, n);
+        for (0..n) |i| {
             try self.charge(pos, 1);
-            self.slot(f.slot).* = x;
+            // A list never shrinks, so the item is there.
+            self.slot(f.slot).* = t.list.items[i];
             switch (try self.block(f.body)) {
                 .normal => {},
                 .@"break" => break,
@@ -410,11 +418,12 @@ pub const Run = struct {
             const l = try self.eval(le);
             return if (l.truthy()) l else self.eval(re);
         }
+        if (op == .concat) return self.concatChain(pos, le, re);
         const l = try self.eval(le);
         const r = try self.eval(re);
         return switch (op) {
             .add, .sub, .mul, .idiv, .mod => self.arith(pos, op, l, r),
-            .concat => self.concat(pos, l, r),
+            .concat => unreachable, // `concatChain`
             .eq, .ne => .{ .boolean = (try self.equal(pos, l, r)) == (op == .eq) },
             .lt, .le, .gt, .ge => self.compare(pos, op, l, r),
             .@"and", .@"or" => unreachable,
@@ -448,16 +457,86 @@ pub const Run = struct {
         return .{ .int = result orelse return self.fail(pos, .arithmetic, "{d} {s} {d} overflows 64 bits", .{ a, opText(op), b }) };
     }
 
-    noinline fn concat(self: *Run, pos: ast.Pos, l: Value, r: Value) Error!Value {
-        var a_buf: [24]u8 = undefined;
-        var b_buf: [24]u8 = undefined;
-        const a = try self.concatPart(pos, l, &a_buf);
-        const b = try self.concatPart(pos, r, &b_buf);
-        try self.charge(pos, a.len + b.len);
-        const s = self.alloc.alloc(u8, a.len + b.len) catch return self.oom(pos);
-        @memcpy(s[0..a.len], a);
-        @memcpy(s[a.len..], b);
-        return .{ .string = s };
+    /// **A CHAIN OF `..`, JOINED ONCE** (metal-vmm QUEUE 208(a)): `a .. b ..
+    /// c` (right-associative, so one chain) is every part evaluated left to
+    /// right, then one string. When the first part is the string the last
+    /// chain built, whole, and its buffer has room, the rest is written
+    /// after it in place: `s = s .. x` in a loop is linear, not quadratic,
+    /// in time and arena. A buffer outgrown is copied to one twice the
+    /// size. A string is never changed: the room is past the end of every
+    /// slice of the buffer. Each byte written is a step.
+    noinline fn concatChain(self: *Run, pos: ast.Pos, le: *const ast.Expr, re: *const ast.Expr) Error!Value {
+        // The parts, and the `..` before each but the first (the first's is
+        // its own: the chain's first operator).
+        var small_parts: [8]Value = undefined;
+        var small_ops: [8]ast.Pos = undefined;
+        var n: usize = 2;
+        var r = re;
+        while (r.kind == .binary and r.kind.binary.op == .concat) : (r = r.kind.binary.right) n += 1;
+        const parts = if (n <= small_parts.len) small_parts[0..n] else self.alloc.alloc(Value, n) catch return self.oom(pos);
+        const ops = if (n <= small_ops.len) small_ops[0..n] else self.alloc.alloc(ast.Pos, n) catch return self.oom(pos);
+        parts[0] = try self.eval(le);
+        ops[0] = pos;
+        ops[1] = pos;
+        r = re;
+        var k: usize = 1;
+        while (r.kind == .binary and r.kind.binary.op == .concat) : (r = r.kind.binary.right) {
+            parts[k] = try self.eval(r.kind.binary.left);
+            ops[k + 1] = r.pos;
+            k += 1;
+        }
+        parts[k] = try self.eval(r);
+        // Checked as the nested joins would have: the innermost pair, then
+        // outward.
+        var total: usize = 0;
+        var at = n;
+        while (at > 0) {
+            at -= 1;
+            const i = if (at == n - 1) n - 2 else if (at == n - 2) n - 1 else at;
+            total += try self.partLen(if (i == 0) ops[0] else ops[@max(i, 1)], parts[i]);
+        }
+        const first: []const u8 = switch (parts[0]) {
+            .string => |x| x,
+            else => "",
+        };
+        const in_place = parts[0] == .string and first.len > 0 and first.ptr == self.tail_ptr and first.len == self.tail_used and total <= self.tail_cap;
+        const buf: [*]u8 = if (in_place) self.tail_ptr.? else blk: {
+            // Outgrown: twice the size, so a string built a piece at a time
+            // is copied a logarithmic number of times.
+            const grow = parts[0] == .string and first.len > 0 and first.ptr == self.tail_ptr and first.len == self.tail_used;
+            const cap = if (grow) @max(2 * total, 64) else total;
+            const fresh = self.alloc.alloc(u8, cap) catch return self.oom(pos);
+            self.tail_cap = cap;
+            break :blk fresh.ptr;
+        };
+        var len: usize = if (in_place) first.len else 0;
+        try self.charge(pos, total - len);
+        for (parts[if (in_place) 1 else 0..]) |v| {
+            switch (v) {
+                .string => |x| @memcpy(buf[len..][0..x.len], x),
+                .int => |i| _ = std.fmt.bufPrint(buf[len..total], "{d}", .{i}) catch unreachable,
+                else => unreachable,
+            }
+            len += textLen(v);
+        }
+        self.tail_ptr = buf;
+        self.tail_used = total;
+        return .{ .string = buf[0..total] };
+    }
+
+    fn textLen(v: Value) usize {
+        return switch (v) {
+            .string => |x| x.len,
+            .int => |i| std.fmt.count("{d}", .{i}),
+            else => unreachable,
+        };
+    }
+
+    fn partLen(self: *Run, pos: ast.Pos, v: Value) Error!usize {
+        return switch (v) {
+            .string, .int => textLen(v),
+            else => self.fail(pos, .type, "`..` takes strings and integers, not {s}", .{v.typeName()}),
+        };
     }
 
     noinline fn compare(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
@@ -482,14 +561,6 @@ pub const Run = struct {
             .ge => order != .lt,
             else => unreachable,
         } };
-    }
-
-    fn concatPart(self: *Run, pos: ast.Pos, v: Value, buf: *[24]u8) Error![]const u8 {
-        return switch (v) {
-            .string => |s| s,
-            .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable,
-            else => self.fail(pos, .type, "`..` takes strings and integers, not {s}", .{v.typeName()}),
-        };
     }
 
     pub fn equal(self: *Run, pos: ast.Pos, l: Value, r: Value) Error!bool {

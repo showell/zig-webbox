@@ -43,6 +43,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_script.addArgs(a);
     b.step("script", "run a Shale script: SHALE_ROOT=<data folder> zig build script -- <file.shale>").dependOn(&run_script.step);
 
+    // **SHALE'S HOT PATHS, TIMED** (src/script_bench.zig): no tier runs it.
+    const script_bench = b.addExecutable(.{ .name = "script-bench", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/script_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "webbox", .module = b.addModule("webbox_release", .{
+            .root_source_file = b.path("src/webbox.zig"),
+            .imports = &.{.{ .name = "host_io", .module = host_io }},
+        }) }},
+    }) });
+    b.step("script-bench", "time Shale's hot paths (ReleaseSafe)").dependOn(&b.addRunArtifact(script_bench).step);
+
     // **THE SHALE SIGNER** (src/shale_sign.zig, metal-vmm QUEUE 200): the
     // key pair, made once, and a script signed for a target.
     //   zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]

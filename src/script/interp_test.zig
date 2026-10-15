@@ -268,3 +268,64 @@ test "run: a top-level const is seen by the functions declared after it, and is 
     // Called before the const's line has run: an error, not nil.
     try expectStop("const A = g() function g() return f() end function f() return A end", .name, null);
 }
+
+// ── 208(a): `..` joined once, in place; `for x in` without a copy ────────
+
+test "run: a chain of `..` built in place never changes a string already made, however it is shared or cut" {
+    // `b` extends `a`'s buffer; `c`, from `a` again, must not see `b`'s
+    // bytes; a cut of the growing string keeps its own bytes.
+    try expectOutput("local a = \"ab\" .. \"c\" local b = a .. \"x\" local c = a .. \"y\" print(a, b, c)", "abc\tabcx\tabcy\n");
+    try expectOutput(
+        \\local s = ""
+        \\for i = 1, 100 do s = s .. i .. "," end
+        \\local head = sub(s, 1, 6)
+        \\local t = s
+        \\s = s .. "END"
+        \\print(head, #t, #s, sub(s, -4), sub(t, -4))
+    , "1,2,3,\t292\t295\t,END\t100,\n");
+    try expectOutput("local s = \"x\" s = s .. s .. s print(s, #(s .. 1 .. 2))", "xxx\t5\n");
+    // A shorter string in the growing buffer (an alias taken earlier, a
+    // prefix cut by `sub`) joined after the buffer grew past it: a fresh
+    // string, never written over the buffer's newer bytes.
+    try expectOutput(
+        \\local s = ""
+        \\for i = 1, 10 do s = s .. "ab" end
+        \\local a = s
+        \\local p = sub(s, 1, 4)
+        \\s = s .. "XY"
+        \\local c = a .. "zz"
+        \\local d = p .. "!"
+        \\print(sub(s, -4), sub(c, -4), d, #s)
+    , "abXY\tabzz\tabab!\t22\n");
+}
+
+test "run: a chain of `..` stops at the part the nested joins would have stopped at, there" {
+    // The innermost pair is checked first: `1 .. {}`, at the second `..`.
+    var r = runWith("local x = nil .. 1 .. {}", .{});
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Class.type, r.stop.?.class);
+    try testing.expectEqual(@as(u32, 20), r.stop.?.column);
+    try testing.expect(std.mem.indexOf(u8, r.stop.?.message, "empty table") != null);
+    var q = runWith("local x = nil .. \"a\"", .{});
+    defer q.deinit();
+    try testing.expectEqual(@as(u32, 15), q.stop.?.column);
+}
+
+test "run: a string built a piece at a time is linear: 20,000 lines in well under the default budgets" {
+    var r = runWith("local s = \"\" for i = 1, 20000 do s = s .. \"line \" .. i .. \"\\n\" end print(#s)", .{});
+    defer r.deinit();
+    try testing.expect(r.finished());
+    try testing.expectEqualStrings("208894\n", r.output);
+    // About the bytes written, and twice the string's size in arena.
+    try testing.expect(r.steps < 1_000_000);
+    try testing.expect(r.arena_bytes < 2 * 1024 * 1024);
+}
+
+test "run: `for x in l` visits the first #l items, each as it is when reached, and copies nothing" {
+    try expectOutput("local l = {1, 2, 3} for x in l do push(l, x) l[3] = 30 print(x) end print(#l)", "1\n2\n30\n6\n");
+    // A loop over a list inside a loop over it: no arena for the inner.
+    var r = runWith("local l = {} for i = 1, 300 do push(l, i) end local s = 0 for a in l do for b in l do s = s + 1 end end print(s)", .{});
+    defer r.deinit();
+    try testing.expectEqualStrings("90000\n", r.output);
+    try testing.expect(r.arena_bytes < 64 * 1024);
+}

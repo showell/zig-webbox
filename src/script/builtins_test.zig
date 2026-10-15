@@ -220,8 +220,12 @@ test "builtins: every builtin's work is charged, so one call cannot hide a milli
     try f.init();
     defer f.deinit();
     // A string of a million bytes built in twenty doublings, then searched:
-    // the steps the search takes are counted.
-    var r = f.run("local s = \"x\" for i = 1, 20 do s = s .. s end print(contains(s, \"y\"))", .{ .steps = 2_500_000 });
+    // the steps the search takes are counted. The build alone, measured,
+    // then the build and the search with half a million steps to spare.
+    var built = f.run("local s = \"x\" for i = 1, 20 do s = s .. s end", .{});
+    defer built.deinit();
+    try testing.expect(built.finished());
+    var r = f.run("local s = \"x\" for i = 1, 20 do s = s .. s end print(contains(s, \"y\"))", .{ .steps = built.steps + 500_000 });
     defer r.deinit();
     try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
 }
