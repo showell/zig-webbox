@@ -134,6 +134,13 @@ pub fn Server(comptime S: type) type {
             };
             var listener = try addr.listen(io, .{ .reuse_address = true });
             defer listener.deinit(io);
+            // **BETWEEN HANDLERS, A SLICE AT A TIME** (metal-vmm QUEUE 211):
+            // the site's background work on a thread of its own.
+            if (@hasDecl(S, "between")) {
+                _ = std.Thread.spawn(.{}, betweenLoop, .{ io, &never_stop }) catch |e| {
+                    std.debug.print("{s}: no thread for work between requests ({s}); a background run is never stepped\n", .{ options.name, @errorName(e) });
+                };
+            }
 
             std.debug.print("{s}: http://localhost:{d}, bound to {f}  {s}\n", .{ options.name, port, addr, options.routes_hint });
 
@@ -153,6 +160,23 @@ pub fn Server(comptime S: type) type {
                     std.debug.print("spawn failed ({s}); answered 503\n", .{@errorName(e)});
                     busy(io, stream);
                 };
+            }
+        }
+
+        /// **ONE SLICE A TURN, AND A WAITING HANDLER FIRST** (metal-vmm QUEUE
+        /// 211, Steve's model: "on Linux, one runner thread takes the turn
+        /// for each slice"): the site's `between` under the turn, then the
+        /// turn let go, and taken again only once no handler waits for it,
+        /// so a request arriving mid-run waits at most one slice. With
+        /// nothing to do, it sleeps `between_idle_ms`. A mutex makes no
+        /// promise of fairness, so the waiting handlers are counted.
+        fn betweenLoop(io: Io, stop: *const std.atomic.Value(bool)) void {
+            while (!stop.load(.acquire)) {
+                turn.lockUncancelable(io);
+                const more = S.between(io, nowUnix(io));
+                turn.unlock(io);
+                while (turn_waiting.load(.acquire) > 0 and !stop.load(.acquire)) std.Thread.yield() catch {};
+                if (!more) sleepMs(io, between_idle_ms) catch return;
             }
         }
 
@@ -326,7 +350,7 @@ pub fn Server(comptime S: type) type {
             var peer_buf: [64]u8 = undefined;
             b.peer = peerText(&peer_buf, stream.socket.address);
             b.at_unix_ms = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_ms));
-            turn.lockUncancelable(io);
+            takeTurn(io);
             // The body read before the turn, handed to the handler's read
             // as it is (170.5: an upload in memory once, not twice).
             http.held_body = held_body;
@@ -832,6 +856,21 @@ fn durableNow() bool {
     return durable.now();
 }
 
+/// The handlers waiting for the turn, so the work between them lets them
+/// go first (`betweenLoop`).
+var turn_waiting: std.atomic.Value(u32) = .init(0);
+
+/// The turn, for a handler: counted while it waits.
+fn takeTurn(io: Io) void {
+    _ = turn_waiting.fetchAdd(1, .acq_rel);
+    turn.lockUncancelable(io);
+    _ = turn_waiting.fetchSub(1, .acq_rel);
+}
+
+/// How long the work between requests sleeps when there is none.
+pub const between_idle_ms: u64 = 50;
+var never_stop: std.atomic.Value(bool) = .init(false);
+
 /// **ONE HANDLER AT A TIME**: held while `route` runs, so no two handlers
 /// interleave, as on the bare-metal host, where one loop runs each to its
 /// end. Reading the head and the body comes before it, and serving a kept
@@ -997,6 +1036,15 @@ const TestSite = struct {
         const who = try http.header(req, alloc, "x-who");
         if (who) |w| if (std.mem.eql(u8, w, "boom")) return error.StoreUnreadable;
         return who;
+    }
+    /// A background run's slices, each `between_slice_ms` under the turn.
+    var slices_left: std.atomic.Value(u32) = .init(0);
+    var slices_run: std.atomic.Value(u32) = .init(0);
+    pub fn between(io: Io, _: i64) bool {
+        if (slices_left.load(.acquire) == 0) return false;
+        sleepMs(io, between_slice_ms) catch {};
+        _ = slices_run.fetchAdd(1, .acq_rel);
+        return slices_left.fetchSub(1, .acq_rel) > 1;
     }
     fn streamFrame(_: []const u8, _: std.mem.Allocator, blob: []const u8) error{OutOfMemory}!?[]const u8 {
         return blob;
@@ -1866,4 +1914,45 @@ test "linux_host: /admin/host's process facts come from the real getpid and /pro
     }
     try std.testing.expect(pid_seen);
     try std.testing.expect(std.mem.endsWith(u8, resident.?, "kB"));
+}
+
+// ── work between requests (metal-vmm QUEUE 211, step 5) ─────────────────
+
+const between_slice_ms: u64 = 30;
+
+test "linux_host: a request that arrives mid-run waits at most one slice of the work between requests, and the run goes on after it (metal-vmm QUEUE 211)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    // Thirty slices of 30 ms: most of a second of background work.
+    TestSite.slices_left.store(30, .release);
+    TestSite.slices_run.store(0, .release);
+    var stop: std.atomic.Value(bool) = .init(false);
+    const runner = try std.Thread.spawn(.{}, TestHost.betweenLoop, .{ io, &stop });
+    defer {
+        stop.store(true, .release);
+        runner.join();
+        TestSite.slices_left.store(0, .release);
+    }
+    sleepMs(io, 100) catch {};
+    var worst: i64 = 0;
+    for (0..5) |_| {
+        const began = Io.Clock.now(.awake, io).nanoseconds;
+        var c = try bench.client("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        try c.listen(io);
+        const answered = c.answer.within(io, 2000);
+        const took: i64 = @intCast(@divTrunc(Io.Clock.now(.awake, io).nanoseconds - began, std.time.ns_per_ms));
+        c.end(io);
+        try std.testing.expect(answered);
+        worst = @max(worst, took);
+        sleepMs(io, 45) catch {};
+    }
+    // One slice (30 ms) and the request's own time, never the run's.
+    if (worst > 3 * between_slice_ms) {
+        std.debug.print("a request waited {d} ms for the turn\n", .{worst});
+        return error.TestUnexpectedResult;
+    }
+    // And the run went on between them, not stopped by them.
+    try std.testing.expect(TestSite.slices_run.load(.acquire) >= 5);
 }
