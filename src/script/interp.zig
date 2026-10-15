@@ -44,6 +44,11 @@ pub const Budgets = struct {
     /// frames' slots, the operand stack, the `..` chains' parts and a
     /// yield's copying, all from one arena of this size beside the values'.
     machine_bytes: usize = 4 * 1024 * 1024,
+    /// **WHAT ONE CALL BRINGS FROM THE STORE** (metal-vmm QUEUE 211, the
+    /// caps: builtins stay atomic, so each one's work is capped): the most
+    /// bytes one `read` (or one scan) takes from the store in one call. A
+    /// bigger file is read in parts, `read(p, offset, n)`, each a call.
+    call_bytes: u64 = 1024 * 1024,
 };
 
 /// One store change the script attempted, in order, root-relative.

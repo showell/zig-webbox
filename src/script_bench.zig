@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     var buf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &buf);
     const w = &ow.interface;
-    const budgets: script.Budgets = .{ .steps = 100_000_000, .arena_bytes = 256 * 1024 * 1024 };
+    const budgets: script.Budgets = .{ .steps = 100_000_000, .arena_bytes = 256 * 1024 * 1024, .call_bytes = 64 * 1024 * 1024 };
     // The scans' file, in the working folder (the bench's root), removed
     // after.
     const big = try gpa.alloc(u8, 8 * 1024 * 1024);

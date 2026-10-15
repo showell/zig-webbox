@@ -631,3 +631,27 @@ test "builtins: a store error is never read as missing: a remove that can't look
     defer m.deinit();
     try testing.expectEqualStrings("FileNotFound", m.effects[0].outcome);
 }
+
+test "builtins: one read brings at most its cap, whole or in part; a bigger file is read in parts (metal-vmm QUEUE 211, the caps)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    const big = try testing.allocator.alloc(u8, 3000);
+    defer testing.allocator.free(big);
+    @memset(big, 'x');
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/big.txt", .data = big });
+    const capped: script.Budgets = .{ .call_bytes = 1000 };
+    for ([_][]const u8{ "read(\"big.txt\")", "read(\"big.txt\", 100)", "read(\"big.txt\", 0, 1001)" }) |src| {
+        var r = f.run(src, capped);
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {?}\n", .{ src, r.stop });
+        try testing.expectEqual(script.diag.Class.argument, r.stop.?.class);
+        try testing.expect(std.mem.indexOf(u8, r.stop.?.message, "read(p, offset, n)") != null);
+    }
+    // In parts, under the cap: the whole of it.
+    var r = f.run("local n = 0 local at = 0 while true do local part = read(\"big.txt\", at, 1000) if part == \"\" then break end n = n + #part at = at + #part end print(n)", capped);
+    defer r.deinit();
+    try testing.expect(r.finished());
+    try testing.expectEqualStrings("3000\n", r.output);
+}

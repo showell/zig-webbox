@@ -400,8 +400,8 @@ names the builtin and the argument.
 | `stat(p)` | `{size, kind, modified}`. `kind` is `"file"`, `"directory"` or `"other"`. `modified` is in seconds since 1970, as the host keeps it: metal's FAT to 2 s, and 0 where it keeps none | a read | `store` |
 | `exists(p)` | whether anything is there | a read | `store`, only for a failure other than absence |
 | `is_dir(p)` | whether a folder is there | a read | `store` |
-| `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `budget read_bytes` when the file is longer than what is left; `store` |
-| `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count; `store` for a folder or a missing file |
+| `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `argument` for a file over the call-bytes cap (1 MiB): read it in parts; `budget read_bytes` when the file is longer than what is left; `store` |
+| `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
 | `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
 | `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB |
 | `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_in`, stopping at the first | as `count_in` |
@@ -542,6 +542,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
 | machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two) | 4 MiB | 4 MiB |
+| call bytes | **what one builtin call brings from the store** (QUEUE 211, the caps: a builtin is never cut, so its work is bounded instead). A `read` past it is an `argument` error; a bigger file is read in parts, `read(p, offset, n)`, a call each, so a host can let a request in between | 1 MiB | 1 MiB |
 | kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |
 | nesting | how deep the source nests when parsed (a parenthesis costs two: an expression and its operand) | 200 | 200 |

@@ -183,6 +183,7 @@ fn readPart(run: *Run, pos: ast.Pos, p: Path, offset: u64, n: ?u64) Error!Value 
     const size = try fileSize(run, pos, .read, p);
     if (offset >= size) return .{ .string = "" };
     const want = @min(n orelse size - offset, size - offset);
+    if (want > run.budgets.call_bytes) return run.fail(pos, .argument, "`read` brings at most {d} bytes in one call, and this would be {d}: read it in parts, `read(p, offset, n)`", .{ run.budgets.call_bytes, want });
     if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
     const buf = run.alloc.alloc(u8, @intCast(want)) catch return run.oom(pos);
     const got = store.readAt(run.io, run.alloc, p.full, offset, buf) catch |e| return storeFailed(run, pos, .read, p.rel, e);
