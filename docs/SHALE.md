@@ -151,6 +151,29 @@ remove("chat/1_2/sessions/hello.md")
   still change. A function that reads a const before its line has run
   stops with an error.
 
+**Two functions cannot call each other** (mutual recursion): the first
+one's call to the second is above the second's declaration, a
+`name` error when the script is parsed:
+
+```shale
+function is_even(n) if n == 0 then return true end return is_odd(n - 1) end
+function is_odd(n) if n == 0 then return false end return is_even(n - 1) end
+-- stops: name
+```
+
+Write it as one function that recurses, with a parameter saying which
+of the two it is being:
+
+```shale
+function parity(n, even)
+  if n == 0 then return even end
+  return parity(n - 1, not even)
+end
+print(parity(4, true), parity(3, true))
+-- prints:
+-- true<TAB>false
+```
+
 ### Values
 
 | type | |
@@ -643,6 +666,41 @@ budgets, and changes nothing.
 | `big_files.shale` | files over a size | |
 | `delete_topic.shale` | one topic deleted, as `chat_retire.zig` does: its transcript, sidecars and uploads | a change each |
 | `first_change.shale` | one small change, a folder and a file, easy to check and to undo | |
+
+### How large a site each script fits
+
+`zig build shale-scale` (src/shale_scale.zig) generates a store shaped
+like angry-gopher's, at a growing number of topics, and runs each
+read-only script on it under the site's budgets (steps 2M, arena 8 MiB,
+500 reads, 16 MiB read) until it no longer fits. A topic is its
+transcript, its `.count`, a `.reactions.jsonl` for one in three, and an
+`.uploads/` of five images for one in ten. Only a topic's last message
+has `find_message`'s phrase, so it searches every transcript to the end.
+The sizes are to within a tenth.
+
+| script | messages a topic | the largest site that fits | its transcripts | what stops it past that |
+|---|---|---|---|---|
+| `topics` | 10 (~2 KiB) | 343 topics | 729 KiB | reads |
+| `topics` | 100 (~21 KiB) | 163 topics | 3.4 MiB | arena |
+| `topics` | 1000 (~215 KiB) | 17 topics | 3.6 MiB | steps |
+| `stale_caches` | 10 | 124 topics | 263 KiB | reads |
+| `stale_caches` | 100 | 124 topics | 2.6 MiB | reads |
+| `stale_caches` | 1000 | 72 topics | 15.2 MiB | steps |
+| `find_message` | 10 | 196 topics | 416 KiB | reads |
+| `find_message` | 100 | 196 topics | 4.1 MiB | reads |
+| `find_message` | 1000 | 72 topics | 15.2 MiB | read bytes: it stops itself and says how far it got |
+| `chat_topics` | any | 196 topics | 41 MiB at 1000 | reads: an `exists` and a `read` a topic |
+| `where_the_bytes_are` | any | 1175 topics (about 3,500 files) | 249 MiB at 1000 | arena: every entry held, as maps |
+| `big_files` | any | 46 topics | 9.7 MiB at 1000 | reads: an `is_dir` and a `stat` an entry |
+
+**The news is mostly bad.** At angry-gopher's scale (its chat is about
+190 MB), nothing that reads transcripts finishes in one run: a
+transcript-reading script answers for a few hundred topics at most, and
+for a few dozen when they are large. The read count, not the bytes,
+binds first. Even the scripts that read no transcript stop near 200
+topics (`chat_topics`, two reads a topic) and 1,200 (`where_the_bytes_are`,
+its arena). `big_files`, the old way (`ls`, `is_dir` and `stat` an entry),
+fits 46 topics; `walk` does the same work in one read a folder.
 
 ## What was decided, and what was refused
 

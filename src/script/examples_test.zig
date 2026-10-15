@@ -330,6 +330,12 @@ fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
             start = n;
             continue;
         }
+        // A fence indented (inside a list) is never read as one here, so
+        // its block would never run: fences start their line.
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) {
+            std.debug.print("docs/SHALE.md:{d}: an indented fence: start it at the line's start, outside the list\n", .{n});
+            return error.TestUnexpectedResult;
+        }
         // An indented code block would never run: every block is fenced.
         if (prev_blank and std.mem.startsWith(u8, line, "    ") and !std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "-")) {
             std.debug.print("docs/SHALE.md:{d}: an indented code block: fence it, with its language\n", .{n});
@@ -415,13 +421,14 @@ test "docs/SHALE.md: every shale block runs on the site-shaped store and prints 
     try testing.expect(try checkDoc(doc) >= 8);
 }
 
-test "docs/SHALE.md's check fires: a snippet whose output is wrong, one with no expectation, an unfenced block, a block with no language" {
+test "docs/SHALE.md's check fires: a snippet whose output is wrong, one with no expectation, an unfenced block, a block with no language, a fence indented in a list" {
     const planted = [_][]const u8{
         "```shale\nprint(1 + 1)\n-- prints:\n-- 3\n```\n",
         "```shale\nprint(1)\n```\n",
         "text\n\n    print(1)\n",
         "```\nprint(1)\n```\n",
         "```shale\nprint(1)\n-- stops: type\n```\n",
+        "- an item\n\n  ```shale\n  print(1)\n  ```\n",
     };
     for (planted) |p| try testing.expectError(error.TestUnexpectedResult, checkDoc(p));
     try testing.expectEqual(@as(usize, 1), try checkDoc("```shale\nprint(1, 2)\n-- prints:\n-- 1<TAB>2\n```\n"));

@@ -55,6 +55,16 @@ pub fn build(b: *std.Build) void {
     }) });
     b.step("script-bench", "time Shale's hot paths (ReleaseSafe)").dependOn(&b.addRunArtifact(script_bench).step);
 
+    // **THE SITE'S REAL SCALE** (src/shale_scale.zig, metal-vmm QUEUE
+    // 209(g)): the largest site each cookbook script fits. No tier runs it.
+    const scale = b.addExecutable(.{ .name = "shale-scale", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/shale_scale.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "webbox", .module = script_bench.root_module.import_table.get("webbox").? }},
+    }) });
+    b.step("shale-scale", "the largest site each cookbook script fits, under the site's budgets (ReleaseSafe)").dependOn(&b.addRunArtifact(scale).step);
+
     // **THE SHALE SIGNER** (src/shale_sign.zig, metal-vmm QUEUE 200): the
     // key pair, made once, and a script signed for a target.
     //   zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
