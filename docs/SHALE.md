@@ -660,7 +660,7 @@ else of the script module's insides:
 | call | what it does |
 |---|---|
 | `Process.start(io, allocator, root, source, mode, budgets, now, output_most)` | parse and compile; a source that doesn't parse or fit gives a process already stopped, saying why |
-| `step(.{ .steps, .now })` | one slice: `paused`, `finished` or `stopped`. A slice ends between ops, after at most `steps`; `now()` is the slice's clock. An ended run says so again and runs nothing |
+| `step(.{ .steps, .now })` | one slice: `paused`, `finished` or `stopped`. A slice ends between ops, after at most `steps` **or after any store call**, whichever comes first; `now()` is the slice's clock. An ended run says so again and runs nothing |
 | `output()` | what it has printed |
 | `status()` | its state, steps, slices, effects and its stop |
 | `kill()` | every byte it holds, given back, whatever state it is in |
@@ -675,9 +675,14 @@ else of the script module's insides:
   and `remove_tree` are `argument` errors naming `atomic`. A script that
   finds and then deletes is a background run to find, then an atomic
   one to act.
-- **The one-shot route and the runner run through it too** (in one
-  slice), so every test holds the contract: the gate's runs are
-  processes.
+- **A slice ends after any store call** (Steve: "let the kernel swap it
+  out on any I/O request"): a store call is synchronous, so its end is
+  where a host can let a request in, whether it returned or failed into
+  an `attempt`. Pure work is cut by `steps`; a builtin is never cut, its
+  work bounded by the caps instead (`call_bytes`, `call_entries`).
+- **The one-shot route and the runner run through it too** (slice after
+  slice, with nothing between), so every test holds the contract: the
+  gate's runs are processes.
 - Tested (`process_test.zig`): a background run's output is the atomic
   run's in slices of 1 to 50 steps; `kill` gives back every byte, mid-run,
   finished, stopped before it ran, or holding megabytes; a background

@@ -64,6 +64,8 @@ test "process: a background run that changes the store is refused, naming atomic
     // The same script, atomic, changes it.
     const p = try f.start(testing.allocator, "replace(\"notes/c.txt\", \"made\")", .atomic);
     defer p.kill();
+    // A slice to the store call, and one after it.
+    try testing.expectEqual(process.Outcome.paused, p.step(.{}));
     try testing.expectEqual(process.Outcome.finished, p.step(.{}));
     try testing.expectEqual(@as(usize, 1), p.status().effects);
 }
@@ -86,7 +88,9 @@ test "process: a background run's output is the atomic run's, in slices of any s
     defer f.deinit();
     const whole = try f.start(testing.allocator, scan, .atomic);
     defer whole.kill();
-    try testing.expectEqual(@as(u64, 1), finish(whole, std.math.maxInt(u64)));
+    // Unlimited steps: a slice to each store call (an `ls`, two `read`s),
+    // and one after the last.
+    try testing.expectEqual(@as(u64, 4), finish(whole, std.math.maxInt(u64)));
     try testing.expectEqual(process.State.finished, whole.status().state);
     for ([_]u64{ 1, 2, 3, 7, 50 }) |n| {
         const p = try f.start(testing.allocator, scan, .background);
@@ -193,3 +197,31 @@ test "process: every source within the source budget compiles, in at most half t
 }
 
 var big_out: [1024 * 1024]u8 = undefined;
+
+test "process: a slice ends after any store call, however many steps it has left (metal-vmm QUEUE 211, Steve's model: swap on I/O)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // Three store calls, then pure work: four slices, each with steps to spare.
+    const p = try f.start(testing.allocator, "print(exists(\"notes/a.txt\")) print(count_lines(\"notes/a.txt\")) local n = 0 for i = 1, 100 do n = n + i end print(is_dir(\"notes\"), n)", .atomic);
+    defer p.kill();
+    var outcomes: [8]process.Outcome = undefined;
+    var n: usize = 0;
+    while (n < outcomes.len) {
+        outcomes[n] = p.step(.{});
+        n += 1;
+        if (outcomes[n - 1] != .paused) break;
+    }
+    try testing.expectEqualSlices(process.Outcome, &.{ .paused, .paused, .paused, .finished }, outcomes[0..n]);
+    try testing.expectEqualStrings("true\n2\ntrue\t5050\n", p.output());
+    try testing.expectEqual(@as(u64, 4), p.status().slices);
+    // A failed store call is I/O too: caught by `attempt`, it still ends the slice.
+    const q = try f.start(testing.allocator, "function r() return read(\"nope\") end print(attempt(r).ok)", .atomic);
+    defer q.kill();
+    try testing.expectEqual(process.Outcome.paused, q.step(.{}));
+    try testing.expectEqual(process.Outcome.finished, q.step(.{}));
+    // No store call, one slice.
+    const w = try f.start(testing.allocator, "local n = 0 for i = 1, 1000 do n = n + i end print(n)", .atomic);
+    defer w.kill();
+    try testing.expectEqual(process.Outcome.finished, w.step(.{}));
+}

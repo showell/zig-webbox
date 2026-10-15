@@ -292,6 +292,11 @@ const Machine = struct {
                     _ = m.pop();
                 },
                 .builtin => {
+                    // **A SLICE ENDS AFTER A STORE CALL** (QUEUE 211, Steve's
+                    // model: "swap it out on any I/O request"), whether it
+                    // returns or fails into an `attempt`: either way it did
+                    // its I/O, and the next op waits for the next slice.
+                    if (builtins.touches_store.contains(@enumFromInt(op.a))) m.slice_end = r.steps;
                     const args = m.operands.items[m.operands.items.len - op.b ..];
                     const v = try builtins.call(r, op.pos, @enumFromInt(op.a), args);
                     m.operands.shrinkRetainingCapacity(m.operands.items.len - op.b);

@@ -50,6 +50,16 @@ const topics = .{
 /// evaluates them into a buffer this long.
 pub const most_args = 4;
 
+/// **THE BUILTINS THAT CALL THE STORE** (metal-vmm QUEUE 211, Steve's
+/// model): a slice ends after each, so a host can let a request in between
+/// a run's I/O (`vm.zig`'s `.builtin`).
+pub const touches_store: std.EnumSet(B) = blk: {
+    @setEvalBranchQuota(10_000);
+    var set: std.EnumSet(B) = .initEmpty();
+    for (@import("builtins_store.zig").specs) |s| set.insert(s.name);
+    break :blk set;
+};
+
 /// Every builtin's `Spec`, by name.
 pub const specs: std.EnumArray(B, Spec) = blk: {
     @setEvalBranchQuota(10_000);
