@@ -219,6 +219,14 @@ From the loosest to the tightest:
     takes one, and a call by one is refused, kept to say what to write
     instead;
   - `attempt`: no function takes it, and a call by it is the language's.
+
+  **`table` is both** a builtin and one of Lua's library names, and the
+  order above settles it: `table(rows, columns)` is the builtin (step 3),
+  `table.insert(l, x)` is refused with `push(l, x)` to write instead, a
+  function may not be named `table`, and a local or a key may (`x.table`
+  is any map's key). **`type` is only refused:** this language has no
+  `type()`, and a value's kind is known from where it came (`stat(p).kind`
+  for the store's).
 - Keywords: `and break const continue do else elseif end false for
   function if in local nil not or return then true while`.
 
@@ -413,6 +421,22 @@ the bytes compared there a step for 16 (see "What a builtin costs").
 | `tostring(v)` | a scalar's text, as `print` writes it |
 | `tonumber(s)` | an optional `-` and decimal digits; anything else is an `argument` error |
 
+**ONE BASE FOR STRINGS, ANOTHER FOR FILES.** A string's positions are
+1-based (`find`, `sub`); a file's offsets are 0-based (`read(p, o, n)`,
+`find_in`, the sidecars). The same text gives `find(s, t) == find_in(p, t)
++ 1`. Feeding one to the other is where an off-by-one bites:
+
+```shale
+replace("shale-check/off.txt", "abcdef")
+local o = find_in("shale-check/off.txt", "cd")
+print(o, read("shale-check/off.txt", o, 2))  -- an offset reads from there
+local s = read("shale-check/off.txt")
+print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
+-- prints:
+-- 2<TAB>cd
+-- 3<TAB>cd
+```
+
 ### Numbers
 
 | builtin | gives |
@@ -598,8 +622,13 @@ angry-gopher's sources:
   `<offset>` is where the last message's block begins, the separator
   before it, or 0 for a first message; `<uid>` is `-` when unknown
   (`chat_count.zig`).
-- **Next to each topic:** `<sid>.reactions.jsonl`, the `<sid>.uploads/`
-  folder, and `<name>.channel` (the members).
+- **Next to each topic:** `<sid>.reactions.jsonl` and the `<sid>.uploads/`
+  folder; and, from an older server, `<sid>.lastauthor`, which nothing
+  writes or reads now (the `.count` carries the author, zig-metal-unikernel
+  153(1)) but which angry-gopher's `chat_retire.zig` removes with its topic,
+  as `delete_topic.shale` does.
+- **Each channel's members:** `chat/channels/<name>.channel`, beside the
+  channel's folder (`chat_paths.zig`), not inside it.
 
 Every read-only script among them is also run under the site's own
 budgets, and changes nothing.
