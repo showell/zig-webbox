@@ -25,8 +25,8 @@ const lua_names = std.StaticStringMap([]const u8).initComptime(.{
     .{ "debug", "the standard library is not in this language" },
     .{ "package", "the standard library is not in this language" },
     .{ "require", "`require` is not in this language" },
-    .{ "pcall", "`pcall` is not in this language: an error stops the script" },
-    .{ "xpcall", "`xpcall` is not in this language: an error stops the script" },
+    .{ "pcall", "`pcall` is not in this language: `attempt(f, ...)` calls a function and gives its error as a value" },
+    .{ "xpcall", "`xpcall` is not in this language: `attempt(f, ...)` calls a function and gives its error as a value" },
     .{ "error", "`error` is not in this language" },
     .{ "pairs", "`pairs` is not in this language: `for k in keys(m) do ... m[k] ... end`" },
     .{ "ipairs", "`ipairs` is not in this language: `for x in list do ... end`, or `for i = 1, #list do`" },
@@ -52,7 +52,22 @@ const Frame = struct {
     loops: u16 = 0,
 };
 
-const PendingCall = struct { call: *ast.Call, name: []const u8, pos: ast.Pos };
+/// A call to a name not yet resolved: the whole source is read first, so
+/// a script's own function (declared anywhere) takes the name before a
+/// builtin does (README, "Names").
+const PendingCall = struct {
+    call: *ast.Call,
+    name: []const u8,
+    pos: ast.Pos,
+    /// `attempt(name, ...)`: `name` is the function attempted.
+    attempt: bool = false,
+    /// A local of this name was in scope at the call.
+    local: bool = false,
+};
+
+/// The one name a script may not take: `attempt`'s first argument is a
+/// function's name, which only the language can parse.
+const reserved_call = "attempt";
 
 pub const Parser = struct {
     alloc: std.mem.Allocator,
@@ -153,8 +168,11 @@ pub const Parser = struct {
         return null;
     }
 
+    /// A local in this block. **A LOCAL MAY TAKE A BUILTIN'S NAME** (README,
+    /// "Names"): a value by that name is the local; a call by it is still
+    /// the builtin, since only functions are called. So a builtin added to
+    /// the language never breaks a script that already used its name.
     fn declare(self: *Parser, name: []const u8, pos: ast.Pos) Error!u16 {
-        if (std.meta.stringToEnum(ast.Builtin, name) != null) return self.failf(pos, .name, "`{s}` is a builtin: a local cannot take its name", .{name});
         var i = self.frame.locals.items.len;
         while (i > 0) {
             i -= 1;
@@ -291,6 +309,11 @@ pub const Parser = struct {
                 if (self.frame.loops == 0) return self.failAt(pos, .syntax, "`break` outside a loop");
                 return .{ .pos = pos, .kind = .@"break" };
             },
+            .kw_continue => {
+                try self.advance();
+                if (self.frame.loops == 0) return self.failAt(pos, .syntax, "`continue` outside a loop");
+                return .{ .pos = pos, .kind = .@"continue" };
+            },
             .kw_function => {
                 if (self.in_function or self.frame.depth > 1) return self.failAt(pos, .refused, "functions are top-level statements only: nested functions and closures are not in this language");
                 try self.function(pos);
@@ -394,7 +417,10 @@ pub const Parser = struct {
         const name_tok = try self.expect(.name, "the function's name");
         const name = name_tok.text;
         if (self.tok.tag == .dot) return self.failAt(self.here(), .refused, "functions in tables are not in this language: functions are not values");
-        if (std.meta.stringToEnum(ast.Builtin, name) != null) return self.failf(pos, .name, "`{s}` is a builtin: a function cannot take its name", .{name});
+        // A function may take a builtin's name: the script's calls by that
+        // name are then its own (README, "Names").
+        if (std.mem.eql(u8, name, reserved_call)) return self.failAt(pos, .name, "`attempt` is the language's own: name the function otherwise");
+        if (lua_names.get(name) != null) return self.failf(pos, .name, "`{s}` is a name of Lua's library, kept to say what to write instead: name the function otherwise", .{name});
         if (self.function_names.contains(name)) return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
         const index: u32 = @intCast(self.functions.items.len);
         try self.function_names.put(self.alloc, name, index);
@@ -554,26 +580,29 @@ pub const Parser = struct {
                 try self.advance();
                 if (self.tok.tag == .lparen) return self.call(t.text, pos);
                 if (self.tok.tag == .string or self.tok.tag == .lbrace) return self.failAt(self.here(), .refused, "a call needs its parentheses: `f(\"x\")`, not `f \"x\"`");
+                if (self.lookup(t.text)) |slot| return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .local = slot } });
+                if (self.in_function) if (self.constant(t.text)) |ci| return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .constant = ci } });
                 // `table.insert` is Lua's library, though `table` is a builtin.
                 if (self.tok.tag == .dot) if (lua_names.get(t.text)) |why| return self.failAt(pos, .refused, why);
                 if (std.meta.stringToEnum(ast.Builtin, t.text) != null) return self.failf(pos, .refused, "`{s}` is a builtin, not a value: call it, `{s}(...)`", .{ t.text, t.text });
-                const slot = self.lookup(t.text) orelse {
-                    if (self.in_function) if (self.constant(t.text)) |ci| return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .constant = ci } });
-                    return self.unknownName(t.text, pos);
-                };
-                return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .local = slot } });
+                return self.unknownName(t.text, pos);
             },
             else => return self.failf(pos, .syntax, "expected a value, found {s}", .{describe(t)}),
         }
     }
 
     fn call(self: *Parser, name: []const u8, pos: ast.Pos) Error!*ast.Expr {
-        const builtin = std.meta.stringToEnum(ast.Builtin, name);
-        if (builtin == null) {
-            if (lua_names.get(name)) |why| return self.failAt(pos, .refused, why);
-            if (self.lookup(name) != null) return self.failf(pos, .refused, "`{s}` is a local, and functions are not values: only a declared function can be called", .{name});
-        }
+        const attempt = std.mem.eql(u8, name, reserved_call);
+        // Lua's library is refused at the call: no function takes its names.
+        if (std.meta.stringToEnum(ast.Builtin, name) == null) if (lua_names.get(name)) |why| return self.failAt(pos, .refused, why);
         try self.advance(); // (
+        var attempted: []const u8 = "";
+        if (attempt) {
+            const f = try self.expect(.name, "the name of the function `attempt` calls");
+            if (self.tok.tag == .lparen) return self.failAt(self.here(), .syntax, "`attempt(f, a, b)` calls `f` itself: name it, without its own parentheses");
+            attempted = f.text;
+            if (self.tok.tag == .comma) try self.advance();
+        }
         var args: std.ArrayList(*ast.Expr) = .empty;
         if (self.tok.tag != .rparen) {
             while (true) {
@@ -584,11 +613,13 @@ pub const Parser = struct {
         }
         _ = try self.expect(.rparen, "`)` to close the call");
         const e = try self.new(ast.Expr, .{ .pos = pos, .kind = .{ .call = .{ .target = .{ .function = 0 }, .args = args.items } } });
-        if (builtin) |b| {
-            e.kind.call.target = .{ .builtin = b };
-        } else {
-            try self.pending.append(self.alloc, .{ .call = &e.kind.call, .name = name, .pos = pos });
-        }
+        try self.pending.append(self.alloc, .{
+            .call = &e.kind.call,
+            .name = if (attempt) attempted else name,
+            .pos = pos,
+            .attempt = attempt,
+            .local = self.lookup(name) != null,
+        });
         return e;
     }
 
@@ -662,11 +693,22 @@ pub fn parseMeasured(alloc: std.mem.Allocator, source: []const u8, max_nesting: 
     p.frame.depth = 0;
     const body = try p.block();
     if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{describe(p.tok)});
+    // **A CALL'S NAME, RESOLVED**: the script's own function first, then
+    // the builtin, then Lua's refusals (README, "Names").
     for (p.pending.items) |pc| {
-        const i = p.function_names.get(pc.name) orelse return p.failf(pc.pos, .name, "no function `{s}`", .{pc.name});
-        pc.call.target = .{ .function = i };
-        const f = p.functions.items[i];
-        if (pc.call.args.len != f.params) return p.failf(pc.pos, .argument, "`{s}` takes {d} arguments, given {d}", .{ pc.name, f.params, pc.call.args.len });
+        if (p.function_names.get(pc.name)) |i| {
+            pc.call.target = if (pc.attempt) .{ .attempt = i } else .{ .function = i };
+            const f = p.functions.items[i];
+            if (pc.call.args.len != f.params) return p.failf(pc.pos, .argument, "`{s}` takes {d} arguments, given {d}", .{ pc.name, f.params, pc.call.args.len });
+            continue;
+        }
+        if (pc.attempt) return p.failf(pc.pos, .name, "`attempt` calls a function of the script, and there is no function `{s}`", .{pc.name});
+        if (std.meta.stringToEnum(ast.Builtin, pc.name)) |b| {
+            pc.call.target = .{ .builtin = b };
+            continue;
+        }
+        if (pc.local) return p.failf(pc.pos, .refused, "`{s}` is a local, and functions are not values: only a declared function can be called", .{pc.name});
+        return p.failf(pc.pos, .name, "no function `{s}`", .{pc.name});
     }
     return .{ .functions = p.functions.items, .const_names = p.consts.items, .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
 }

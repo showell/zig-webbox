@@ -6,7 +6,8 @@
 //!
 //! The topics: the store (`builtins_store.zig`), text
 //! (`builtins_text.zig`), lists and maps (`builtins_lists.zig`), time and
-//! the host (`builtins_time.zig`), and formatting (`builtins_format.zig`).
+//! the host (`builtins_time.zig`), formatting (`builtins_format.zig`), and
+//! numbers (`builtins_numbers.zig`).
 //! Every builtin charges steps in proportion to the work it does.
 
 const std = @import("std");
@@ -42,6 +43,7 @@ const topics = .{
     @import("builtins_lists.zig"),
     @import("builtins_time.zig"),
     @import("builtins_format.zig"),
+    @import("builtins_numbers.zig"),
 };
 
 /// The most arguments any builtin but `print` takes: the interpreter

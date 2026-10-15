@@ -262,7 +262,8 @@ test "run: a top-level const is seen by the functions declared after it, and is 
     try expectStop("if true then const Y = 1 end", .refused, null);
     try expectStop("const X", .syntax, null);
     try expectStop("const X = 1 const X = 2", .name, null);
-    try expectStop("const print = 1", .name, null);
+    // A const may take a builtin's name, as a local may (208(c)).
+    try expectOutput("const print = 1 print(print)", "1\n");
     // A function declared before the const does not see it.
     try expectStop("function f() return A end const A = 1 print(f())", .name, null);
     // Called before the const's line has run: an error, not nil.
@@ -328,4 +329,71 @@ test "run: `for x in l` visits the first #l items, each as it is when reached, a
     defer r.deinit();
     try testing.expectEqualStrings("90000\n", r.output);
     try testing.expect(r.arena_bytes < 64 * 1024);
+}
+
+// ── 208(c): the language, small but complete ─────────────────────────────
+
+test "run: a script's names may take a builtin's: a local is the value, a call is the script's function first, then the builtin; so a new builtin never breaks an old script" {
+    try expectOutput("local lines = 3 print(lines, #lines(\"a\\nb\"))", "3\t2\n");
+    try expectOutput("function count(t) return 99 end print(count({1}))", "99\n");
+    // Declared after the call: still the script's.
+    try expectOutput("print(walk(\"x\")) function walk(p) return p .. \"!\" end", "x!\n");
+    // `table` a local: `table.insert` is a field, not Lua's library.
+    try expectOutput("local table = {} table.insert = 1 print(table.insert)", "1\n");
+    // Lua's library names are the one exception: kept to say what to
+    // write instead.
+    try expectStop("function pairs(m) return keys(m) end", .name, null);
+    try expectStop("local s = 1 s(2)", .refused, null);
+    try expectStop("local x = table.insert", .refused, null);
+}
+
+test "run: continue skips to the loop's next turn, in every kind of loop, and only its own loop" {
+    try expectOutput("for i = 1, 5 do if i % 2 == 0 then continue end print(i) end", "1\n3\n5\n");
+    try expectOutput("for x in {1, 2, 3} do if x == 2 then continue end print(x) end", "1\n3\n");
+    try expectOutput("local i = 0 while i < 4 do i = i + 1 if i == 2 then continue end print(i) end", "1\n3\n4\n");
+    try expectOutput("for i = 1, 2 do for j = 1, 3 do if j == 2 then continue end print(i, j) end end", "1\t1\n1\t3\n2\t1\n2\t3\n");
+    try expectOutput("for i = 1, 3 do do if i == 2 then continue end end print(i) end", "1\n3\n");
+}
+
+test "run: string escapes: \\r, \\0 and \\xHH as bytes; the rest refused by name" {
+    try expectOutput("print(#\"a\\r\\0b\", \"\\x41\\x62\", #\"\\xff\", \"\\x0a\" == \"\\n\")", "4\tAb\t1\ttrue\n");
+    try expectStop("print(\"\\x4\")", .syntax, null);
+    try expectStop("print(\"\\65\")", .refused, null);
+    try expectStop("print(\"\\012\")", .refused, null);
+    try expectStop("print(\"\\u{41}\")", .refused, null);
+    try expectStop("print(\"\\z\")", .refused, null);
+}
+
+test "run: attempt(f, ...) gives f's error as a value, with where it was; a budget is never caught; what f did stays done" {
+    try expectOutput(
+        \\function half(n) return tonumber(n) // 2 end
+        \\local good = attempt(half, "10")
+        \\local bad = attempt(half, "ten")
+        \\print(good.ok, good.value, bad.ok, bad.class, bad.line, bad.in_function)
+        \\function say(s) print(s) end
+        \\print(has_key(attempt(say, "said"), "value"))
+    , "true\t5\tfalse\targument\t1\thalf\nsaid\nfalse\n");
+    // The arguments are evaluated before the attempt: an error there is
+    // the run's.
+    try expectStop("function f(x) return x end local r = attempt(f, tonumber(\"x\"))", .argument, null);
+    // A budget is the run's, inside an attempt too.
+    try expectStopWith("function spin() while true do end end local r = attempt(spin)", .budget, .steps, .{ .steps = 10_000 });
+    try expectStopWith("function deep(n) return deep(n + 1) end local r = attempt(deep, 1)", .budget, .call_depth, .{});
+    // After a caught error the run goes on, its stack and depth as they were.
+    try expectOutput(
+        \\function boom(n) if n == 0 then return {}[1] end return boom(n - 1) end
+        \\local r = attempt(boom, 5)
+        \\local s = 0
+        \\for i = 1, 3 do s = s + i end
+        \\print(r.ok, r.class, r.in_function, s)
+    , "false\tindex\tboom\t6\n");
+}
+
+test "run: a stop inside a function names it" {
+    var r = runWith("function f(x) return x + {} end print(f(1))", .{});
+    defer r.deinit();
+    try testing.expectEqualStrings("f", r.stop.?.function);
+    var top = runWith("local x = 1 + {}", .{});
+    defer top.deinit();
+    try testing.expectEqualStrings("", top.stop.?.function);
 }

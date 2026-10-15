@@ -72,6 +72,8 @@ pub const Run = struct {
     base: usize = 0,
     ret: Value = .nil,
     stop: ?diag.Stop = null,
+    /// The function the walk is in, by name; "" at the top level.
+    function: []const u8 = "",
     /// **THE LAST STRING A `..` CHAIN BUILT** (`concatChain`): its buffer,
     /// how much of it the string fills, and how big it is.
     tail_ptr: ?[*]u8 = null,
@@ -85,12 +87,12 @@ pub const Run = struct {
 
     pub fn fail(self: *Run, pos: ast.Pos, class: diag.Class, comptime fmt: []const u8, args: anytype) Error {
         const message = std.fmt.allocPrint(self.alloc, fmt, args) catch fmt;
-        self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message };
+        self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message, .function = self.function };
         return error.Stop;
     }
 
     pub fn budgetStop(self: *Run, pos: ast.Pos, b: diag.Budget) Error {
-        self.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = b, .message = switch (b) {
+        self.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = b, .function = self.function, .message = switch (b) {
             .steps => "the step budget ran out",
             .arena => "the arena budget ran out",
             .call_depth => "calls nest deeper than the call-depth budget",
@@ -129,7 +131,7 @@ pub const Run = struct {
 
     // ── statements ────────────────────────────────────────────────────────
 
-    const Flow = enum { normal, @"break", @"return" };
+    const Flow = enum { normal, @"break", @"continue", @"return" };
 
     fn block(self: *Run, stmts: []const ast.Stmt) Error!Flow {
         for (stmts) |*s| {
@@ -173,6 +175,7 @@ pub const Run = struct {
                 return .@"return";
             },
             .@"break" => return .@"break",
+            .@"continue" => return .@"continue",
             .do => |b| return self.block(b),
         }
         return .normal;
@@ -202,7 +205,7 @@ pub const Run = struct {
     noinline fn whileStmt(self: *Run, cond: *const ast.Expr, body: []const ast.Stmt) Error!Flow {
         while ((try self.eval(cond)).truthy()) {
             switch (try self.block(body)) {
-                .normal => {},
+                .normal, .@"continue" => {},
                 .@"break" => break,
                 .@"return" => return .@"return",
             }
@@ -224,7 +227,7 @@ pub const Run = struct {
             try self.charge(pos, 1);
             self.slot(f.slot).* = .{ .int = i };
             switch (try self.block(f.body)) {
-                .normal => {},
+                .normal, .@"continue" => {},
                 .@"break" => break,
                 .@"return" => return .@"return",
             }
@@ -256,7 +259,7 @@ pub const Run = struct {
             // A list never shrinks, so the item is there.
             self.slot(f.slot).* = t.list.items[i];
             switch (try self.block(f.body)) {
-                .normal => {},
+                .normal, .@"continue" => {},
                 .@"break" => break,
                 .@"return" => return .@"return",
             }
@@ -582,7 +585,44 @@ pub const Run = struct {
         switch (c.target) {
             .builtin => |b| return self.callBuiltin(pos, b, c.args),
             .function => |index| return self.callFunction(pos, index, c.args),
+            .attempt => |index| return self.attempt(pos, index, c.args),
         }
+    }
+
+    /// **`attempt(f, ...)`** (metal-vmm QUEUE 208(c)): the script's function
+    /// `f`, called with the arguments (evaluated first, outside the
+    /// attempt, as Lua's `pcall` does), and its error a value instead of
+    /// the run's end: `{ok = true, value = v}` (no `value` for nil) or `{ok
+    /// = false, error, class, line, column, in_function}`. **A BUDGET IS
+    /// NEVER CAUGHT**: it is the run's, not the call's, so a run that runs
+    /// out stops wherever it is. Whatever the call did before its error
+    /// stays done: its output, and its changes in the effects log.
+    noinline fn attempt(self: *Run, pos: ast.Pos, index: u32, arg_exprs: []const *ast.Expr) Error!Value {
+        var small: [8]Value = undefined;
+        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.alloc.alloc(Value, arg_exprs.len) catch return self.oom(pos);
+        for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
+        const out = try self.newTable(pos);
+        out.kind = .map;
+        const a = self.alloc;
+        const got = self.invoke(pos, index, vals) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Stop => {
+                const s = self.stop.?;
+                if (s.class == .budget) return error.Stop;
+                self.stop = null;
+                self.ret = .nil;
+                out.map.put(a, "ok", .{ .boolean = false }) catch return self.oom(pos);
+                out.map.put(a, "error", .{ .string = s.message }) catch return self.oom(pos);
+                out.map.put(a, "class", .{ .string = @tagName(s.class) }) catch return self.oom(pos);
+                out.map.put(a, "line", .{ .int = s.line }) catch return self.oom(pos);
+                out.map.put(a, "column", .{ .int = s.column }) catch return self.oom(pos);
+                out.map.put(a, "in_function", .{ .string = s.function }) catch return self.oom(pos);
+                return .{ .table = out };
+            },
+        };
+        out.map.put(a, "ok", .{ .boolean = true }) catch return self.oom(pos);
+        if (got != .nil) out.map.put(a, "value", got) catch return self.oom(pos);
+        return .{ .table = out };
     }
 
     noinline fn callBuiltin(self: *Run, pos: ast.Pos, b: ast.Builtin, arg_exprs: []const *ast.Expr) Error!Value {
@@ -618,12 +658,31 @@ pub const Run = struct {
             const v = try self.eval(a);
             self.stack.items[new_base + i] = v;
         }
+        return self.enterFunction(f, new_base);
+    }
+
+    /// Function `index` with its arguments already evaluated.
+    fn invoke(self: *Run, pos: ast.Pos, index: u32, args: []const Value) Error!Value {
+        const f = &self.program.functions[index];
+        if (self.depth >= self.budgets.call_depth) return self.budgetStop(pos, .call_depth);
+        const new_base = self.stack.items.len;
+        self.stack.appendNTimes(self.alloc, .nil, f.frame) catch return self.oom(pos);
+        @memcpy(self.stack.items[new_base..][0..args.len], args);
+        return self.enterFunction(f, new_base);
+    }
+
+    /// The body of `f`, its frame at `new_base` with its arguments in it;
+    /// everything put back as it was however it ends.
+    fn enterFunction(self: *Run, f: *const ast.Function, new_base: usize) Error!Value {
         const saved = self.base;
+        const saved_function = self.function;
         self.base = new_base;
+        self.function = f.name;
         self.depth += 1;
         defer {
             self.depth -= 1;
             self.base = saved;
+            self.function = saved_function;
             self.stack.shrinkRetainingCapacity(new_base);
         }
         self.ret = .nil;

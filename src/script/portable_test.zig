@@ -19,6 +19,7 @@ const sources = .{
     .{ "builtins_lists.zig", @embedFile("builtins_lists.zig") },
     .{ "builtins_time.zig", @embedFile("builtins_time.zig") },
     .{ "builtins_format.zig", @embedFile("builtins_format.zig") },
+    .{ "builtins_numbers.zig", @embedFile("builtins_numbers.zig") },
 };
 
 /// What a portable file may not name: the file system but its path

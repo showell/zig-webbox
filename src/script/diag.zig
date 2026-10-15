@@ -45,4 +45,6 @@ pub const Stop = struct {
     class: Class,
     budget: ?Budget = null,
     message: []const u8,
+    /// The script's function it stopped in, by name; "" at the top level.
+    function: []const u8 = "",
 };

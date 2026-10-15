@@ -36,6 +36,12 @@ pub const Builtin = enum {
     lines,
     words,
     like,
+    rep,
+    substitute,
+    // numbers
+    min,
+    max,
+    abs,
     // dates and formatting
     date,
     seconds,
@@ -92,6 +98,9 @@ pub const Call = struct {
         /// An index into `Program.functions`, set once the whole source
         /// is read (a function may be called before it is declared).
         function: u32,
+        /// `attempt(f, ...)`: the function `f` (an index, as `function`)
+        /// called with the rest of the arguments, its error a value.
+        attempt: u32,
     };
 };
 
@@ -112,6 +121,7 @@ pub const Stmt = struct {
         list_for: struct { slot: u16, list: *Expr, body: []Stmt },
         @"return": ?*Expr,
         @"break",
+        @"continue",
         do: []Stmt,
     };
 };

@@ -13,6 +13,7 @@ pub const Tag = enum {
     kw_and,
     kw_break,
     kw_const,
+    kw_continue,
     kw_do,
     kw_else,
     kw_elseif,
@@ -75,13 +76,13 @@ pub const Error = struct {
 };
 
 const keywords = std.StaticStringMap(Tag).initComptime(.{
-    .{ "and", .kw_and },           .{ "break", .kw_break },   .{ "do", .kw_do },
-    .{ "const", .kw_const },       .{ "else", .kw_else },     .{ "elseif", .kw_elseif },
-    .{ "end", .kw_end },           .{ "false", .kw_false },   .{ "for", .kw_for },
-    .{ "function", .kw_function }, .{ "if", .kw_if },         .{ "in", .kw_in },
-    .{ "local", .kw_local },       .{ "nil", .kw_nil },       .{ "not", .kw_not },
-    .{ "or", .kw_or },             .{ "return", .kw_return }, .{ "then", .kw_then },
-    .{ "true", .kw_true },         .{ "while", .kw_while },
+    .{ "and", .kw_and },           .{ "break", .kw_break },       .{ "do", .kw_do },
+    .{ "const", .kw_const },       .{ "else", .kw_else },         .{ "elseif", .kw_elseif },
+    .{ "continue", .kw_continue }, .{ "end", .kw_end },           .{ "false", .kw_false },
+    .{ "for", .kw_for },           .{ "function", .kw_function }, .{ "if", .kw_if },
+    .{ "in", .kw_in },             .{ "local", .kw_local },       .{ "nil", .kw_nil },
+    .{ "not", .kw_not },           .{ "or", .kw_or },             .{ "return", .kw_return },
+    .{ "then", .kw_then },         .{ "true", .kw_true },         .{ "while", .kw_while },
 });
 
 /// Lua's words this language refuses, each with why.
@@ -258,10 +259,22 @@ pub const Lexer = struct {
             try out.append(self.alloc, switch (e) {
                 'n' => '\n',
                 't' => '\t',
+                'r' => '\r',
+                '0' => if (std.ascii.isDigit(self.peekAt(0))) return self.fail(e_line, e_col, true, "decimal escapes (`\\ddd`) are not in this language: write a byte as \\xHH") else 0,
+                'x' => blk: {
+                    const hi = std.fmt.charToDigit(self.peekAt(0), 16) catch return self.fail(e_line, e_col, false, "`\\x` takes two hexadecimal digits: \\x0a");
+                    const lo = std.fmt.charToDigit(self.peekAt(1), 16) catch return self.fail(e_line, e_col, false, "`\\x` takes two hexadecimal digits: \\x0a");
+                    _ = self.bump();
+                    _ = self.bump();
+                    break :blk hi * 16 + lo;
+                },
                 '\\' => '\\',
                 '"' => '"',
                 '\'' => '\'',
-                else => return self.fail(e_line, e_col, true, "an escape this language does not have: only \\n, \\t, \\\\, \\\" and \\'"),
+                '1'...'9' => return self.fail(e_line, e_col, true, "decimal escapes (`\\ddd`) are not in this language: write a byte as \\xHH"),
+                'u' => return self.fail(e_line, e_col, true, "`\\u{...}` is not in this language: strings are bytes; write UTF-8's bytes as \\xHH"),
+                'z' => return self.fail(e_line, e_col, true, "`\\z` is not in this language: a string ends on its line"),
+                else => return self.fail(e_line, e_col, true, "an escape this language does not have: only \\n, \\t, \\r, \\0, \\xHH, \\\\, \\\" and \\'"),
             });
         }
         return .{ .tag = .string, .text = out.items, .line = line, .column = column };

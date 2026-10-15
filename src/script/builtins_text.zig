@@ -31,7 +31,42 @@ pub const specs = [_]bi.Spec{
     spec(.like, 2, 2, like),
     spec(.tostring, 1, 1, tostring),
     spec(.tonumber, 1, 1, tonumber),
+    spec(.rep, 2, 2, rep),
+    spec(.substitute, 3, 3, substitute),
 };
+
+/// **`rep(s, n)`**: `s` `n` times over. Charged a step a byte before the
+/// string is made.
+fn rep(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const str = try bi.stringArg(run, pos, .rep, args[0], "its string");
+    const n = try bi.intArg(run, pos, .rep, args[1], "how many times");
+    if (n < 0) return run.fail(pos, .argument, "`rep`: {d} times", .{n});
+    const total = std.math.mul(u64, str.len, @intCast(n)) catch return run.budgetStop(pos, .arena);
+    try run.charge(pos, total);
+    const out = run.alloc.alloc(u8, @intCast(total)) catch return run.oom(pos);
+    var at: usize = 0;
+    while (at < out.len) : (at += str.len) @memcpy(out[at..][0..str.len], str);
+    return .{ .string = out };
+}
+
+/// **`substitute(s, old, new)`**: `s` with every `old` (plain text, none
+/// overlapping, left to right) put as `new`. A step a byte of `s` and of
+/// what it makes.
+fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const str = try bi.stringArg(run, pos, .substitute, args[0], "its string");
+    const old = try bi.stringArg(run, pos, .substitute, args[1], "what it replaces");
+    const new = try bi.stringArg(run, pos, .substitute, args[2], "what it puts instead");
+    if (old.len == 0) return run.fail(pos, .argument, "`substitute` of \"\" is an error: there is nothing to replace", .{});
+    try run.charge(pos, str.len);
+    const n = std.mem.count(u8, str, old);
+    if (n == 0) return .{ .string = str };
+    const added = std.math.mul(usize, n, new.len) catch return run.budgetStop(pos, .arena);
+    const total = str.len - n * old.len + added;
+    try run.charge(pos, total);
+    const out = run.alloc.alloc(u8, total) catch return run.oom(pos);
+    _ = std.mem.replace(u8, str, old, new, out);
+    return .{ .string = out };
+}
 
 fn split(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .split, args[0], "its string");

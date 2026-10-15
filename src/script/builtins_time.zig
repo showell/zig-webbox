@@ -147,7 +147,7 @@ pub fn parseTime(s: []const u8) ?i64 {
     return day + hh * 3600 + mm * 60 + ss - offset;
 }
 
-/// **`seconds(text)`**: `date`'s inverse. An RFC 3339 time (`T` between the
+/// **`seconds(text)`**: `date`'s inverse, over `date`'s range. An RFC 3339 time (`T` between the
 /// date and the time, then `Z` or `±HH:MM`; a fraction of a second is
 /// dropped) or a date alone, which is its midnight UTC. Anything else, a
 /// day that is not in the calendar among them, is an error.
@@ -156,5 +156,8 @@ fn seconds(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const s = try bi.stringArg(run, pos, .seconds, arg, "its time");
     try run.charge(pos, s.len);
     const t = parseTime(s) orelse return run.fail(pos, .argument, "`seconds`: \"{s}\" is not an RFC 3339 time (2026-10-14T03:00:00Z, or +02:00 for Z) nor a date (2026-10-14)", .{s[0..@min(s.len, 40)]});
+    // **`date`'S RANGE, BOTH WAYS** (208(c)): every time `seconds` gives,
+    // `date` writes.
+    if (t < 0 or t > last_second) return run.fail(pos, .argument, "`seconds`: \"{s}\" is outside 1970-01-01 to 9999-12-31, `date`'s range", .{s[0..@min(s.len, 40)]});
     return .{ .int = t };
 }

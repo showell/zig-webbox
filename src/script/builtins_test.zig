@@ -500,3 +500,34 @@ test "builtins: walk's options: depth stops it and reads fewer folders, like and
     try f.expectStop("local w = walk(\"\", {kind = \"link\"})", .argument);
     try f.expectStop("local w = walk(\"\", {1, 2})", .type);
 }
+
+// ── 208(c): the small gaps a real script hits ────────────────────────────
+
+test "builtins: min, max and abs; rep and substitute, plain text, charged before they make the string" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(min(3, -1), max(3, -1, 7, 2), abs(-5), abs(0))", "-1\t7\t5\t0\n");
+    try f.expectStop("print(abs(-9223372036854775807 - 1))", .arithmetic);
+    try f.expectStop("print(min(1, \"2\"))", .type);
+    try f.expectStop("print(max(1))", .argument);
+    try f.expectOutput("print(rep(\"ab\", 3), #rep(\"x\", 0), substitute(\"a.b.c\", \".\", \"::\"), substitute(\"aaa\", \"aa\", \"b\"), substitute(\"abc\", \"z\", \"y\"))", "ababab\t0\ta::b::c\tba\tabc\n");
+    try f.expectStop("print(rep(\"x\", -1))", .argument);
+    try f.expectStop("print(substitute(\"abc\", \"\", \"y\"))", .argument);
+    // A hundred million bytes asked for: the steps run out before the
+    // arena is asked.
+    var r = f.run("local s = rep(\"0123456789\", 10000000)", .{});
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
+    try testing.expect(r.arena_bytes < 1024 * 1024);
+}
+
+test "builtins: seconds gives only what date can write: 1970 to 9999" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(seconds(\"1970-01-01\"), date(seconds(\"9999-12-31T23:59:59Z\")))", "0\t9999-12-31T23:59:59Z\n");
+    try f.expectStop("print(seconds(\"1969-12-31T23:59:59Z\"))", .argument);
+    try f.expectStop("print(seconds(\"1970-01-01T00:30:00+01:00\"))", .argument);
+    try f.expectStop("print(seconds(\"0000-01-01\"))", .argument);
+}
