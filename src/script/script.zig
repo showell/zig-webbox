@@ -17,6 +17,7 @@ pub const builtins = @import("builtins.zig");
 pub const builtins_text = @import("builtins_text.zig");
 pub const compile = @import("compile.zig");
 pub const vm = @import("vm.zig");
+pub const process = @import("process.zig");
 
 const std = @import("std");
 const Io = @import("host_io").Io;
@@ -71,10 +72,7 @@ pub const Result = struct {
 
 /// The machine's budgeted memory, and the tree's arena over it: on the
 /// heap, so the arena's pointer to the budget stays good as a Result moves.
-pub const MachineMemory = struct {
-    budget: value.Budgeted,
-    tree: std.heap.ArenaAllocator,
-};
+pub const MachineMemory = process.MachineMemory;
 
 /// **WHAT A RUN DID, IN THE ONE LAYOUT** (metal-vmm QUEUE 200): its effects,
 /// a line each, then how it ended, the stop named as `name:line:column`.
@@ -112,6 +110,19 @@ pub const Engine = union(enum) {
 };
 
 pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+    // **THE VM THROUGH ITS CONTRACT** (`process.zig`): what a host runs is
+    // what a one-shot run is, in slices or in one.
+    switch (engine) {
+        .walker => {},
+        .vm, .vm_sliced => {
+            const slice: u64 = if (engine == .vm_sliced) engine.vm_sliced else std.math.maxInt(u64);
+            const p = process.Process.start(io, backing, root, source, .atomic, budgets, now, out.len) catch {
+                return .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the host could not hold the run" }, .output = out[0..0], .effects = &.{}, .steps = 0 };
+            };
+            while (p.step(.{ .steps = slice }) == .paused) {}
+            return p.intoResult(Result, out);
+        },
+    }
     var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
     const budgeted = &result.arena;
     const alloc = budgeted.allocator();
@@ -209,4 +220,5 @@ test {
     _ = @import("errors_test.zig");
     _ = @import("props_test.zig");
     _ = @import("yield_test.zig");
+    _ = @import("process_test.zig");
 }

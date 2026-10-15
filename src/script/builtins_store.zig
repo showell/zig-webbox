@@ -412,6 +412,9 @@ fn storeChange(run: *Run, pos: ast.Pos, c: Change, args: []const Value) Error!Va
     const b: B = switch (c) {
         inline else => |t| @field(B, @tagName(t)),
     };
+    // **A BACKGROUND RUN ONLY READS** (metal-vmm QUEUE 211, Steve's model),
+    // refused before the path is looked at or anything is counted.
+    if (run.read_only) return run.fail(pos, .argument, "`{s}` changes the store, and a background run only reads: send it as an `atomic` run", .{@tagName(b)});
     const p = try pathArg(run, pos, b, args[0], false);
     const data: []const u8 = switch (c) {
         .replace, .append => try bi.stringArg(run, pos, b, args[1], "what it writes"),

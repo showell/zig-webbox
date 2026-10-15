@@ -85,6 +85,9 @@ pub const Run = struct {
     /// The yields that collected (`collect.zig`): a run's steps and arena
     /// differ from a walker's by them, and by nothing else.
     collections: u64 = 0,
+    /// **A BACKGROUND RUN ONLY READS** (`process.Mode`): a change is an
+    /// `argument` error naming `atomic`.
+    read_only: bool = false,
     /// The copy's bookkeeping, kept from yield to yield (`collect.Books`).
     collecting: @import("collect.zig").Books = .{},
     /// The walk's recursion now (`Budgets.depth`).

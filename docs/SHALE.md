@@ -638,6 +638,39 @@ fifths of the walker's time. Where a builtin's work dominates (a scan, a
 read), the two are within this box's noise, since the work is the same
 code. Speed is not the VM's point; the state a yield can keep is.
 
+### The contract: a run as a host sees it
+
+**`src/script/process.zig` is the whole of what a host may know of a
+run** (metal-vmm QUEUE 211, Steve's model: "the kernel should treat the
+shale VM as just an opaque black box"). A host calls these, and nothing
+else of the script module's insides:
+
+| call | what it does |
+|---|---|
+| `Process.start(io, allocator, root, source, mode, budgets, now, output_most)` | parse and compile; a source that doesn't parse or fit gives a process already stopped, saying why |
+| `step(.{ .steps, .now })` | one slice: `paused`, `finished` or `stopped`. A slice ends between ops, after at most `steps`; `now()` is the slice's clock. An ended run says so again and runs nothing |
+| `output()` | what it has printed |
+| `status()` | its state, steps, slices, effects and its stop |
+| `kill()` | every byte it holds, given back, whatever state it is in |
+
+- **It owns all it holds,** from the allocator `start` is handed, never a
+  request's heap: the values' arena, the machine's memory and its
+  output, each under its budget. A second run later needs no host change
+  but a count.
+- **Two modes.** `atomic` is today's run, whole inside one handler, and
+  may change the store. `background` is stepped in slices between
+  handlers and **only reads**: `replace`, `append`, `mkdir`, `remove`
+  and `remove_tree` are `argument` errors naming `atomic`. A script that
+  finds and then deletes is a background run to find, then an atomic
+  one to act.
+- **The one-shot route and the runner run through it too** (in one
+  slice), so every test holds the contract: the gate's runs are
+  processes.
+- Tested (`process_test.zig`): a background run's output is the atomic
+  run's in slices of 1 to 50 steps; `kill` gives back every byte, mid-run,
+  finished, stopped before it ran, or holding megabytes; a background
+  change is refused and changes nothing.
+
 ### `yield`: a collection point
 
 `yield()` **collects** (metal-vmm QUEUE 211, as Steve's model of
