@@ -281,15 +281,7 @@ pub const Run = struct {
     /// the loop reaches it. In place: a loop copies nothing, so a loop over
     /// a list inside another costs no arena (metal-vmm QUEUE 208(a)).
     noinline fn listFor(self: *Run, pos: ast.Pos, f: *const ListFor) Error!Flow {
-        const l = try self.eval(f.list);
-        const t = switch (l) {
-            .table => |t| switch (t.kind) {
-                .empty => return .normal,
-                .list => t,
-                .map => return self.fail(f.list.pos, .type, "`for x in` a map: walk `keys(m)` instead", .{}),
-            },
-            else => return self.fail(f.list.pos, .type, "`for x in` takes a list, given {s}", .{l.typeName()}),
-        };
+        const t = try self.listToWalk(f.list.pos, try self.eval(f.list)) orelse return .normal;
         const n = t.list.items.len;
         try self.charge(pos, n);
         for (0..n) |i| {
@@ -305,11 +297,28 @@ pub const Run = struct {
         return .normal;
     }
 
+    /// **`for x in`'s list**, `pos` its expression's: null for a table
+    /// still empty (the loop runs no turn and charges nothing).
+    pub fn listToWalk(self: *Run, pos: ast.Pos, l: Value) Error!?*Table {
+        return switch (l) {
+            .table => |t| switch (t.kind) {
+                .empty => null,
+                .list => t,
+                .map => self.fail(pos, .type, "`for x in` a map: walk `keys(m)` instead", .{}),
+            },
+            else => self.fail(pos, .type, "`for x in` takes a list, given {s}", .{l.typeName()}),
+        };
+    }
+
     fn int(self: *Run, e: *const ast.Expr, what: []const u8) Error!i64 {
-        const v = try self.eval(e);
+        return self.intOf(e.pos, try self.eval(e), what);
+    }
+
+    /// A numeric `for`'s start, end or step (`what`), `pos` its expression's.
+    pub fn intOf(self: *Run, pos: ast.Pos, v: Value, what: []const u8) Error!i64 {
         return switch (v) {
             .int => |i| i,
-            else => self.fail(e.pos, .type, "{s} must be an integer, not {s}", .{ what, v.typeName() }),
+            else => self.fail(pos, .type, "{s} must be an integer, not {s}", .{ what, v.typeName() }),
         };
     }
 
@@ -321,7 +330,7 @@ pub const Run = struct {
         return t;
     }
 
-    fn setIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value, v: Value) Error!void {
+    pub fn setIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value, v: Value) Error!void {
         const t = switch (obj) {
             .table => |t| t,
             else => return self.fail(pos, .type, "only a list or a map can be indexed, not {s}", .{obj.typeName()}),
@@ -354,7 +363,7 @@ pub const Run = struct {
         }
     }
 
-    fn getIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value) Error!Value {
+    pub fn getIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value) Error!Value {
         const t = switch (obj) {
             .table => |t| t,
             else => return self.fail(pos, .type, "only a list or a map can be indexed, not {s}", .{obj.typeName()}),
@@ -401,7 +410,7 @@ pub const Run = struct {
         }
     }
 
-    noinline fn constUnset(self: *Run, pos: ast.Pos, i: u16) Error {
+    pub noinline fn constUnset(self: *Run, pos: ast.Pos, i: u16) Error {
         return self.fail(pos, .name, "the `const` {s} is read before its line has run", .{self.program.const_names[i]});
     }
 
@@ -415,7 +424,7 @@ pub const Run = struct {
         return self.unaryOp(e.pos, e.kind.unary.op, try self.eval(e.kind.unary.operand));
     }
 
-    noinline fn unaryOp(self: *Run, pos: ast.Pos, op: ast.UnOp, v: Value) Error!Value {
+    pub noinline fn unaryOp(self: *Run, pos: ast.Pos, op: ast.UnOp, v: Value) Error!Value {
         switch (op) {
             .not => return .{ .boolean = !v.truthy() },
             .neg => switch (v) {
@@ -483,7 +492,7 @@ pub const Run = struct {
         return if (v == .string) " (`tonumber(s)` reads one from a string)" else "";
     }
 
-    noinline fn arith(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
+    pub noinline fn arith(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const a = switch (l) {
             .int => |i| i,
             else => return self.fail(pos, .type, "`{s}` takes integers, and its left is {s}{s}", .{ opText(op), l.typeName(), toNumberHint(l) }),
@@ -554,6 +563,13 @@ pub const Run = struct {
         const parts = self.chain_parts.items[base..][0..n];
         const ops = self.chain_ops.items[base..][0..n];
         ops[n - 1] = ops[n - 2];
+        return self.joinChain(pos, parts, ops);
+    }
+
+    /// A `..` chain's parts, evaluated, joined (`concatChain`): `ops[k]` is
+    /// the `..` part k is checked at.
+    pub fn joinChain(self: *Run, pos: ast.Pos, parts: []const Value, ops: []const ast.Pos) Error!Value {
+        const n = parts.len;
         // Checked as the nested joins would have: the innermost pair, then
         // outward, each at its own `..`.
         var total: usize = 0;
@@ -608,7 +624,7 @@ pub const Run = struct {
         };
     }
 
-    noinline fn compare(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
+    pub noinline fn compare(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const order: std.math.Order = switch (l) {
             .int => |a| switch (r) {
                 .int => |b| std.math.order(a, b),
@@ -670,9 +686,7 @@ pub const Run = struct {
         const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.oom(pos);
         defer if (arg_exprs.len > small.len) self.machine.free(vals);
         for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
-        const out = try self.newTable(pos);
-        out.kind = .map;
-        const a = self.alloc;
+        const out = try self.attemptTable(pos);
         const got = self.invoke(pos, index, vals) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Stop => {
@@ -680,15 +694,32 @@ pub const Run = struct {
                 if (s.class == .budget) return error.Stop;
                 self.stop = null;
                 self.ret = .nil;
-                out.map.put(a, "ok", .{ .boolean = false }) catch return self.oom(pos);
-                out.map.put(a, "error", .{ .string = s.message }) catch return self.oom(pos);
-                out.map.put(a, "class", .{ .string = @tagName(s.class) }) catch return self.oom(pos);
-                out.map.put(a, "line", .{ .int = s.line }) catch return self.oom(pos);
-                out.map.put(a, "column", .{ .int = s.column }) catch return self.oom(pos);
-                out.map.put(a, "in_function", .{ .string = s.function }) catch return self.oom(pos);
-                return .{ .table = out };
+                return self.attemptFailed(pos, out, s);
             },
         };
+        return self.attemptReturned(pos, out, got);
+    }
+
+    /// `attempt`'s answer, made before the call (so its arena comes first).
+    pub fn attemptTable(self: *Run, pos: ast.Pos) Error!*Table {
+        const out = try self.newTable(pos);
+        out.kind = .map;
+        return out;
+    }
+
+    pub fn attemptFailed(self: *Run, pos: ast.Pos, out: *Table, s: diag.Stop) Error!Value {
+        const a = self.alloc;
+        out.map.put(a, "ok", .{ .boolean = false }) catch return self.oom(pos);
+        out.map.put(a, "error", .{ .string = s.message }) catch return self.oom(pos);
+        out.map.put(a, "class", .{ .string = @tagName(s.class) }) catch return self.oom(pos);
+        out.map.put(a, "line", .{ .int = s.line }) catch return self.oom(pos);
+        out.map.put(a, "column", .{ .int = s.column }) catch return self.oom(pos);
+        out.map.put(a, "in_function", .{ .string = s.function }) catch return self.oom(pos);
+        return .{ .table = out };
+    }
+
+    pub fn attemptReturned(self: *Run, pos: ast.Pos, out: *Table, got: Value) Error!Value {
+        const a = self.alloc;
         out.map.put(a, "ok", .{ .boolean = true }) catch return self.oom(pos);
         if (got != .nil) out.map.put(a, "value", got) catch return self.oom(pos);
         return .{ .table = out };
@@ -786,7 +817,7 @@ pub const Run = struct {
     }
 };
 
-fn opText(op: ast.BinOp) []const u8 {
+pub fn opText(op: ast.BinOp) []const u8 {
     return switch (op) {
         .add => "+",
         .sub => "-",
