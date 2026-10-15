@@ -50,8 +50,9 @@ const fragments = [_][]const u8{
     "s .. s",                   "{{{{",                                "))))",              "x = x + 1 ",                       "while true do ",         "for i = 1, 9223372036854775807 do ", "function f(n) return f(n + 1) end f(1) ", "1.5",
     "continue ",                "attempt(f, ",                         "attempt(g, s) ",    "function g(x) return x .. x end ", "rep(s, 1000000)",        "rep(\"x\", 9223372036854775807)",    "count_in(\"z\", \"a\")",                  "count_lines(\"z\")",
     "read(\"z\", 0, 99999999)", "read(\"z\", 9223372036854775807, 1)", "find_in(\"z\", s)", "walk(\"\", {depth = 1})",          "walk(\"\", {like = s})", "substitute(s, s, s .. s)",           "s = s .. s .. s ",                        "\"\\x4",
-    "\"\\xff\\0\"",             "min(",                                "max(1, ",           "abs(",                             "a:b()",                  "...",                                "[[x]]",                                   "goto x",
-    "\x00",                     "\xff",                                "\n",                "--",
+    "\"\\xff\\0\"",             "min(",                                "max(1, ",           "abs(",                             "-9223372036854775808",   "9223372036854775808",                "-(-",                                     "- -",
+    "-(",                       "a:b()",                               "...",               "[[x]]",                            "goto x",                 "\x00",                               "\xff",                                    "\n",
+    "--",
 };
 
 fn mutate(r: std.Random, alloc: std.mem.Allocator, src: []const u8) ![]u8 {

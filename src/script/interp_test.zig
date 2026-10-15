@@ -397,3 +397,10 @@ test "run: a stop inside a function names it" {
     defer top.deinit();
     try testing.expectEqualStrings("", top.stop.?.function);
 }
+
+test "run: the smallest integer can be written, with its minus; its magnitude alone cannot" {
+    try expectOutput("local m = -9223372036854775808 print(m, m + 1, -9223372036854775807 - 1 == m)", "-9223372036854775808\t-9223372036854775807\ttrue\n");
+    try expectStop("local m = 9223372036854775808", .syntax, null);
+    try expectStop("local m = 1 - 9223372036854775808", .syntax, null);
+    try expectStop("local m = -(-9223372036854775808)", .arithmetic, null);
+}

@@ -66,6 +66,9 @@ pub const Token = struct {
     column: u32,
     /// An int's value.
     int: i64 = 0,
+    /// 9223372036854775808: too big for 64 bits, but the magnitude of the
+    /// smallest integer, which a `-` before it makes (the parser's).
+    min_magnitude: bool = false,
 };
 
 pub const Error = struct {
@@ -236,7 +239,10 @@ pub const Lexer = struct {
             return self.fail(line, column, true, "float literals are not in this language: integers only");
         if (std.ascii.isAlphabetic(after) or after == '_') return self.fail(line, column, false, "a number runs into a name");
         const text = self.src[start..self.at];
-        const value = std.fmt.parseInt(i64, text, 10) catch return self.fail(line, column, false, "an integer literal too big for 64 bits");
+        const value = std.fmt.parseInt(i64, text, 10) catch {
+            if (std.mem.eql(u8, text, "9223372036854775808")) return .{ .tag = .int, .text = text, .line = line, .column = column, .int = std.math.minInt(i64), .min_magnitude = true };
+            return self.fail(line, column, false, "an integer literal too big for 64 bits");
+        };
         return .{ .tag = .int, .text = text, .line = line, .column = column, .int = value };
     }
 
@@ -355,7 +361,7 @@ test "lex: plain errors: an unclosed string, a string across a line, a number to
     const cases = [_]struct { src: []const u8, line: u32, column: u32 }{
         .{ .src = "x = \"abc", .line = 1, .column = 5 },
         .{ .src = "\n  x = \"a\nb\"", .line = 2, .column = 7 },
-        .{ .src = "x = 9223372036854775808", .line = 1, .column = 5 },
+        .{ .src = "x = 99999999999999999999", .line = 1, .column = 5 },
         .{ .src = "x = 1 @", .line = 1, .column = 7 },
         .{ .src = "x = 12ab", .line = 1, .column = 5 },
     };

@@ -509,14 +509,22 @@ pub const Parser = struct {
             try self.enter();
             defer self.leave();
             try self.advance();
-            // A literal's minus is the literal's: -9223372036854775808 cannot
-            // be written, but every other negative can, without overflow.
+            // The smallest integer, written: its magnitude is no integer,
+            // so only a minus right before it makes it one.
+            if (o == .neg and self.tok.tag == .int and self.tok.min_magnitude) {
+                try self.advance();
+                return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .int = std.math.minInt(i64) } });
+            }
+            // A literal's minus is the literal's: every negative can be
+            // written without overflow.
             const operand = try self.unary();
-            if (o == .neg and operand.kind == .int) {
-                operand.kind.int = std.math.negate(operand.kind.int) catch unreachable;
+            // Folded, unless it overflows (`-(-9223372036854775808)`): that
+            // is left to run, as the arithmetic error it is.
+            if (o == .neg and operand.kind == .int) if (std.math.negate(operand.kind.int)) |n| {
+                operand.kind.int = n;
                 operand.pos = pos;
                 return operand;
-            }
+            } else |_| {};
             return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .unary = .{ .op = o, .operand = operand } } });
         }
         return self.suffixed();
@@ -561,6 +569,7 @@ pub const Parser = struct {
                 return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .boolean = t.tag == .kw_true } });
             },
             .int => {
+                if (t.min_magnitude) return self.failAt(pos, .syntax, "an integer literal too big for 64 bits (only -9223372036854775808, with its minus, is the smallest integer)");
                 try self.advance();
                 return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .int = t.int } });
             },

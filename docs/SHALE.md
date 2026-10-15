@@ -103,7 +103,7 @@ value:
 |---|---|
 | `nil` | |
 | booleans | `true`, `false` |
-| integers | 64-bit and checked: overflow stops the script. Literals are decimal. The smallest integer has no literal: write `-9223372036854775807 - 1` |
+| integers | 64-bit and checked: overflow stops the script. Literals are decimal. The smallest, `-9223372036854775808`, is written with its minus; its magnitude alone is too big |
 | strings | bytes, `"..."` or `'...'`. The escapes are `\n \t \r \0 \xHH \\ \" \'`. A string ends on its line |
 | lists | `{1, 2}`, indexed from 1 |
 | maps | `{a = 1, ["b c"] = 2}`, read as `m.a` or `m["a"]`; keys are strings, kept in the order first set |
