@@ -540,57 +540,41 @@ test "builtins: seconds gives only what date can write: 1970 to 9999" {
 
 // ── 208's cold review ────────────────────────────────────────────────────
 
-test "builtins: the linear finder finds what std's search finds, every match, on needles long enough to use it" {
-    // Proves Finder's KMP against the plain search, on a two-letter
-    // alphabet where long needles nearly match everywhere.
-    var prng: std.Random.DefaultPrng = .init(208);
-    const r = prng.random();
-    var hay: [600]u8 = undefined;
-    var needle: [48]u8 = undefined;
-    for (0..300) |_| {
-        for (&hay) |*c| c.* = "ab"[r.uintLessThan(u8, if (r.boolean()) 2 else 1)];
-        const len = r.intRangeAtMost(usize, 17, needle.len);
-        // Often a piece of the haystack itself, so it is found.
-        if (r.boolean()) {
-            const at = r.uintLessThan(usize, hay.len - len);
-            @memcpy(needle[0..len], hay[at..][0..len]);
-        } else for (needle[0..len]) |*c| {
-            c.* = "ab"[r.uintLessThan(u8, 2)];
-        }
-        const n = needle[0..len];
-        var from: usize = 0;
-        var ref_from: usize = 0;
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        const f = try finderFor(arena.allocator(), n);
-        while (true) {
-            const got = f.find(&hay, from);
-            const want = std.mem.indexOfPos(u8, &hay, ref_from, n);
-            try testing.expectEqual(want, got);
-            if (got == null) break;
-            from = got.? + 1;
-            ref_from = want.? + 1;
-        }
+test "builtins: a search pays for its matches and its compares: dense matches cost at least a step each (209's cold review)" {
+    // Before, substitute(s, "a", "") over a megabyte of `a` charged 65,536
+    // steps for a million matches, twice searched: 661 ms in the site's
+    // 2M. count_lines on a file of newlines, the same.
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const nl = try testing.allocator.alloc(u8, 100_000);
+    defer testing.allocator.free(nl);
+    @memset(nl, '\n');
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/nl.txt", .data = nl });
+    const cases = [_]struct { setup: []const u8, call: []const u8, matches: u64 }{
+        .{ .setup = "local s = rep(\"a\", 100000)", .call = "local x = substitute(s, \"a\", \"\")", .matches = 2 * 100_000 },
+        .{ .setup = "local s = rep(\"ab\", 50000)", .call = "local x = #split(s, \"b\")", .matches = 50_000 },
+        .{ .setup = "", .call = "local x = count_lines(\"nl.txt\")", .matches = 100_000 },
+        .{ .setup = "", .call = "local x = count_in(\"nl.txt\", \"\\n\")", .matches = 100_000 },
+        // A near-match at every byte: the compares are paid.
+        .{ .setup = "local s = rep(\"a\", 100000)", .call = "local x = find(s, rep(\"a\", 63) .. \"b\")", .matches = 100_000 },
+    };
+    for (cases) |c| {
+        var setup = f.run(c.setup, .{});
+        defer setup.deinit();
+        var src: [512]u8 = undefined;
+        var r = f.run(try std.fmt.bufPrint(&src, "{s}\n{s}", .{ c.setup, c.call }), .{ .steps = 100_000_000 });
+        defer r.deinit();
+        try testing.expect(r.finished());
+        errdefer std.debug.print("{s}: {d} steps\n", .{ c.call, r.steps - setup.steps });
+        try testing.expect(r.steps - setup.steps >= c.matches);
     }
 }
 
-/// A Finder outside a run, for the property above: its table built as
-/// `Finder.init` builds it.
-fn finderFor(a: std.mem.Allocator, needle: []const u8) !script.builtins_text.Finder {
-    const t = try a.alloc(u32, needle.len);
-    t[0] = 0;
-    var k: u32 = 0;
-    for (1..needle.len) |i| {
-        while (k > 0 and needle[i] != needle[k]) k = t[k - 1];
-        if (needle[i] == needle[k]) k += 1;
-        t[i] = k;
-    }
-    return .{ .needle = needle, .table = t };
-}
-
-test "builtins: a long near-match needle costs what its haystack does: find, contains, substitute, split and count_in all stay linear" {
-    // At 208's first cut each of these did haystack × needle work for a
-    // step a haystack byte: tens of seconds inside the budget.
+test "builtins: a long near-match needle pays for its compares: each search stops at the step budget, quickly, instead of running for seconds" {
+    // At 208's first cut each of these did haystack x needle work for a
+    // step a haystack byte: tens of seconds inside the budget. Now every
+    // compare is charged, so the budget ends each one soon.
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -598,12 +582,16 @@ test "builtins: a long near-match needle costs what its haystack does: find, con
     defer testing.allocator.free(big);
     @memset(big, 'a');
     try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/as.txt", .data = big });
-    try f.expectOutput(
-        \\local hay = rep("a", 300000)
-        \\local needle = rep("a", 30000) .. "b"
-        \\print(find(hay, needle), contains(hay, needle), #substitute(hay, needle, "x"), #split(hay, needle))
-        \\print(count_in("as.txt", needle), find_in("as.txt", needle), count_in("as.txt", rep("a", 30000)))
-    , "nil\tfalse\t300000\t1\n0\tnil\t10\n");
+    const calls = [_][]const u8{ "find(hay, needle)", "contains(hay, needle)", "substitute(hay, needle, \"x\")", "split(hay, needle)", "count_in(\"as.txt\", needle)", "find_in(\"as.txt\", needle)" };
+    for (calls) |call| {
+        var src: [256]u8 = undefined;
+        var r = f.run(try std.fmt.bufPrint(&src, "local hay = rep(\"a\", 300000) local needle = rep(\"a\", 30000) .. \"b\" local x = {s}", .{call}), .{ .steps = 2_000_000 });
+        defer r.deinit();
+        errdefer std.debug.print("{s}\n", .{call});
+        try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
+    }
+    // Matches found where they are.
+    try f.expectOutput("print(count_in(\"as.txt\", rep(\"a\", 30000)), find(rep(\"ab\", 5), \"bab\"))", "10\t2\n");
 }
 
 test "builtins: every scan of a run reuses one buffer: five hundred files scanned cost no more arena than one" {

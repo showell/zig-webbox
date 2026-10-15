@@ -22,7 +22,9 @@ This page is the reference:
 
 The code is `src/script/`, and `script.zig` is the entry.
 
-    script.run(io, backing_allocator, root, source, budgets, now, out) -> Result
+```zig
+script.run(io, backing_allocator, root, source, budgets, now, out) -> Result
+```
 
 The `Result` owns the run's arena, so call `result.deinit()` when done. It
 says:
@@ -33,43 +35,93 @@ says:
 
 ## A first script, step by step
 
+Every block of Shale on this page runs as a test, on a store shaped like
+angry-gopher's (the cookbook's below), at `now()` = 2026-10-14. What it
+prints is under `-- prints:` (a tab shows as `<TAB>`), or how it stops
+under `-- stops:`.
+
 **Look before you change.** List what is at the root:
 
-    for name in ls("") do print(name) end
+```shale
+for name in ls("") do print(name) end
+-- prints:
+-- chat
+-- games
+```
 
 **Walk a folder** to see everything under it, one store read per folder:
 
-    for e in walk("chat", {like = "*.md"}) do
-      print(e.path, e.size, date(e.modified))
-    end
+```shale
+for e in walk("chat", {like = "*.md"}) do
+  print(e.path, e.size)
+end
+-- prints:
+-- chat/1_2/sessions/hello.md<TAB>293
+-- chat/channels/general/sessions/lunch.md<TAB>87
+-- chat/channels/general/sessions/plans.md<TAB>4166
+-- chat/channels/random/sessions/misc.md<TAB>188
+```
 
 **Read only what you need.** Here, a count cache's first line and the
 start of a transcript:
 
-    local cache = read("chat/1_2/sessions/hello.count")
-    print(words(lines(cache)[1])[1])     -- the cached message count
-    print(read("chat/1_2/sessions/hello.md", 0, 200))
+```shale
+local cache = read("chat/1_2/sessions/hello.count")
+print(words(lines(cache)[1])[1])     -- the cached message count
+print(read("chat/1_2/sessions/hello.md", 0, 40))
+-- prints:
+-- 3
+-- MSG_hello_1
+-- from: steve
+-- date: 2026-10-13
+```
 
 **Count without holding a file.** A message is a block, and blocks are
 joined by the separator:
 
-    local sep = "\n\n-------------\n"
-    print(count_in("chat/1_2/sessions/hello.md", sep) + 1)
+```shale
+local sep = "\n\n-------------\n"
+print(count_in("chat/1_2/sessions/hello.md", sep) + 1)
+-- prints:
+-- 3
+```
 
 **Then change something.** The effects log lists every change with its
 outcome:
 
-    mkdir("shale-check")
-    replace("shale-check/note.txt", "written at " .. date(now()) .. "\n")
+```shale
+mkdir("shale-check")
+replace("shale-check/note.txt", "written at " .. date(now()) .. "\n")
+print(read("shale-check/note.txt"))
+-- prints:
+-- written at 2026-10-14T00:00:00Z
+--
+```
 
 **Survive one bad file** with `attempt`, which turns an error into a
 value:
 
-    function size_of(path) return tonumber(words(read(path))[1]) end
-    for e in walk("chat", {like = "*.count"}) do
-      local r = attempt(size_of, e.path)
-      if r.ok then print(e.path, r.value) else print(e.path, "unreadable:", r.error) end
-    end
+```shale
+function size_of(path) return tonumber(words(read(path))[1]) end
+replace("chat/1_2/sessions/torn.count", "x y\n")
+for e in walk("chat", {like = "*.count"}) do
+  local r = attempt(size_of, e.path)
+  if r.ok then print(e.path, r.value) else print(e.path, "unreadable:", r.class) end
+end
+-- prints:
+-- chat/1_2/sessions/hello.count<TAB>3
+-- chat/1_2/sessions/torn.count<TAB>unreadable:<TAB>argument
+-- chat/channels/general/sessions/lunch.count<TAB>1
+-- chat/channels/general/sessions/plans.count<TAB>40
+```
+
+**A name that is a value can't be called:**
+
+```shale
+local remove = 1
+remove("chat/1_2/sessions/hello.md")
+-- stops: refused
+```
 
 ## The language
 
@@ -198,7 +250,16 @@ was in. The classes are:
 
 ### `attempt`: surviving one bad file
 
-    local r = attempt(f, a, b)
+```shale
+function half(n) return tonumber(n) // 2 end
+local good = attempt(half, "10")
+local bad = attempt(half, "ten")
+print(good.ok, good.value)
+print(bad.ok, bad.class, bad.line, bad.in_function)
+-- prints:
+-- true<TAB>5
+-- false<TAB>argument<TAB>1<TAB>half
+```
 
 `attempt` calls the script's function `f` with the arguments. The
 arguments are evaluated first, outside the attempt, as Lua's `pcall` does.
@@ -231,32 +292,34 @@ Two things it does not do:
 
 ### The grammar
 
-    script    = { stat } ;
-    stat      = "local" NAME [ "=" expr ]
-              | "const" NAME "=" expr                         (top level)
-              | target "=" expr
-              | call
-              | "if" expr "then" block { "elseif" expr "then" block } [ "else" block ] "end"
-              | "while" expr "do" block "end"
-              | "for" NAME "=" expr "," expr [ "," expr ] "do" block "end"
-              | "for" NAME "in" expr "do" block "end"
-              | "function" NAME "(" [ NAME { "," NAME } ] ")" block "end"   (top level)
-              | "do" block "end"
-              | "break" | "continue"
-              | "return" [ expr ]                             (last in its block)
-              | ";" ;
-    block     = { stat } ;
-    target    = NAME | value "[" expr "]" | value "." NAME ;
-    expr      = expr binop expr | unop expr | value ;
-    value     = primary { "[" expr "]" | "." NAME } ;
-    primary   = "nil" | "true" | "false" | INT | STRING | NAME | call
-              | "(" expr ")" | "{" [ field { ( "," | ";" ) field } [ "," | ";" ] ] "}" ;
-    call      = NAME "(" [ expr { "," expr } ] ")"
-              | "attempt" "(" NAME { "," expr } ")" ;
-    field     = expr | NAME "=" expr | "[" STRING "]" "=" expr ;
-    binop     = "or" | "and" | "==" | "~=" | "<" | "<=" | ">" | ">=" | ".."
-              | "+" | "-" | "*" | "//" | "%" ;
-    unop      = "not" | "-" | "#" ;
+```ebnf
+script    = { stat } ;
+stat      = "local" NAME [ "=" expr ]
+          | "const" NAME "=" expr                         (top level)
+          | target "=" expr
+          | call
+          | "if" expr "then" block { "elseif" expr "then" block } [ "else" block ] "end"
+          | "while" expr "do" block "end"
+          | "for" NAME "=" expr "," expr [ "," expr ] "do" block "end"
+          | "for" NAME "in" expr "do" block "end"
+          | "function" NAME "(" [ NAME { "," NAME } ] ")" block "end"   (top level)
+          | "do" block "end"
+          | "break" | "continue"
+          | "return" [ expr ]                             (last in its block)
+          | ";" ;
+block     = { stat } ;
+target    = NAME | value "[" expr "]" | value "." NAME ;
+expr      = expr binop expr | unop expr | value ;
+value     = primary { "[" expr "]" | "." NAME } ;
+primary   = "nil" | "true" | "false" | INT | STRING | NAME | call
+          | "(" expr ")" | "{" [ field { ( "," | ";" ) field } [ "," | ";" ] ] "}" ;
+call      = NAME "(" [ expr { "," expr } ] ")"
+          | "attempt" "(" NAME { "," expr } ")" ;
+field     = expr | NAME "=" expr | "[" STRING "]" "=" expr ;
+binop     = "or" | "and" | "==" | "~=" | "<" | "<=" | ">" | ">=" | ".."
+          | "+" | "-" | "*" | "//" | "%" ;
+unop      = "not" | "-" | "#" ;
+```
 
 `--` starts a comment that runs to the end of its line.
 
@@ -268,9 +331,15 @@ Two things it does not do:
   step for every 16 bytes** (or part of 16): what a `read` brings, what a
   scan (`count_lines`, `count_in`, `find_in`) looks at, and the haystack
   a search (`find`, `contains`, `starts_with`, `ends_with`, `split`,
-  `substitute`) runs over. The bench prices that: a byte read whole costs
-  0.4 ns and a byte scanned 3.7 ns, against 7-15 ns for an interpreted
-  step. The operators are held to it too: a map's key is charged its
+  `substitute`) runs over. **A search also pays for what it finds:** a
+  step for every place its fast pass stops (a match, or a first byte that
+  begins one), and a step for 16 bytes it compares there, so a match every
+  byte costs a step a match and a long near-match pays for its compares.
+  Measured in ReleaseSafe, the worst shapes a cold review found (a
+  substitution matching every byte, scans of a file of newlines, of prose
+  for a space, near-matches) run at 10 to 24 ns a step, against 7 to 15
+  ns for the interpreter's own steps (they ran at 67 to 713 before
+  matches were charged). The operators are held to it too: a map's key is charged its
   length wherever it is hashed. A sort is charged its bound before it
   runs (n log n comparisons, and every byte in each of the log n passes).
   `charge_test.zig` holds every builtin and operator to this: its own
@@ -294,9 +363,9 @@ names the builtin and the argument.
 | `is_dir(p)` | whether a folder is there | a read | `store` |
 | `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `budget read_bytes` when the file is longer than what is left; `store` |
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count; `store` for a folder or a missing file |
-| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte, and a step for 16; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
-| `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines` | `argument` for "" or a needle over 64 KiB |
-| `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_lines`, stopping at the first | as `count_in` |
+| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
+| `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB |
+| `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_in`, stopping at the first | as `count_in` |
 | `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **one read a folder listed**, not one an entry; a step an entry and each path's bytes | `store`; `argument` for an unknown option |
 | `replace(p, s)` | writes the file whole: never a torn file. There is no plain `write` | a change; each byte a change byte and a step | `store`, logged |
 | `append(p, s)` | adds to the end | as `replace` | `store`, logged |
@@ -315,10 +384,10 @@ An entry that `like` or `kind` leaves out is never stat'ed.
 ### Text
 
 Plain text everywhere: **not Lua's patterns.** Positions in strings are
-1-based, as Lua's are. **Every search is linear in its haystack**
-(`find`, `contains`, `split`, `substitute`, and the store's scans): a
-needle of up to 16 bytes by the usual search, at most 16 compares a byte;
-a longer one by Knuth-Morris-Pratt, its table (4 bytes a needle byte, one for the run, grown to the longest needle) charged a step a byte.
+1-based, as Lua's are. **Every search is charged by its work**
+(`find`, `contains`, `split`, `substitute`, and the store's scans): the
+haystack a step for 16 bytes, every place the search stops at a step, and
+the bytes compared there a step for 16 (see "What a builtin costs").
 
 | builtin | gives |
 |---|---|
@@ -424,7 +493,8 @@ chat is about 190 MB. Use what the site keeps instead (the `.count`
 sidecars, `walk`'s sizes and times), read parts of files, and use
 `budget()` to stop at a point of your own. The cookbook does all three.
 At a step for 16 bytes, the site's whole read budget is in reach: its
-16 MiB of read bytes cost 1M of its 2M steps, read or scanned. On a
+16 MiB of read bytes cost 1M of its 2M steps when read, more when
+scanned for something that is often there (a step a match). On a
 site-shaped folder of 3.9 MB, the cookbook's scans went from about 2.8M
 steps at a step a byte to about 0.26M.
 
@@ -454,7 +524,9 @@ holds every source of the module.
 
 ## The runner
 
-    SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
+```sh
+SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
+```
 
 - `SHALE_NOW` sets `now()` (default 0).
 - The runner sets the store's bases as a server does, so path limits are
@@ -496,7 +568,9 @@ clock's seconds with it. A missing sequence file is refused, never read as
 nest, by their spellings. Symlinks inside the data root are not checked
 (metal has none).
 
-    zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
+```sh
+zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
+```
 
 `src/shale_sign.zig` makes the key pair once (the private key goes at
 `~/.shale_signing_key`, mode 600, never printed) and signs a script with
@@ -539,8 +613,10 @@ budgets, and changes nothing.
 - **No effects beyond the store.** No network, no clock but `now()`, no
   host.
 - **A step a byte for a builtin's work, and a step for 16 bytes of bulk
-  byte work** (Steve, 209): reads, scans and the haystacks of searches,
-  which the bench measures at 3 to 30 times cheaper than a step.
+  byte work** (Steve, 209): reads, scans and the haystacks of searches.
+  A search also pays a step a place it stops and for its compares, after
+  a cold review timed a dense substitution at 33 times its budget's time
+  without that.
 - **A function is called only after it is declared,** and a name that is
   a value in scope can't be called (Steve, 209). So a new builtin never
   changes what a script does.

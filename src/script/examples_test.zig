@@ -291,3 +291,138 @@ test "every read-only script of the cookbook finishes on the site-shaped store i
         try testing.expectEqual(@as(usize, 0), r.effects.len);
     }
 }
+
+// ── 209(b): docs/SHALE.md's snippets run ─────────────────────────────────
+
+/// One ```shale block of the reference: its source, and what it must do,
+/// from its last comment lines: `-- prints:` and the output, a line of it
+/// each as `-- text` (or `--` for an empty line), or `-- stops: <class>`.
+const Snippet = struct { line: usize, source: []const u8, prints: ?[]const u8, stops: ?[]const u8 };
+
+fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
+    var out: std.ArrayList(Snippet) = .empty;
+    var lines = std.mem.splitScalar(u8, doc, '\n');
+    var n: usize = 0;
+    var in_block: ?[]const u8 = null;
+    var start: usize = 0;
+    var body: std.ArrayList(u8) = .empty;
+    var prev_blank = true;
+    while (lines.next()) |line| {
+        n += 1;
+        if (in_block) |lang| {
+            if (std.mem.eql(u8, line, "```")) {
+                in_block = null;
+                if (std.mem.eql(u8, lang, "shale")) try out.append(a, try parseSnippet(a, start, body.items));
+                body = .empty;
+            } else if (std.mem.eql(u8, lang, "shale")) {
+                try body.appendSlice(a, line);
+                try body.append(a, '\n');
+            }
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "```")) {
+            const lang = line[3..];
+            if (lang.len == 0) {
+                std.debug.print("docs/SHALE.md:{d}: a code block with no language: say what it is (shale, zig, sh, ebnf)\n", .{n});
+                return error.TestUnexpectedResult;
+            }
+            in_block = lang;
+            start = n;
+            continue;
+        }
+        // An indented code block would never run: every block is fenced.
+        if (prev_blank and std.mem.startsWith(u8, line, "    ") and !std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "-")) {
+            std.debug.print("docs/SHALE.md:{d}: an indented code block: fence it, with its language\n", .{n});
+            return error.TestUnexpectedResult;
+        }
+        prev_blank = std.mem.trim(u8, line, " ").len == 0;
+    }
+    return out.items;
+}
+
+fn parseSnippet(a: std.mem.Allocator, line: usize, text: []const u8) !Snippet {
+    if (std.mem.indexOf(u8, text, "\n-- stops: ")) |at| {
+        const class = std.mem.trim(u8, text[at + "\n-- stops: ".len ..], " \n");
+        return .{ .line = line, .source = text[0 .. at + 1], .prints = null, .stops = class };
+    }
+    const mark = std.mem.indexOf(u8, text, "-- prints:\n") orelse {
+        std.debug.print("docs/SHALE.md:{d}: a shale block with no `-- prints:` or `-- stops:`: say what it does\n", .{line});
+        return error.TestUnexpectedResult;
+    };
+    var want: std.ArrayList(u8) = .empty;
+    const after = std.mem.trimEnd(u8, text[mark + "-- prints:\n".len ..], "\n");
+    if (after.len == 0) return .{ .line = line, .source = text[0..mark], .prints = "", .stops = null };
+    var rest = std.mem.splitScalar(u8, after, '\n');
+    while (rest.next()) |l| {
+        if (std.mem.eql(u8, l, "--")) {
+            try want.append(a, '\n');
+        } else if (std.mem.startsWith(u8, l, "-- ")) {
+            try want.appendSlice(a, l[3..]);
+            try want.append(a, '\n');
+        } else {
+            std.debug.print("docs/SHALE.md:{d}: after `-- prints:`, only `-- ` lines\n", .{line});
+            return error.TestUnexpectedResult;
+        }
+    }
+    return .{ .line = line, .source = text[0..mark], .prints = want.items, .stops = null };
+}
+
+/// Every ```shale block of the reference, run on the site-shaped store at
+/// 2026-10-14 (tabs written as `<TAB>` in the doc).
+fn checkDoc(doc: []const u8) !usize {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const all = try snippets(a, doc);
+    var wrong: usize = 0;
+    for (all) |sn| {
+        var f: Fixture = undefined;
+        try f.init();
+        defer f.deinit();
+        var r = f.runAt(sn.source, 1791936000, &out_buf);
+        defer r.deinit();
+        if (sn.stops) |class| {
+            const s = r.stop orelse {
+                std.debug.print("docs/SHALE.md:{d}: finished, and should stop with {s}\n", .{ sn.line, class });
+                return error.TestUnexpectedResult;
+            };
+            if (!std.mem.eql(u8, @tagName(s.class), class)) {
+                std.debug.print("docs/SHALE.md:{d}: stopped {s} ({s}), not {s}\n", .{ sn.line, @tagName(s.class), s.message, class });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.stop) |s| {
+            std.debug.print("docs/SHALE.md:{d}: stopped {d}:{d} {s}: {s}\n", .{ sn.line, s.line, s.column, @tagName(s.class), s.message });
+            return error.TestUnexpectedResult;
+        }
+        const got = try std.mem.replaceOwned(u8, a, r.output, "\t", "<TAB>");
+        if (!std.mem.eql(u8, got, sn.prints.?)) {
+            // Every block that differs is said, so a doc is fixed in one go.
+            std.debug.print("docs/SHALE.md:{d}: prints\n{s}-- not --\n{s}", .{ sn.line, got, sn.prints.? });
+            wrong += 1;
+        }
+    }
+    if (wrong > 0) return error.TestUnexpectedResult;
+    return all.len;
+}
+
+test "docs/SHALE.md: every shale block runs on the site-shaped store and prints what the doc says it prints; no block goes unchecked" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const doc = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), "docs/SHALE.md", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(doc);
+    try testing.expect(try checkDoc(doc) >= 8);
+}
+
+test "docs/SHALE.md's check fires: a snippet whose output is wrong, one with no expectation, an unfenced block, a block with no language" {
+    const planted = [_][]const u8{
+        "```shale\nprint(1 + 1)\n-- prints:\n-- 3\n```\n",
+        "```shale\nprint(1)\n```\n",
+        "text\n\n    print(1)\n",
+        "```\nprint(1)\n```\n",
+        "```shale\nprint(1)\n-- stops: type\n```\n",
+    };
+    for (planted) |p| try testing.expectError(error.TestUnexpectedResult, checkDoc(p));
+    try testing.expectEqual(@as(usize, 1), try checkDoc("```shale\nprint(1, 2)\n-- prints:\n-- 1<TAB>2\n```\n"));
+}

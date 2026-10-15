@@ -231,7 +231,7 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
         const window = buf[0 .. kept + got];
         r.last = window[window.len - 1];
         var from: usize = 0;
-        while (finder.find(window, from)) |i| {
+        while (try finder.find(window, from)) |i| {
             if (r.first == null) r.first = base + i;
             r.count += 1;
             if (first_only) return r;

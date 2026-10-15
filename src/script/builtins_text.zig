@@ -61,7 +61,7 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const finder = try Finder.init(run, pos, old);
     var n: usize = 0;
     var at: usize = 0;
-    while (finder.find(str, at)) |i| : (at = i + old.len) n += 1;
+    while (try finder.find(str, at)) |i| : (at = i + old.len) n += 1;
     if (n == 0) return .{ .string = str };
     const added = std.math.mul(usize, n, new.len) catch return run.budgetStop(pos, .arena);
     const total = str.len - n * old.len + added;
@@ -69,7 +69,7 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const out = run.alloc.alloc(u8, total) catch return run.oom(pos);
     var w: usize = 0;
     at = 0;
-    while (finder.find(str, at)) |i| : (at = i + old.len) {
+    while (try finder.find(str, at)) |i| : (at = i + old.len) {
         @memcpy(out[w..][0 .. i - at], str[at..i]);
         w += i - at;
         @memcpy(out[w..][0..new.len], new);
@@ -79,48 +79,37 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .string = out };
 }
 
-/// **A NEEDLE FOUND IN LINEAR TIME** (208's cold review): every builtin
-/// that looks for text in text charges a step a byte of the haystack, so
-/// the search must cost about that. std's search costs up to haystack ×
-/// needle (a long near-match, `rep("a", 30000) .. "b"` in a run of `a`,
-/// took 75 s inside the step budget). A needle of up to `short` bytes is
-/// searched by std (at most `short` compares a byte, which a step for 16
-/// bytes still covers); a longer one by Knuth-Morris-Pratt, linear, its
-/// table charged a step a byte.
+/// **A NEEDLE FOUND, ITS WORK CHARGED AS IT IS DONE** (208's and 209's
+/// cold reviews): the haystack is charged by its caller, a step for 16
+/// bytes, for the fast pass that looks for the needle's first byte. Every
+/// place that pass stops at is a step more, and the bytes compared there
+/// a step for 16. So a dense haystack (a match every byte) pays a step a
+/// match, and a long near-match (`rep("a", 30000) .. "b"` in a run of `a`,
+/// 75 s inside the budget at 208's first cut) pays for every compare.
 pub const Finder = struct {
+    run: *Run,
+    pos: ast.Pos,
     needle: []const u8,
-    table: ?[]u32 = null,
-
-    pub const short = 4;
 
     pub fn init(run: *Run, pos: ast.Pos, needle: []const u8) Error!Finder {
-        if (needle.len <= short) return .{ .needle = needle };
-        try run.charge(pos, needle.len);
-        // One table for the run, grown to the longest needle yet: a search
-        // is never inside another.
-        if (run.kmp_table.len < needle.len) run.kmp_table = run.alloc.alloc(u32, needle.len) catch return run.oom(pos);
-        const t = run.kmp_table[0..needle.len];
-        t[0] = 0;
-        var k: u32 = 0;
-        for (1..needle.len) |i| {
-            while (k > 0 and needle[i] != needle[k]) k = t[k - 1];
-            if (needle[i] == needle[k]) k += 1;
-            t[i] = k;
-        }
-        return .{ .needle = needle, .table = t };
+        return .{ .run = run, .pos = pos, .needle = needle };
     }
 
     /// Where the needle first is in `hay` at or after `from`.
-    pub fn find(f: *const Finder, hay: []const u8, from: usize) ?usize {
-        const t = f.table orelse return std.mem.indexOfPos(u8, hay, from, f.needle);
-        var k: usize = 0;
-        var i = from;
-        while (i < hay.len) : (i += 1) {
-            while (k > 0 and hay[i] != f.needle[k]) k = t[k - 1];
-            if (hay[i] == f.needle[k]) k += 1;
-            if (k == f.needle.len) return i + 1 - k;
-        }
-        return null;
+    pub fn find(f: *const Finder, hay: []const u8, from: usize) Error!?usize {
+        const n = f.needle;
+        var at = from;
+        var stops: u64 = 0;
+        var compared: u64 = 0;
+        const found: ?usize = while (std.mem.indexOfScalarPos(u8, hay, at, n[0])) |i| {
+            stops += 1;
+            if (hay.len - i < n.len) break null;
+            compared += n.len - 1;
+            if (std.mem.eql(u8, hay[i + 1 ..][0 .. n.len - 1], n[1..])) break i;
+            at = i + 1;
+        } else null;
+        try f.run.charge(f.pos, stops + (std.math.divCeil(u64, compared, bi.bytes_per_step) catch unreachable));
+        return found;
     }
 };
 
@@ -132,7 +121,7 @@ fn split(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const finder = try Finder.init(run, pos, sep);
     const out = try run.newTable(pos);
     var at: usize = 0;
-    while (finder.find(str, at)) |i| : (at = i + sep.len) {
+    while (try finder.find(str, at)) |i| : (at = i + sep.len) {
         // A piece is an item made: a step each, as the haystack is cheap.
         try run.charge(pos, 1);
         out.list.append(run.alloc, .{ .string = str[at..i] }) catch return run.oom(pos);
@@ -202,7 +191,7 @@ fn looks(comptime l: Look) bi.Impl {
             return .{ .boolean = switch (l) {
                 .starts_with => std.mem.startsWith(u8, str, sub_s),
                 .ends_with => std.mem.endsWith(u8, str, sub_s),
-                .contains => (try Finder.init(run, pos, sub_s)).find(str, 0) != null,
+                .contains => (try (try Finder.init(run, pos, sub_s)).find(str, 0)) != null,
             } };
         }
     }.f;
@@ -213,7 +202,7 @@ fn find(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .find, args[0], "its string");
     const sub_s = try bi.stringArg(run, pos, .find, args[1], "what it looks for");
     try bi.chargeBytes(run, pos, str.len);
-    const at = (try Finder.init(run, pos, sub_s)).find(str, 0) orelse return .nil;
+    const at = (try (try Finder.init(run, pos, sub_s)).find(str, 0)) orelse return .nil;
     return .{ .int = @intCast(at + 1) };
 }
 

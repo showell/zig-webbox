@@ -87,8 +87,6 @@ pub const Run = struct {
     /// The buffer every scan of the file reuses (`count_in`, `find_in`,
     /// `count_lines`).
     scan_buf: []u8 = &.{},
-    /// The table every long needle's search reuses (`builtins_text.Finder`).
-    kmp_table: []u32 = &.{},
     /// The top-level `const`s, each null until its line has run.
     consts: []?Value = &.{},
     /// The lowest frame address the walk reached: the Zig stack it took,
