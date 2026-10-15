@@ -655,3 +655,52 @@ test "builtins: one read brings at most its cap, whole or in part; a bigger file
     try testing.expect(r.finished());
     try testing.expectEqualStrings("3000\n", r.output);
 }
+
+test "builtins: a scan takes at most its cap too; in parts, by its range, it counts and finds as the whole file does (metal-vmm QUEUE 211, the caps)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const data = try plantedFile(&f, "data/big.txt", 5000, 3);
+    defer testing.allocator.free(data);
+    const capped: script.Budgets = .{ .call_bytes = 700 };
+    // The whole file, or a range past the cap, is refused, naming the range.
+    for ([_][]const u8{ "count_lines(\"big.txt\")", "count_in(\"big.txt\", \"ab\")", "find_in(\"big.txt\", \"ab\")", "count_lines(\"big.txt\", 0, 701)", "find_in(\"big.txt\", \"ab\", 100)" }) |call| {
+        var src: [128]u8 = undefined;
+        var r = f.run(try std.fmt.bufPrint(&src, "print({s})", .{call}), capped);
+        defer r.deinit();
+        const s = r.stop orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(script.diag.Class.argument, s.class);
+        try testing.expect(std.mem.indexOf(u8, s.message, "offset, n)") != null);
+    }
+    // In parts of 700: the counts add up to the whole's, and the first
+    // match is found in the part it starts in, read past the part's end.
+    var r = f.run(
+        \\local size = stat("big.txt").size
+        \\local lines = 0
+        \\local abs = 0
+        \\local first = nil
+        \\local at = 0
+        \\while at < size do
+        \\  lines = lines + count_lines("big.txt", at, 700)
+        \\  abs = abs + count_in("big.txt", "ab", at, 700)
+        \\  if first == nil then first = find_in("big.txt", "b\na\nb", at, 700) end
+        \\  at = at + 700
+        \\end
+        \\print(lines, abs, first)
+    , capped);
+    defer r.deinit();
+    if (r.stop) |s| std.debug.print("stopped: {s}\n", .{s.message});
+    try testing.expect(r.finished());
+    var want: [64]u8 = undefined;
+    const nl = std.mem.count(u8, data, "\n") + @intFromBool(data[data.len - 1] != '\n');
+    const first = std.mem.indexOf(u8, data, "b\na\nb").?;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{d}\t{d}\t{d}\n", .{ nl, std.mem.count(u8, data, "ab"), first }), r.output);
+    // A match across a part's end belongs to the part it starts in.
+    var seam: [1400]u8 = undefined;
+    @memset(&seam, 'x');
+    @memcpy(seam[699..701], "ab");
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/seam.txt", .data = &seam });
+    var s = f.run("print(find_in(\"seam.txt\", \"ab\", 0, 700), find_in(\"seam.txt\", \"ab\", 700, 700), count_in(\"seam.txt\", \"ab\", 0, 700), count_in(\"seam.txt\", \"ab\", 700, 700), count_lines(\"seam.txt\", 0, 700), count_lines(\"seam.txt\", 700, 700), find_in(\"seam.txt\", \"ab\", 5000, 10))", capped);
+    defer s.deinit();
+    try testing.expectEqualStrings("699\tnil\t1\t0\t0\t1\tnil\n", s.output);
+}

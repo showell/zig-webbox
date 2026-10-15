@@ -402,9 +402,9 @@ names the builtin and the argument.
 | `is_dir(p)` | whether a folder is there | a read | `store` |
 | `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `argument` for a file over the call-bytes cap (1 MiB): read it in parts; `budget read_bytes` when the file is longer than what is left; `store` |
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
-| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
-| `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB |
-| `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_in`, stopping at the first | as `count_in` |
+| `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
+| `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
+| `find_in(p, s[, offset[, n]])` | the 0-based offset of the first `s`, a `read` offset, or nil; of a range, the first that starts in it, so a file found in parts gives what the whole file's would | as `count_in`, stopping at the first | as `count_in` |
 | `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **one read a folder listed**, not one an entry; a step an entry and each path's bytes | `store`; `argument` for an unknown option |
 | `replace(p, s)` | writes the file whole: never a torn file. There is no plain `write` | a change; each byte a change byte and a step | `store`, logged |
 | `append(p, s)` | adds to the end | as `replace` | `store`, logged |
@@ -542,7 +542,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
 | machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two) | 4 MiB | 4 MiB |
-| call bytes | **what one builtin call brings from the store** (QUEUE 211, the caps: a builtin is never cut, so its work is bounded instead). A `read` past it is an `argument` error; a bigger file is read in parts, `read(p, offset, n)`, a call each, so a host can let a request in between | 1 MiB | 1 MiB |
+| call bytes | **what one builtin call brings from the store** (QUEUE 211, the caps: a builtin is never cut, so its work is bounded instead). A `read` or a scan past it is an `argument` error; a bigger file is read or scanned in parts, `read(p, offset, n)` or `count_in(p, s, offset, n)`, a call each, so a host can let a request in between | 1 MiB | 1 MiB |
 | kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |
 | nesting | how deep the source nests when parsed (a parenthesis costs two: an expression and its operand) | 200 | 200 |
@@ -795,7 +795,7 @@ budgets, and changes nothing.
 | `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | `walk`: one read a folder |
 | `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars |
 | `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_in`, and only for transcripts under 1 MiB; the rest are listed by size |
-| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_in`, then 2 KiB read before the match; stops at the read budget and says how far it got |
+| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_in`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget and says how far it got |
 | `topics.shale` | every topic with its message count, the old way | reads every transcript whole: small sites only |
 | `big_files.shale` | files over a size | |
 | `delete_topic.shale` | one topic deleted, as `chat_retire.zig` does: its transcript, sidecars and uploads | a change each |

@@ -5,6 +5,9 @@
 
 const PHRASE = "line of it"
 const WINDOW = 2048
+-- One scan brings at most a megabyte (the call-bytes cap): a bigger
+-- transcript is scanned in parts.
+const PART = 1048576
 
 -- A topic's label: "#channel sid" or "conversation sid".
 function label(path)
@@ -24,6 +27,17 @@ function message(path, at)
   return {id = "MSG_" .. head[1], from = sub(head[2], 7), date = sub(head[3], 7)}
 end
 
+-- The first offset of the phrase in a file, a part at a time.
+function find_part(path, size)
+  local at = 0
+  while at < size do
+    local found = find_in(path, PHRASE, at, PART)
+    if found ~= nil then return found end
+    at = at + PART
+  end
+  return nil
+end
+
 local topics = walk("chat", {like = "*.md", kind = "file"})
 local found = {}
 local looked = 0
@@ -33,7 +47,7 @@ for e in topics do
     break
   end
   looked = looked + 1
-  local at = find_in(e.path, PHRASE)
+  local at = find_part(e.path, e.size)
   if at ~= nil then
     local m = message(e.path, at)
     push(found, {topic = label(e.path), message = m.id, from = m.from, date = m.date, offset = at})

@@ -25,9 +25,9 @@ pub const specs = [_]bi.Spec{
     spec(.exists, 1, 1, exists),
     spec(.is_dir, 1, 1, isDir),
     spec(.read, 1, 3, read),
-    spec(.count_lines, 1, 1, countLines),
-    spec(.count_in, 2, 2, scanner(.count)),
-    spec(.find_in, 2, 2, scanner(.find)),
+    spec(.count_lines, 1, 3, countLines),
+    spec(.count_in, 2, 4, scanner(.count)),
+    spec(.find_in, 2, 4, scanner(.find)),
     spec(.walk, 1, 2, walk),
     spec(.replace, 2, 2, change(.replace)),
     spec(.append, 2, 2, change(.append)),
@@ -208,7 +208,7 @@ fn scanner(comptime how: Scan) bi.Impl {
             const needle = try bi.stringArg(run, pos, b, args[1], "what it looks for");
             if (needle.len == 0) return run.fail(pos, .argument, "`{s}` of \"\" is an error: there is nothing to look for", .{@tagName(b)});
             if (needle.len > scan_chunk) return run.fail(pos, .argument, "`{s}`: what it looks for is longer than {d} bytes", .{ @tagName(b), scan_chunk });
-            const r = try scan(run, pos, b, p, needle, how == .find);
+            const r = try scan(run, pos, b, p, needle, how == .find, try rangeArgs(run, pos, b, args[2..]));
             return switch (how) {
                 .count => .{ .int = @intCast(r.count) },
                 .find => if (r.first) |at| .{ .int = @intCast(at) } else .nil,
@@ -217,27 +217,53 @@ fn scanner(comptime how: Scan) bi.Impl {
     }.f;
 }
 
-/// **`count_lines(p)`**: the lines in a file, as `#lines(read(p))` counts
-/// them (a last line without its newline counts too), without holding the
-/// file: a megabyte at a time is at most 64 KiB of arena.
+/// **`count_lines(p[, offset[, n]])`**: the lines in a file, as
+/// `#lines(read(p))` counts them (a last line without its newline counts
+/// too), without holding the file: a megabyte at a time is at most 64 KiB
+/// of arena. Of a range, the newlines in it, and the last line if the range
+/// reaches the file's end: the parts' counts add up to the whole's.
 fn countLines(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .count_lines, args[0], false);
-    const r = try scan(run, pos, .count_lines, p, "\n", false);
-    return .{ .int = @intCast(r.count + @intFromBool(r.size > 0 and r.last != '\n')) };
+    const r = try scan(run, pos, .count_lines, p, "\n", false, try rangeArgs(run, pos, .count_lines, args[1..]));
+    return .{ .int = @intCast(r.count + @intFromBool(r.to_end and r.size > 0 and r.last != '\n')) };
 }
 
-const Scanned = struct { count: u64 = 0, first: ?u64 = null, size: u64 = 0, last: u8 = 0 };
+/// A scan's range: from `offset`, `n` bytes, or to the end.
+const Range = struct { offset: u64 = 0, n: ?u64 = null };
+
+fn rangeArgs(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Range {
+    if (args.len == 0) return .{};
+    const offset = try bi.intArg(run, pos, b, args[0], "its offset");
+    if (offset < 0) return run.fail(pos, .argument, "`{s}`: offset {d} is before the file's start", .{ @tagName(b), offset });
+    const n: ?i64 = if (args.len > 1) try bi.intArg(run, pos, b, args[1], "its count of bytes") else null;
+    if (n != null and n.? < 0) return run.fail(pos, .argument, "`{s}`: a count of {d} bytes", .{ @tagName(b), n.? });
+    return .{ .offset = @intCast(offset), .n = if (n) |x| @intCast(x) else null };
+}
+
+const Scanned = struct { count: u64 = 0, first: ?u64 = null, size: u64 = 0, last: u8 = 0, to_end: bool = false };
 
 /// **A SCAN**: the file `scan_chunk` bytes at a time, one buffer reused,
 /// counting `needle`'s occurrences (none overlapping) or stopping at the
 /// first (`first_only`), across the chunks' seams. One store read for the
 /// call; every byte counted against the read budget and charged a step.
-fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: bool) Error!Scanned {
+///
+/// **IN A RANGE, AT MOST THE CAP** (metal-vmm QUEUE 211, the caps): the
+/// matches that start in `range`, which may be at most `call_bytes` long;
+/// a match that starts in it is read to its end, at most the needle's
+/// length less one past it. So a find over a file in parts finds what the
+/// whole file's would, and a scan is a bounded slice of a run's time.
+fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: bool, range: Range) Error!Scanned {
     try countRead(run, pos);
-    const size = try fileSize(run, pos, b, p);
-    var r: Scanned = .{ .size = size };
-    if (size == 0) return r;
+    const file_size = try fileSize(run, pos, b, p);
+    const start = @min(range.offset, file_size);
+    const end = if (range.n) |n| start + @min(n, file_size - start) else file_size;
+    if (end - start > run.budgets.call_bytes) return run.fail(pos, .argument, "`{s}` scans at most {d} bytes in one call, and this would be {d}: scan it in parts, `{s}(p, {s}offset, n)`", .{ @tagName(b), run.budgets.call_bytes, end - start, @tagName(b), if (b == .count_lines) "" else "s, " });
     const keep_most = needle.len - 1;
+    // What the scan reads: the range, and a match's tail past it, never a
+    // whole needle past it, so every match found starts in the range.
+    const size = @min(file_size, end + keep_most);
+    var r: Scanned = .{ .size = file_size, .to_end = end == file_size };
+    if (end == start) return r;
     const finder = try text.Finder.init(run, pos, needle);
     // **ONE BUFFER FOR EVERY SCAN OF THE RUN** (208's cold review): a
     // fresh one a call would spend 64 KiB of arena a file, and a scan of
@@ -245,11 +271,11 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
     // Sized once, for the longest needle and the fullest chunk (209's
     // review: sized by the needle, a scan with a longer one took another).
     if (run.scan_buf.len == 0) run.scan_buf = run.alloc.alloc(u8, 2 * scan_chunk) catch return run.oom(pos);
-    const buf = run.scan_buf[0..@intCast(@min(size, scan_chunk) + keep_most)];
+    const buf = run.scan_buf[0..@intCast(@min(size - start, scan_chunk) + keep_most)];
     // `buf[0..kept]` holds the last window's tail, from file offset `base`.
     var kept: usize = 0;
-    var base: u64 = 0;
-    var at: u64 = 0;
+    var base: u64 = start;
+    var at: u64 = start;
     while (at < size) {
         const want: usize = @intCast(@min(size - at, buf.len - kept));
         if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
