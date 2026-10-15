@@ -96,7 +96,7 @@ pub const Call = struct {
     pub const Target = union(enum) {
         builtin: Builtin,
         /// An index into `Program.functions`, set once the whole source
-        /// is read (a function may be called before it is declared).
+        /// as the call is parsed (a function is called only after it is declared).
         function: u32,
         /// `attempt(f, ...)`: the function `f` (an index, as `function`)
         /// called with the rest of the arguments, its error a value.
