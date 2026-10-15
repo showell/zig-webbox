@@ -30,9 +30,11 @@ const Value = value.Value;
 const Table = value.Table;
 const Error = interp.Error;
 
-const Copier = struct {
-    r: *Run,
-    pos: ast.Pos,
+/// **THE COPY'S BOOKKEEPING, KEPT FROM YIELD TO YIELD** (`Run.collecting`):
+/// the machine's memory is an arena that takes nothing back but its last
+/// allocation, so maps made afresh at each yield would grow it at each
+/// one. Emptied after each copy, their room kept.
+pub const Books = struct {
     /// Old table -> its copy.
     seen: std.AutoHashMapUnmanaged(*Table, *Table) = .empty,
     /// **A STRING REACHED TWICE IS COPIED ONCE** (the box's review of M1: a
@@ -41,17 +43,31 @@ const Copier = struct {
     strings: std.AutoHashMapUnmanaged(struct { ptr: usize, len: usize }, []const u8) = .empty,
     /// Copies whose contents still point into the old arena.
     todo: std.ArrayList(struct { old: *Table, new: *Table }) = .empty,
+
+    pub fn deinit(b: *Books, a: std.mem.Allocator) void {
+        b.seen.deinit(a);
+        b.strings.deinit(a);
+        b.todo.deinit(a);
+    }
+};
+
+const Copier = struct {
+    r: *Run,
+    pos: ast.Pos,
+    seen: *@FieldType(Books, "seen"),
+    strings: *@FieldType(Books, "strings"),
+    todo: *@FieldType(Books, "todo"),
     values: u64 = 0,
     bytes: u64 = 0,
 
     fn deinit(c: *Copier) void {
-        c.seen.deinit(c.r.machine);
-        c.strings.deinit(c.r.machine);
-        c.todo.deinit(c.r.machine);
+        c.seen.clearRetainingCapacity();
+        c.strings.clearRetainingCapacity();
+        c.todo.clearRetainingCapacity();
     }
 
     fn string(c: *Copier, s: []const u8) Error![]const u8 {
-        const g = c.strings.getOrPut(c.r.machine, .{ .ptr = @intFromPtr(s.ptr), .len = s.len }) catch return c.r.oom(c.pos);
+        const g = c.strings.getOrPut(c.r.machine, .{ .ptr = @intFromPtr(s.ptr), .len = s.len }) catch return c.r.machineOom(c.pos);
         if (g.found_existing) return g.value_ptr.*;
         c.bytes += s.len;
         g.value_ptr.* = c.r.alloc.dupe(u8, s) catch {
@@ -72,12 +88,12 @@ const Copier = struct {
     }
 
     fn table(c: *Copier, old: *Table) Error!*Table {
-        const g = c.seen.getOrPut(c.r.machine, old) catch return c.r.oom(c.pos);
+        const g = c.seen.getOrPut(c.r.machine, old) catch return c.r.machineOom(c.pos);
         if (g.found_existing) return g.value_ptr.*;
         const new = c.r.alloc.create(Table) catch return c.r.budgetStop(c.pos, .kept);
         new.* = .{ .kind = old.kind };
         g.value_ptr.* = new;
-        c.todo.append(c.r.machine, .{ .old = old, .new = new }) catch return c.r.oom(c.pos);
+        c.todo.append(c.r.machine, .{ .old = old, .new = new }) catch return c.r.machineOom(c.pos);
         return new;
     }
 
@@ -111,7 +127,7 @@ pub fn collect(r: *Run, pos: ast.Pos, slots: []const []Value, tables: []const *?
     r.collections += 1;
     var old = r.budgeted.*;
     r.budgeted.* = .{ .backing = old.backing, .limit = old.limit };
-    var c: Copier = .{ .r = r, .pos = pos };
+    var c: Copier = .{ .r = r, .pos = pos, .seen = &r.collecting.seen, .strings = &r.collecting.strings, .todo = &r.collecting.todo };
     defer c.deinit();
     // **THE EFFECTS FIRST**: the run reports them however it ends. Should
     // even they not fit, the old arena is put back, and the run stops

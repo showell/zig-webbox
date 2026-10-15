@@ -494,3 +494,28 @@ test "run: a `..` chain's part of the wrong type stops at its own `..`, when a p
     // And `attempt` gives the same column as a value.
     try expectOutput("function f() return (\"a\" .. \"b\") .. nil end local r = attempt(f) print(r.column)", "34\n");
 }
+
+test "run: the machine's memory has a budget: 5,500 parameters 63 calls deep stop on it, and the host's peak stays under both budgets (the box's review of 211)" {
+    // Off the arena, the machine's memory was off every budget: this shape
+    // finished with a 14 MB peak against an 8 MiB arena.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    const params = 5500;
+    try src.appendSlice(testing.allocator, "function f(n");
+    for (1..params) |i| try src.print(testing.allocator, ", p{d}", .{i});
+    try src.appendSlice(testing.allocator, ") if n == 0 then return 0 end return f(n - 1");
+    for (1..params) |_| try src.appendSlice(testing.allocator, ", 0");
+    try src.appendSlice(testing.allocator, ") end print(f(62");
+    for (1..params) |_| try src.appendSlice(testing.allocator, ", 0");
+    try src.appendSlice(testing.allocator, "))");
+    const budgets: script.Budgets = .{ .arena_bytes = 8 * 1024 * 1024, .machine_bytes = 4 * 1024 * 1024, .source_bytes = 1024 * 1024, .steps = 100_000_000 };
+    var peak: script.value.Peak = .{ .child = testing.allocator };
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var r = script.run(threaded.io(), peak.allocator(), ".zig-cache/no-root", src.items, budgets, 0, &out_buf);
+    defer r.deinit();
+    errdefer std.debug.print("peak {d}, stop {?}\n", .{ peak.most, r.stop });
+    try testing.expectEqual(script.diag.Budget.machine, r.stop.?.budget.?);
+    // Both budgets, and the two structs that hold them.
+    try testing.expect(peak.most <= budgets.arena_bytes + budgets.machine_bytes + 4096);
+}

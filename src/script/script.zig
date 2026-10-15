@@ -46,12 +46,13 @@ pub const Result = struct {
     arena_bytes: usize = 0,
     /// The yields that collected (`interp.Run.collections`).
     collections: u64 = 0,
-    /// **THE PARSE'S OWN ARENA** (metal-vmm QUEUE 211, M1): the tree, its
-    /// strings and names, apart from the values, so a `yield` that trades
-    /// the values' arena for a fresh one leaves the code's literals and the
-    /// functions' names where they are. A source's tree is bounded by the
-    /// source and nesting budgets.
-    ast: std.heap.ArenaAllocator,
+    /// **THE MACHINE'S MEMORY** (metal-vmm QUEUE 211; the box's review: under
+    /// its own budget): the parse's tree, apart from the values so a `yield`
+    /// that trades their arena for a fresh one leaves the code's literals
+    /// and the functions' names where they are, and, while the run runs,
+    /// its code, frames and operands. Null only when even it could not be
+    /// made.
+    machine: ?*MachineMemory = null,
 
     pub fn finished(r: *const Result) bool {
         return r.stop == null;
@@ -59,8 +60,20 @@ pub const Result = struct {
 
     pub fn deinit(r: *Result) void {
         r.arena.deinit();
-        r.ast.deinit();
+        if (r.machine) |m| {
+            m.tree.deinit();
+            const backing = m.budget.backing;
+            m.budget.deinit();
+            backing.destroy(m);
+        }
     }
+};
+
+/// The machine's budgeted memory, and the tree's arena over it: on the
+/// heap, so the arena's pointer to the budget stays good as a Result moves.
+pub const MachineMemory = struct {
+    budget: value.Budgeted,
+    tree: std.heap.ArenaAllocator,
 };
 
 /// **WHAT A RUN DID, IN THE ONE LAYOUT** (metal-vmm QUEUE 200): its effects,
@@ -99,7 +112,7 @@ pub const Engine = union(enum) {
 };
 
 pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
-    var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .ast = .init(backing), .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
+    var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
     const budgeted = &result.arena;
     const alloc = budgeted.allocator();
     if (source.len > budgets.source_bytes) {
@@ -108,19 +121,30 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     }
     var stop: ?Stop = null;
     const top = @frameAddress();
-    const tree = result.ast.allocator();
-    const program = tree.create(ast.Program) catch return arenaStop(&result);
+    const machine_stop: Stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the machine's memory (the code, the frames, the operands) is past its budget" };
+    const mm = backing.create(MachineMemory) catch {
+        result.stop = machine_stop;
+        return result;
+    };
+    mm.* = .{ .budget = .{ .backing = backing, .limit = budgets.machine_bytes }, .tree = undefined };
+    mm.tree = .init(mm.budget.allocator());
+    result.machine = mm;
+    const tree = mm.tree.allocator();
+    const program = tree.create(ast.Program) catch {
+        result.stop = machine_stop;
+        return result;
+    };
     program.* = parse.parseMeasured(tree, source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
         result.stop = switch (e) {
             error.Parse => stop.?,
-            error.OutOfMemory => .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" },
+            error.OutOfMemory => machine_stop,
         };
         return result;
     };
     var r: interp.Run = .{
         .io = io,
         .alloc = alloc,
-        .machine = backing,
+        .machine = mm.budget.allocator(),
         .budgeted = budgeted,
         .budgets = budgets,
         .root = root,
@@ -131,12 +155,13 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     };
     defer r.deinit();
     // The code in the machine's memory, never the arena (`compile.compile`).
-    var code_arena = std.heap.ArenaAllocator.init(backing);
+    var code_arena = std.heap.ArenaAllocator.init(mm.budget.allocator());
     defer code_arena.deinit();
     const ran = switch (engine) {
         .walker => r.main(),
-        .vm => if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| vm.main(&r, &code) else |e| e,
-        .vm_sliced => |n| if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| runSliced(&r, &code, n) else |e| e,
+        // The code is the machine's: compiling past its budget is that stop.
+        .vm => if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| vm.main(&r, &code) else |_| r.machineOom(program.main.pos),
+        .vm_sliced => |n| if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| runSliced(&r, &code, n) else |_| r.machineOom(program.main.pos),
     };
     ran catch |e| switch (e) {
         error.Stop => {},

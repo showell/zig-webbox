@@ -38,6 +38,12 @@ pub const Budgets = struct {
     /// values the VM still reaches take, copied into a fresh arena at each
     /// `yield`; past it, the run stops.
     kept_bytes: usize = 1024 * 1024,
+    /// **THE MACHINE'S MEMORY** (the box's review of 211: off the arena, it
+    /// was off every budget, and 5,500 parameters 63 calls deep took 14 MB
+    /// past an 8 MiB arena): the parse's tree, the compiled code, the
+    /// frames' slots, the operand stack, the `..` chains' parts and a
+    /// yield's copying, all from one arena of this size beside the values'.
+    machine_bytes: usize = 4 * 1024 * 1024,
 };
 
 /// One store change the script attempted, in order, root-relative.
@@ -54,11 +60,11 @@ pub const Run = struct {
     io: Io,
     alloc: std.mem.Allocator,
     /// **THE MACHINE'S OWN MEMORY** (metal-vmm QUEUE 211): the frames' slots,
-    /// the `..` chains' parts and the arguments of a long call, outside the
-    /// arena. No value points into it, and the call-depth and depth
-    /// budgets bound it; the arena holds only what the script made, so a
-    /// tree-walker and a VM, whose machinery differs, take the same arena
-    /// and stop on it at the same place. Freed by `deinit`.
+    /// the `..` chains' parts, the arguments of a long call, the VM's
+    /// operands and frames, outside the values' arena, so a tree-walker and
+    /// a VM, whose machinery differs, take the same arena and stop on it at
+    /// the same place. **Its own budget bounds it** (`Budgets.machine_bytes`,
+    /// with the tree and the code): no value points into it.
     machine: std.mem.Allocator,
     budgeted: *value.Budgeted,
     budgets: Budgets,
@@ -79,6 +85,8 @@ pub const Run = struct {
     /// The yields that collected (`collect.zig`): a run's steps and arena
     /// differ from a walker's by them, and by nothing else.
     collections: u64 = 0,
+    /// The copy's bookkeeping, kept from yield to yield (`collect.Books`).
+    collecting: @import("collect.zig").Books = .{},
     /// The walk's recursion now (`Budgets.depth`).
     walk: u32 = 0,
     reads: u64 = 0,
@@ -117,6 +125,7 @@ pub const Run = struct {
         self.stack.deinit(self.machine);
         self.chain_parts.deinit(self.machine);
         self.chain_ops.deinit(self.machine);
+        self.collecting.deinit(self.machine);
     }
 
     pub fn fail(self: *Run, pos: ast.Pos, class: diag.Class, comptime fmt: []const u8, args: anytype) Error {
@@ -138,6 +147,7 @@ pub const Run = struct {
             .source => "the source is larger than the source budget",
             .nesting => "the source nests deeper than the nesting budget",
             .depth => "calls and the expressions inside them nest deeper than the depth budget",
+            .machine => std.fmt.allocPrint(self.alloc, "the machine's memory (the code, the frames, the operands) is past its budget ({d} bytes)", .{self.budgets.machine_bytes}) catch "the machine's memory is past its budget",
             .kept => std.fmt.allocPrint(self.alloc, "what the run keeps at a `yield` is past the kept budget ({d} bytes)", .{self.budgets.kept_bytes}) catch "what the run keeps at a `yield` is past the kept budget",
         } };
         return error.Stop;
@@ -173,6 +183,11 @@ pub const Run = struct {
     /// An allocation's failure, read as the arena budget.
     pub fn oom(self: *Run, pos: ast.Pos) Error {
         return self.budgetStop(pos, .arena);
+    }
+
+    /// A failure of the machine's own memory, read as its budget.
+    pub fn machineOom(self: *Run, pos: ast.Pos) Error {
+        return self.budgetStop(pos, .machine);
     }
 
     // ── statements ────────────────────────────────────────────────────────
@@ -544,8 +559,8 @@ pub const Run = struct {
         // On the run's stack of parts: a part's own chain stacks above, and
         // the stack can move as it grows, so the parts are reached by index.
         const base = self.chain_parts.items.len;
-        self.chain_parts.appendNTimes(self.machine, .nil, n) catch return self.oom(pos);
-        self.chain_ops.appendNTimes(self.machine, pos, n) catch return self.oom(pos);
+        self.chain_parts.appendNTimes(self.machine, .nil, n) catch return self.machineOom(pos);
+        self.chain_ops.appendNTimes(self.machine, pos, n) catch return self.machineOom(pos);
         defer {
             self.chain_parts.shrinkRetainingCapacity(base);
             self.chain_ops.shrinkRetainingCapacity(base);
@@ -691,7 +706,7 @@ pub const Run = struct {
     /// stays done: its output, and its changes in the effects log.
     noinline fn attempt(self: *Run, pos: ast.Pos, index: u32, arg_exprs: []const *ast.Expr) Error!Value {
         var small: [8]Value = undefined;
-        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.oom(pos);
+        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.machineOom(pos);
         defer if (arg_exprs.len > small.len) self.machine.free(vals);
         for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
         const out = try self.attemptTable(pos);
@@ -746,7 +761,7 @@ pub const Run = struct {
     /// tabs, and a newline.
     fn print(self: *Run, pos: ast.Pos, arg_exprs: []const *ast.Expr) Error!Value {
         var small: [8]Value = undefined;
-        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.oom(pos);
+        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.machineOom(pos);
         defer if (arg_exprs.len > small.len) self.machine.free(vals);
         for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
         for (vals, arg_exprs, 0..) |v, a, i| {
@@ -762,7 +777,7 @@ pub const Run = struct {
         const f = &self.program.functions[index];
         if (self.depth >= self.budgets.call_depth) return self.budgetStop(pos, .call_depth);
         const new_base = self.stack.items.len;
-        self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.oom(pos);
+        self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.machineOom(pos);
         for (arg_exprs, 0..) |a, i| {
             const v = try self.eval(a);
             self.stack.items[new_base + i] = v;
@@ -775,7 +790,7 @@ pub const Run = struct {
         const f = &self.program.functions[index];
         if (self.depth >= self.budgets.call_depth) return self.budgetStop(pos, .call_depth);
         const new_base = self.stack.items.len;
-        self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.oom(pos);
+        self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.machineOom(pos);
         @memcpy(self.stack.items[new_base..][0..args.len], args);
         return self.enterFunction(f, new_base);
     }
@@ -805,7 +820,7 @@ pub const Run = struct {
     pub fn main(self: *Run) Error!void {
         self.consts = self.alloc.alloc(?Value, self.program.const_names.len) catch return self.oom(self.program.main.pos);
         @memset(self.consts, null);
-        self.stack.appendNTimes(self.machine, .nil, self.program.main.frame) catch return self.oom(self.program.main.pos);
+        self.stack.appendNTimes(self.machine, .nil, self.program.main.frame) catch return self.machineOom(self.program.main.pos);
         self.base = 0;
         _ = try self.block(self.program.main.body);
     }

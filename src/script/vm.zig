@@ -49,6 +49,9 @@ const Machine = struct {
     pc: u32 = 0,
     /// The top frame's `walk`, kept here for every op's enters.
     walk: u32 = 0,
+    /// The `attempt` answers a yield copies, kept from yield to yield (the
+    /// machine's memory takes nothing back but its last allocation).
+    outs: std.ArrayList(*?*Table) = .empty,
     /// **WHERE THE SLICE ENDS** (`Task.step`): at the first op boundary
     /// with the run's steps at or past it; never, for a run in one piece.
     slice_end: u64 = std.math.maxInt(u64),
@@ -56,6 +59,7 @@ const Machine = struct {
     fn deinit(m: *Machine) void {
         m.operands.deinit(m.r.machine);
         m.frames.deinit(m.r.machine);
+        m.outs.deinit(m.r.machine);
     }
 
     inline fn push(m: *Machine, v: Value) void {
@@ -100,11 +104,11 @@ const Machine = struct {
     fn enterFrame(m: *Machine, op: *const Op, func: *const compile.Func, argc: u32, out: ?*Table) Error!void {
         const r = m.r;
         const base = r.stack.items.len;
-        r.stack.appendNTimes(r.machine, .nil, func.frame) catch return r.oom(op.pos);
+        r.stack.appendNTimes(r.machine, .nil, func.frame) catch return r.machineOom(op.pos);
         const args = m.operands.items[m.operands.items.len - argc ..];
         @memcpy(r.stack.items[base..][0..argc], args);
         m.operands.shrinkRetainingCapacity(m.operands.items.len - argc);
-        m.operands.ensureUnusedCapacity(r.machine, func.operands + 1) catch return r.oom(op.pos);
+        m.operands.ensureUnusedCapacity(r.machine, func.operands + 1) catch return r.machineOom(op.pos);
         const caller = m.frame();
         m.frames.append(r.machine, .{
             .func = func,
@@ -115,7 +119,7 @@ const Machine = struct {
             .caller = r.function,
             .out = out,
             .at = op.pos,
-        }) catch return r.oom(op.pos);
+        }) catch return r.machineOom(op.pos);
         r.base = base;
         r.function = func.name;
         r.depth += 1;
@@ -170,12 +174,11 @@ const Machine = struct {
     /// (`collect.zig`); every value the machine holds is a root.
     fn yieldHere(m: *Machine, pos: ast.Pos) Error!void {
         const r = m.r;
-        var outs: std.ArrayList(*?*Table) = .empty;
-        defer outs.deinit(r.machine);
+        m.outs.clearRetainingCapacity();
         for (m.frames.items) |*f| if (f.out != null) {
-            outs.append(r.machine, &f.out) catch return r.oom(pos);
+            m.outs.append(r.machine, &f.out) catch return r.machineOom(pos);
         };
-        try collect.collect(r, pos, &.{ r.stack.items, m.operands.items }, outs.items);
+        try collect.collect(r, pos, &.{ r.stack.items, m.operands.items }, m.outs.items);
     }
 
     const Exit = enum { finished, paused };
@@ -412,12 +415,12 @@ pub const Task = struct {
     pub fn init(r: *Run, code: *const Code) Error!Task {
         r.consts = r.alloc.alloc(?Value, r.program.const_names.len) catch return r.oom(r.program.main.pos);
         @memset(r.consts, null);
-        r.stack.appendNTimes(r.machine, .nil, code.main.frame) catch return r.oom(r.program.main.pos);
+        r.stack.appendNTimes(r.machine, .nil, code.main.frame) catch return r.machineOom(r.program.main.pos);
         r.base = 0;
         var t: Task = .{ .m = .{ .r = r, .code = code, .pc = code.main.entry } };
         errdefer t.deinit();
-        t.m.operands.ensureUnusedCapacity(r.machine, code.main.operands + 1) catch return r.oom(r.program.main.pos);
-        t.m.frames.append(r.machine, .{ .func = &code.main, .ret_pc = 0, .base = 0, .walk = 0, .sp = 0, .caller = "" }) catch return r.oom(r.program.main.pos);
+        t.m.operands.ensureUnusedCapacity(r.machine, code.main.operands + 1) catch return r.machineOom(r.program.main.pos);
+        t.m.frames.append(r.machine, .{ .func = &code.main, .ret_pc = 0, .base = 0, .walk = 0, .sp = 0, .caller = "" }) catch return r.machineOom(r.program.main.pos);
         return t;
     }
 
