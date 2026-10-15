@@ -50,7 +50,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     const slice = 1 + std.hash.Wyhash.hash(0, source) % 29;
     var cut = script.runOn(.{ .vm_sliced = slice }, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out);
     defer cut.deinit();
-    if (!std.mem.eql(u8, v.output, cut.output) or v.steps != cut.steps or v.work != cut.work or v.arena_bytes != cut.arena_bytes or !sameStop(v.stop, cut.stop) or v.effects.len != cut.effects.len or
+    if (!std.mem.eql(u8, v.output, cut.output) or v.steps != cut.steps or v.work != cut.work or v.arena_bytes != cut.arena_bytes or !sameStop(v.stop, cut.stop) or !sameEffects(v.effects, cut.effects) or
         (has_root and !(sameTree(io, a, root, cut_copy) catch false)))
     {
         std.debug.print("\n── THE GATE: the VM in slices of {d} differs from the VM in one piece ──\n{s}\n", .{ slice, source });
@@ -80,11 +80,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
         if (v.work != w.work) why = "the work";
         if (v.arena_bytes != w.arena_bytes) why = "the arena";
     }
-    if (v.effects.len != w.effects.len) {
-        why = "the effects";
-    } else for (v.effects, w.effects) |x, y| {
-        if (!std.mem.eql(u8, x.op, y.op) or !std.mem.eql(u8, x.path, y.path) or !std.mem.eql(u8, x.outcome, y.outcome)) why = "the effects";
-    }
+    if (!sameEffects(v.effects, w.effects)) why = "the effects";
     if (why == null and has_root) {
         if (!(sameTree(io, a, root, copy) catch false)) why = "the store left";
     }
@@ -114,6 +110,15 @@ fn sibling(io: Io, a: std.mem.Allocator, root: []const u8, bytes: []const u8) []
 fn isArenaShaped(s: ?script.Stop) bool {
     const b = (s orelse return false).budget orelse return false;
     return b == .steps or b == .arena or b == .kept;
+}
+
+/// Each effect the same op on the same path with the same outcome, in order.
+fn sameEffects(x: []const script.Effect, y: []const script.Effect) bool {
+    if (x.len != y.len) return false;
+    for (x, y) |a, b| {
+        if (!std.mem.eql(u8, a.op, b.op) or !std.mem.eql(u8, a.path, b.path) or !std.mem.eql(u8, a.outcome, b.outcome)) return false;
+    }
+    return true;
 }
 
 fn sameStop(x: ?script.Stop, y: ?script.Stop) bool {

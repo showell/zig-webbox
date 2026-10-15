@@ -496,7 +496,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 | `now()` | the integer the host handed in: the only time a script has |
 | `budget()` | what is left of `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output`, so a script can stop at a point of its own |
 | `print(...)` | scalars only. It evaluates every argument first, joins them with tabs, and ends with a newline |
-| `yield([s])` | nil: a point where the run may pause `s` seconds (0 or more), and keeps only the values it still reaches (see "The VM") |
+| `yield()` | nil: a collection point, where the run keeps only the values it still reaches (see "The VM"). When a run pauses is the host's to say, never the script's |
 
 ## The store
 
@@ -637,11 +637,13 @@ fifths of the walker's time. Where a builtin's work dominates (a scan, a
 read), the two are within this box's noise, since the work is the same
 code. Speed is not the VM's point; the state a yield can keep is.
 
-### `yield`: a point where a long run may pause, and keeps only what it reaches
+### `yield`: a collection point
 
-`yield([s])` marks a point where a run may pause for `s` seconds (0 or
-more; the host decides when the next slice runs; metal-vmm QUEUE 211).
-In a one-shot run it never pauses: it only **collects**.
+`yield()` **collects** (metal-vmm QUEUE 211, as Steve's model of
+2026-10-15 left it): the run keeps only the values it still reaches. It
+takes nothing and schedules nothing. Where a long run pauses is the
+host's to choose (after a store call, or a number of steps), never the
+script's.
 
 - **What a yield keeps:** the values the run still reaches are copied
   into a fresh arena: every local of every frame, the parts of an

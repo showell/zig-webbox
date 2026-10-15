@@ -52,10 +52,6 @@ const Machine = struct {
     /// **WHERE THE SLICE ENDS** (`Task.step`): at the first op boundary
     /// with the run's steps at or past it; never, for a run in one piece.
     slice_end: u64 = std.math.maxInt(u64),
-    /// Whether a `yield` ends the slice (a task's) or only collects (a
-    /// one-shot run's), and the seconds the last one asked for.
-    yield_returns: bool = false,
-    yielded: u64 = 0,
 
     fn deinit(m: *Machine) void {
         m.operands.deinit(m.r.machine);
@@ -182,7 +178,7 @@ const Machine = struct {
         try collect.collect(r, pos, &.{ r.stack.items, m.operands.items }, outs.items);
     }
 
-    const Exit = enum { finished, paused, yielded };
+    const Exit = enum { finished, paused };
 
     fn run(m: *Machine) Error!Exit {
         while (true) {
@@ -295,18 +291,12 @@ const Machine = struct {
                 .builtin => {
                     const args = m.operands.items[m.operands.items.len - op.b ..];
                     const v = try builtins.call(r, op.pos, @enumFromInt(op.a), args);
-                    // `yield`'s seconds, read before its arguments go.
-                    const seconds: u64 = if (op.b > 0 and args[0] == .int) @intCast(@max(args[0].int, 0)) else 0;
                     m.operands.shrinkRetainingCapacity(m.operands.items.len - op.b);
-                    if (op.a == @intFromEnum(ast.Builtin.yield)) {
-                        try m.yieldHere(op.pos);
-                        if (m.yield_returns) {
-                            m.yielded = seconds;
-                            m.push(v);
-                            return .yielded;
-                        }
-                    }
                     m.push(v);
+                },
+                .collect => {
+                    try m.yieldHere(op.pos);
+                    m.push(.nil);
                 },
                 .print => {
                     const vals = m.operands.items[m.operands.items.len - op.a ..];
@@ -398,22 +388,23 @@ const Machine = struct {
 pub const Task = struct {
     m: Machine,
 
-    pub const Outcome = union(enum) {
+    /// **AN ENDED TASK STAYS ENDED** (the box's review): `step` after
+    /// `.finished` or `.stopped` runs nothing and says so again.
+    ended: ?Outcome = null,
+
+    pub const Outcome = enum {
         finished,
         /// The run stopped (`Run.stop` says where and why): for good.
         stopped,
         /// The slice's steps ran out, and the run goes on in the next.
         paused,
-        /// A `yield`, with the seconds it asked for.
-        yielded: u64,
     };
 
     pub const Slice = struct {
         /// The most steps the slice may take, checked between ops: an op
-        /// that starts inside it finishes.
+        /// that starts inside it finishes (a builtin's whole work among
+        /// them: a slice is capped by its builtins' caps too).
         steps: u64 = std.math.maxInt(u64),
-        /// Whether a `yield` ends the slice (a task) or only collects.
-        yield_returns: bool = false,
     };
 
     /// The script's top level, ready to run, as the walker's `Run.main`
@@ -436,29 +427,31 @@ pub const Task = struct {
 
     /// One slice. An allocation the host refused is the arena's stop.
     pub fn step(t: *Task, slice: Slice) Outcome {
+        if (t.ended) |o| return o;
         const r = t.m.r;
         t.m.slice_end = r.steps +| slice.steps;
-        t.m.yield_returns = slice.yield_returns;
         const exit = t.m.run() catch |e| {
             if (e == error.OutOfMemory) r.stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" };
+            t.ended = .stopped;
             return .stopped;
         };
         return switch (exit) {
-            .finished => .finished,
+            .finished => {
+                t.ended = .finished;
+                return .finished;
+            },
             .paused => .paused,
-            .yielded => .{ .yielded = t.m.yielded },
         };
     }
 };
 
-/// **THE SCRIPT'S TOP LEVEL, RUN** in one piece, its yields only
-/// collecting.
+/// **THE SCRIPT'S TOP LEVEL, RUN** in one piece.
 pub fn main(r: *Run, code: *const Code) Error!void {
     var t = try Task.init(r, code);
     defer t.deinit();
     switch (t.step(.{})) {
         .finished => {},
         .stopped => return if (r.stop != null) error.Stop else error.OutOfMemory,
-        .paused, .yielded => unreachable,
+        .paused => unreachable,
     }
 }

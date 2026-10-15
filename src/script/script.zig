@@ -161,7 +161,6 @@ fn runSliced(r: *interp.Run, code: *const compile.Code, steps: u64) interp.Error
         .finished => return,
         .stopped => return if (r.stop != null) error.Stop else error.OutOfMemory,
         .paused => {},
-        .yielded => unreachable, // one-shot: a yield only collects
     };
 }
 

@@ -121,9 +121,9 @@ test "yield: a string built in place goes on growing after one" {
     , "300\txxx\n");
 }
 
-test "yield: its seconds are 0 or more, and an integer" {
-    try expectOutput("yield(0) yield(5) yield() print(1)", "1\n");
-    for ([_][]const u8{ "yield(-1)", "yield(\"a\")", "yield(1, 2)" }) |src| {
+test "yield: takes nothing: a slice's end is the host's, never the script's (Steve's model)" {
+    try expectOutput("yield() yield() print(1)", "1\n");
+    for ([_][]const u8{ "yield(0)", "yield(-1)", "yield(\"a\")" }) |src| {
         var r = runWith(src, .{});
         defer r.deinit();
         try testing.expect(r.stop != null);

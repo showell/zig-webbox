@@ -72,6 +72,9 @@ pub const Tag = enum(u8) {
     print,
     /// A call to builtin `a` with more arguments than any takes.
     too_many,
+    /// `yield()`: what the run still reaches, copied into a fresh arena
+    /// (`collect.zig`); pushes nil.
+    collect,
     /// The call-depth check before a function's arguments.
     call_prep,
     /// `a`: the function; `b`: the arguments; `c`: the callee's walk from
@@ -494,6 +497,11 @@ const Compiler = struct {
                 }
                 if (argc > c.most_args) {
                     _ = try c.emit(.{ .tag = .too_many, .a = @intFromEnum(b), .pos = pos });
+                    c.push(1);
+                    return;
+                }
+                if (b == .yield and argc == 0) {
+                    _ = try c.emit(.{ .tag = .collect, .pos = pos });
                     c.push(1);
                     return;
                 }
