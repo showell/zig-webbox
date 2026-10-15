@@ -58,6 +58,7 @@ pub const Builtin = enum {
     // the host
     now,
     budget,
+    yield,
     print,
 };
 

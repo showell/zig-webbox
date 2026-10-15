@@ -496,6 +496,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 | `now()` | the integer the host handed in: the only time a script has |
 | `budget()` | what is left of `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output`, so a script can stop at a point of its own |
 | `print(...)` | scalars only. It evaluates every argument first, joins them with tabs, and ends with a newline |
+| `yield([s])` | nil: a point where the run may pause `s` seconds (0 or more), and keeps only the values it still reaches (see "The VM") |
 
 ## The store
 
@@ -532,7 +533,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | budget | what it counts | default | the site's (angry-gopher v30) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
-| arena | **the memory the run holds, all of it.** Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
+| arena | **the memory the run holds, all of it.** (The tree a source parses to has an arena of its own, bounded by the source and nesting budgets; the machine's own memory is beside it, see "The Zig stack".) Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
 | call depth | | 64 | 64 |
 | depth | expressions and statements the walk is inside of at once, across every call (see below) | 2,000 | 2,000 |
 | output | at most `out.len` | 256 KiB | 256 KiB |
@@ -540,6 +541,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | read bytes | what the reads bring; `read` gets what remains as its limit | 64 MiB | 16 MiB |
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
+| kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |
 | nesting | how deep the source nests when parsed (a parenthesis costs two: an expression and its operand) | 200 | 200 |
 
@@ -634,6 +636,43 @@ Where the interpreter's own work dominates, the VM takes about four
 fifths of the walker's time. Where a builtin's work dominates (a scan, a
 read), the two are within this box's noise, since the work is the same
 code. Speed is not the VM's point; the state a yield can keep is.
+
+### `yield`: a point where a long run may pause, and keeps only what it reaches
+
+`yield([s])` marks a point where a run may pause for `s` seconds (0 or
+more; the host decides when the next slice runs; metal-vmm QUEUE 211).
+In a one-shot run it never pauses: it only **collects**.
+
+- **What a yield keeps:** the values the run still reaches are copied
+  into a fresh arena: every local of every frame, the parts of an
+  expression half evaluated, a loop's list, the `const`s, `attempt`'s
+  answers being made, and the effects log. The old arena is then freed
+  whole, so whatever the script made and let go of goes with it. A run
+  that yields every minute holds what it keeps, not what it ever made.
+- **A table reached twice is still one table** after the copy. Strings
+  have no identity a script can see.
+- **The copy is charged:** a step for each value and a step for every 16
+  bytes of string. What is kept may be at most the **kept** budget (1 MiB by
+  default); past it, the run stops with `budget kept`.
+- **The code is not copied:** the tree and its literals have their own
+  arena beside the values'.
+
+```shale
+local total = 0
+for i = 1, 1000 do
+  local junk = {}
+  for j = 1, 20 do push(junk, "item " .. j) end
+  total = total + #junk
+  yield()
+end
+print(total)
+-- prints:
+-- 20000
+```
+
+The tree-walker kept as the VM's second implementation never collects,
+so the tests' gate holds a script that yields to the same output,
+effects and stop, but not to the same steps or arena.
 
 ## The runner
 

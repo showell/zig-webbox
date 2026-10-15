@@ -40,11 +40,22 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     const v = script.runOn(.vm, io, backing, root, source, budgets, now, out);
 
     var why: ?[]const u8 = null;
-    if (!std.mem.eql(u8, v.output, w.output)) why = "the output";
-    if (v.steps != w.steps) why = "the steps";
-    if (v.work != w.work) why = "the work";
-    if (v.arena_bytes != w.arena_bytes) why = "the arena";
-    if (!sameStop(v.stop, w.stop)) why = "the stop";
+    // **A SCRIPT THAT YIELDS** (QUEUE 211, M1): the VM copies what it keeps
+    // into a fresh arena at each `yield`, charged as steps, and the walker
+    // keeps everything. Their steps, work and arena differ by that, and so
+    // may a stop on the steps, the arena or what is kept; all else is the
+    // same.
+    const yields = std.mem.indexOf(u8, source, "yield") != null;
+    const arena_shaped = yields and (isArenaShaped(v.stop) or isArenaShaped(w.stop));
+    if (!arena_shaped) {
+        if (!std.mem.eql(u8, v.output, w.output)) why = "the output";
+        if (!sameStop(v.stop, w.stop)) why = "the stop";
+    }
+    if (!yields) {
+        if (v.steps != w.steps) why = "the steps";
+        if (v.work != w.work) why = "the work";
+        if (v.arena_bytes != w.arena_bytes) why = "the arena";
+    }
     if (v.effects.len != w.effects.len) {
         why = "the effects";
     } else for (v.effects, w.effects) |x, y| {
@@ -63,6 +74,11 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
         @panic("the VM and the tree-walker differ (metal-vmm QUEUE 211's gate)");
     }
     return v;
+}
+
+fn isArenaShaped(s: ?script.Stop) bool {
+    const b = (s orelse return false).budget orelse return false;
+    return b == .steps or b == .arena or b == .kept;
 }
 
 fn sameStop(x: ?script.Stop, y: ?script.Stop) bool {

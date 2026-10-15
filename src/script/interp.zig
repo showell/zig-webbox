@@ -34,6 +34,10 @@ pub const Budgets = struct {
     /// Zig stack a level in Debug that is more than a thread has; this
     /// bounds the walk to what the stack holds, whatever the script.
     depth: u32 = 2_000,
+    /// **WHAT A YIELD KEEPS** (metal-vmm QUEUE 211, M1): the bytes the
+    /// values the VM still reaches take, copied into a fresh arena at each
+    /// `yield`; past it, the run stops.
+    kept_bytes: usize = 1024 * 1024,
 };
 
 /// One store change the script attempted, in order, root-relative.
@@ -131,6 +135,7 @@ pub const Run = struct {
             .source => "the source is larger than the source budget",
             .nesting => "the source nests deeper than the nesting budget",
             .depth => "calls and the expressions inside them nest deeper than the depth budget",
+            .kept => std.fmt.allocPrint(self.alloc, "what the run keeps at a `yield` is past the kept budget ({d} bytes)", .{self.budgets.kept_bytes}) catch "what the run keeps at a `yield` is past the kept budget",
         } };
         return error.Stop;
     }

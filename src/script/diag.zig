@@ -35,6 +35,8 @@ pub const Budget = enum {
     nesting,
     /// The walk's own recursion, across calls: what the Zig stack bounds.
     depth,
+    /// What a `yield` keeps (metal-vmm QUEUE 211, M1).
+    kept,
 };
 
 /// Where and why a run stopped. `message` is owned by the run's arena (or

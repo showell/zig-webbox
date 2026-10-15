@@ -44,6 +44,12 @@ pub const Result = struct {
     stack_bytes: usize = 0,
     /// The arena bytes the run held at its end, never past its budget.
     arena_bytes: usize = 0,
+    /// **THE PARSE'S OWN ARENA** (metal-vmm QUEUE 211, M1): the tree, its
+    /// strings and names, apart from the values, so a `yield` that trades
+    /// the values' arena for a fresh one leaves the code's literals and the
+    /// functions' names where they are. A source's tree is bounded by the
+    /// source and nesting budgets.
+    ast: std.heap.ArenaAllocator,
 
     pub fn finished(r: *const Result) bool {
         return r.stop == null;
@@ -51,6 +57,7 @@ pub const Result = struct {
 
     pub fn deinit(r: *Result) void {
         r.arena.deinit();
+        r.ast.deinit();
     }
 };
 
@@ -84,7 +91,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
 pub const Engine = enum { vm, walker };
 
 pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
-    var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
+    var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .ast = .init(backing), .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
     const budgeted = &result.arena;
     const alloc = budgeted.allocator();
     if (source.len > budgets.source_bytes) {
@@ -93,8 +100,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     }
     var stop: ?Stop = null;
     const top = @frameAddress();
-    const program = alloc.create(ast.Program) catch return arenaStop(&result);
-    program.* = parse.parseMeasured(alloc, source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
+    const tree = result.ast.allocator();
+    const program = tree.create(ast.Program) catch return arenaStop(&result);
+    program.* = parse.parseMeasured(tree, source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
         result.stop = switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" },
@@ -155,4 +163,5 @@ test {
     _ = @import("charge_test.zig");
     _ = @import("errors_test.zig");
     _ = @import("props_test.zig");
+    _ = @import("yield_test.zig");
 }

@@ -15,6 +15,7 @@ const interp = @import("interp.zig");
 const value = @import("value.zig");
 const builtins = @import("builtins.zig");
 const compile = @import("compile.zig");
+const collect = @import("collect.zig");
 
 const Run = interp.Run;
 const Value = value.Value;
@@ -162,6 +163,18 @@ const Machine = struct {
         return false;
     }
 
+    /// **A YIELD**: what the run still reaches, copied into a fresh arena
+    /// (`collect.zig`); every value the machine holds is a root.
+    fn yieldHere(m: *Machine, pos: ast.Pos) Error!void {
+        const r = m.r;
+        var outs: std.ArrayList(*?*Table) = .empty;
+        defer outs.deinit(r.machine);
+        for (m.frames.items) |*f| if (f.out != null) {
+            outs.append(r.machine, &f.out) catch return r.oom(pos);
+        };
+        try collect.collect(r, pos, &.{ r.stack.items, m.operands.items }, outs.items);
+    }
+
     fn run(m: *Machine) Error!void {
         while (true) {
             m.ops() catch |e| switch (e) {
@@ -270,6 +283,7 @@ const Machine = struct {
                     const args = m.operands.items[m.operands.items.len - op.b ..];
                     const v = try builtins.call(r, op.pos, @enumFromInt(op.a), args);
                     m.operands.shrinkRetainingCapacity(m.operands.items.len - op.b);
+                    if (op.a == @intFromEnum(ast.Builtin.yield)) try m.yieldHere(op.pos);
                     m.push(v);
                 },
                 .print => {

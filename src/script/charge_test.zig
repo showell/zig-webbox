@@ -91,6 +91,7 @@ const cases = [_]Case{
     // the host
     .{ .b = .now, .grows = .constant, .why = "an integer the host handed in" },
     .{ .b = .budget, .grows = .constant, .why = "six counters" },
+    .{ .b = .yield, .grows = .constant, .why = "its argument checked; in the VM the copy it makes is charged a step a value and a step for 16 bytes, by collect.zig" },
     .{ .b = .print, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "print(s)" },
 };
 

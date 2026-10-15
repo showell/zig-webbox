@@ -16,12 +16,26 @@ const spec = bi.spec;
 pub const specs = [_]bi.Spec{
     spec(.now, 0, 0, now),
     spec(.budget, 0, 0, budget),
+    spec(.yield, 0, 1, yield),
     spec(.date, 1, 1, date),
     spec(.seconds, 1, 1, seconds),
 };
 
 fn now(run: *Run, _: ast.Pos, _: []const Value) Error!Value {
     return .{ .int = run.now };
+}
+
+/// **`yield([s])`** (metal-vmm QUEUE 211, M1): a point where the run may
+/// pause `s` seconds (0 or more; the host decides when the next slice
+/// runs) and where the VM keeps only the values it still reaches,
+/// copied into a fresh arena. Here, its argument checked: the walker
+/// keeps everything and pauses never.
+fn yield(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    if (args.len > 0) {
+        const s = try bi.intArg(run, pos, .yield, args[0], "its seconds");
+        if (s < 0) return run.fail(pos, .argument, "`yield`: {d} seconds is before now: 0 or more", .{s});
+    }
+    return .nil;
 }
 
 /// **`budget()`** (QUEUE 206): what is left of each budget a script spends
