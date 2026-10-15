@@ -48,6 +48,12 @@ const cases = [_]struct { name: []const u8, src: []const u8 }{
     \\for i = 1, 5000 do s = s .. "line " .. i .. "\n" end
     \\print(#s)
     },
+    .{ .name = "count_in over 8 MiB", .src =
+    \\print(count_in("bench-8m", "ab"))
+    },
+    .{ .name = "read 8 MiB whole", .src =
+    \\print(#read("bench-8m"))
+    },
     .{ .name = "a string built by join", .src =
     \\local parts = {}
     \\for i = 1, 50000 do push(parts, "line " .. i) end
@@ -64,6 +70,13 @@ pub fn main(init: std.process.Init) !void {
     var ow = std.Io.File.stdout().writer(io, &buf);
     const w = &ow.interface;
     const budgets: script.Budgets = .{ .steps = 100_000_000, .arena_bytes = 256 * 1024 * 1024 };
+    // The scans' file, in the working folder (the bench's root), removed
+    // after.
+    const big = try gpa.alloc(u8, 8 * 1024 * 1024);
+    defer gpa.free(big);
+    for (big, 0..) |*c, i| c.* = "abc\n"[i % 4];
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "bench-8m", .data = big });
+    defer std.Io.Dir.cwd().deleteFile(io, "bench-8m") catch {};
     for (cases) |c| {
         var runs: u64 = 0;
         var steps: u64 = 0;

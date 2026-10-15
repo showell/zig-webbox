@@ -1,0 +1,56 @@
+-- Check each topic's count cache (its `.count` sidecar, "<count> <size>")
+-- against the transcript itself: the messages counted from the separators
+-- between them, without holding the transcript (count_in reads it 64 KiB
+-- at a time). Only transcripts under CHECK_BYTES are counted, so a chat of
+-- any size fits the read budget; the rest are listed by size alone.
+
+const CHECK_BYTES = 1048576
+const SEP = "\n\n-------------\n"
+
+-- A topic's label: "#channel sid" or "conversation sid".
+function label(path)
+  local parts = split(path, "/")
+  local sid = sub(parts[#parts], 1, -4)
+  if parts[2] == "channels" then return "#" .. parts[3] .. " " .. sid end
+  return parts[2] .. " " .. sid
+end
+
+-- The cache's count, or -1 for no cache (or one torn: no newline).
+function cached(md)
+  local path = sub(md, 1, -4) .. ".count"
+  if not exists(path) then return -1 end
+  local text = read(path)
+  if not ends_with(text, "\n") then return -1 end
+  return tonumber(words(lines(text)[1])[1])
+end
+
+local rows = {}
+local unchecked = {}
+for e in walk("chat", {like = "*.md", kind = "file"}) do
+  local cache = cached(e.path)
+  if e.size > CHECK_BYTES then
+    push(unchecked, {topic = label(e.path), bytes = e.size})
+  else
+    local counted = 0
+    if e.size > 0 then counted = count_in(e.path, SEP) + 1 end
+    local verdict = "ok"
+    if cache == -1 then
+      verdict = "no cache"
+    elseif cache ~= counted then
+      verdict = "stale"
+    end
+    push(rows, {topic = label(e.path), cache = cache, counted = counted, verdict = verdict})
+  end
+end
+sort(rows, "topic")
+local bad = 0
+for r in rows do
+  if r.verdict ~= "ok" then bad = bad + 1 end
+end
+print("topics checked", #rows, "stale or missing", bad)
+print(table(rows, {"topic", "cache", "counted", "verdict"}))
+if #unchecked > 0 then
+  print("")
+  print("too large to count here (over " .. human(CHECK_BYTES) .. "):")
+  print(table(unchecked, {"topic", "bytes"}))
+end

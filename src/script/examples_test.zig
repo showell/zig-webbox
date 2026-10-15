@@ -11,6 +11,8 @@ const delete_topic = @embedFile("examples/delete_topic.shale");
 const where_the_bytes_are = @embedFile("examples/where_the_bytes_are.shale");
 const chat_topics = @embedFile("examples/chat_topics.shale");
 const first_change = @embedFile("examples/first_change.shale");
+const stale_caches = @embedFile("examples/stale_caches.shale");
+const find_message = @embedFile("examples/find_message.shale");
 
 const sep = "\n\n-------------\n";
 
@@ -48,11 +50,14 @@ const Fixture = struct {
             const text = try transcript(a, f.sid, f.n);
             try d.writeFile(io, .{ .sub_path = f.path, .data = text });
             // **THE SIDECAR AS THE SITE WRITES IT** (angry-gopher
-            // chat_count.zig): "<count> <size>", the transcript's size when
-            // counted, then "<offset> <uid>" of its last message. misc has
-            // none, as a topic not yet read since the server started.
+            // chat_count.zig, writeCount): "<count> <size>", the
+            // transcript's size when counted, then "<offset> <uid>": where
+            // its last message's block begins, the separator before it (0
+            // for a first message: chat_store.zig's `new_size -
+            // stored.len`), and who sent it. misc has none, as a topic not
+            // yet read since the server started.
             if (std.mem.eql(u8, f.sid, "misc")) continue;
-            const last = std.mem.lastIndexOf(u8, text, "MSG_").?;
+            const last = if (f.n > 1) std.mem.lastIndexOf(u8, text, sep).? else 0;
             const sidecar = try std.fmt.allocPrint(a, "{d} {d}\n{d} 7\n", .{ f.n, text.len, last });
             try d.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}.count", .{f.path[0 .. f.path.len - 3]}), .data = sidecar });
         }
@@ -213,4 +218,45 @@ test "example: the first change makes one folder and one file, and says what the
     try finished(&again);
     try testing.expectEqual(@as(usize, 1), again.effects.len);
     try testing.expect(std.mem.startsWith(u8, again.output, "the last run wrote:\nwritten by a signed Shale script at 2026-10-14T00:00:00Z\n"));
+}
+
+// ── 208(d)'s cookbook ────────────────────────────────────────────────────
+
+test "example: every count cache checked against its transcript's own separators, the stale and missing named, none read whole" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // A cache taken before the last message, as a crash can leave it.
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "39 4000\n3900 7\n" });
+    var r = f.run(stale_caches, &out_buf);
+    defer r.deinit();
+    try finished(&r);
+    errdefer std.debug.print("{s}", .{r.output});
+    try testing.expectEqualStrings("topics checked\t4\tstale or missing\t2\n" ++
+        \\topic           cache  counted  verdict
+        \\#general lunch      1        1  ok
+        \\#general plans     39       40  stale
+        \\#random misc       -1        2  no cache
+        \\1_2 hello           3        3  ok
+        \\
+    , r.output);
+    // Every transcript scanned, none held: the arena stays small.
+    try testing.expect(r.arena_bytes < 512 * 1024);
+}
+
+test "example: a phrase found in the chat, each topic's first message with it, and the run stops at its read budget saying how far it got" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var r = f.run(find_message, &out_buf);
+    defer r.deinit();
+    try finished(&r);
+    errdefer std.debug.print("{s}", .{r.output});
+    try testing.expect(std.mem.startsWith(u8, r.output, "\"line of it\" in 4 of 4 topics\n"));
+    try testing.expect(std.mem.indexOf(u8, r.output, "#general plans  MSG_plans_1  steve  2026-10-13T12:00:00Z") != null);
+    // With a read budget for about one topic: it stops, and says so.
+    var short = script.run(f.threaded.io(), testing.allocator, f.root, find_message, .{ .read_bytes = 3000 }, 0, &out_buf);
+    defer short.deinit();
+    try finished(&short);
+    try testing.expect(std.mem.indexOf(u8, short.output, "stopped at the read budget, after ") != null);
 }

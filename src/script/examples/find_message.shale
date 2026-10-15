@@ -1,0 +1,43 @@
+-- Find a phrase in the chat: the first message in each topic that has it,
+-- with who sent it and when. find_in scans a transcript without holding
+-- it; only the 2 KiB before a match is read, to find its message's start.
+-- When the read budget runs low it stops, and says how far it got.
+
+const PHRASE = "line of it"
+const WINDOW = 2048
+
+-- A topic's label: "#channel sid" or "conversation sid".
+function label(path)
+  local parts = split(path, "/")
+  local sid = sub(parts[#parts], 1, -4)
+  if parts[2] == "channels" then return "#" .. parts[3] .. " " .. sid end
+  return parts[2] .. " " .. sid
+end
+
+-- The message around offset `at`: its id, sender and date, from the last
+-- "MSG_" in the window before it.
+function message(path, at)
+  local from = max(0, at - WINDOW)
+  local before = read(path, from, at - from)
+  local pieces = split(before, "MSG_")
+  local head = lines(pieces[#pieces])
+  return {id = "MSG_" .. head[1], from = sub(head[2], 7), date = sub(head[3], 7)}
+end
+
+local topics = walk("chat", {like = "*.md", kind = "file"})
+local found = {}
+local looked = 0
+for e in topics do
+  if budget().read_bytes < e.size + WINDOW then
+    print("stopped at the read budget, after " .. looked .. " of " .. #topics .. " topics")
+    break
+  end
+  looked = looked + 1
+  local at = find_in(e.path, PHRASE)
+  if at ~= nil then
+    local m = message(e.path, at)
+    push(found, {topic = label(e.path), message = m.id, from = m.from, date = m.date, offset = at})
+  end
+end
+print("\"" .. PHRASE .. "\" in " .. #found .. " of " .. looked .. " topics")
+if #found > 0 then print(table(found, {"topic", "message", "from", "date", "offset"})) end

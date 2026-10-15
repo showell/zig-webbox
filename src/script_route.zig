@@ -376,11 +376,11 @@ fn escaped(alloc: std.mem.Allocator, w: *std.ArrayList(u8), s: []const u8) !void
     }
 }
 
-/// How a run ended, one line: `finished (N steps)`, or `stopped at L:C:
-/// class[ budget]: message (N steps)`, as the runner says it.
+/// How a run ended, one line: `finished (N steps)`, or `stopped at L:C[
+/// (in `f`)]: class[ budget]: message (N steps)`, as the runner says it.
 fn ending(alloc: std.mem.Allocator, w: *std.ArrayList(u8), r: *const script.Result) !void {
     if (r.stop) |s| {
-        try w.print(alloc, "stopped at {d}:{d}: {s}{s}{s}: ", .{ s.line, s.column, @tagName(s.class), if (s.budget != null) " " else "", if (s.budget) |b| @tagName(b) else "" });
+        try w.print(alloc, "stopped at {d}:{d}{s}{s}{s}: {s}{s}{s}: ", .{ s.line, s.column, if (s.function.len > 0) " (in `" else "", s.function, if (s.function.len > 0) "`)" else "", @tagName(s.class), if (s.budget != null) " " else "", if (s.budget) |b| @tagName(b) else "" });
         try escaped(alloc, w, s.message);
         try w.print(alloc, " ({d} steps)\n", .{r.steps});
     } else try w.print(alloc, "finished ({d} steps)\n", .{r.steps});
