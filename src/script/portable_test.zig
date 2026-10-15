@@ -14,6 +14,11 @@ const sources = .{
     .{ "value.zig", @embedFile("value.zig") },
     .{ "interp.zig", @embedFile("interp.zig") },
     .{ "builtins.zig", @embedFile("builtins.zig") },
+    .{ "builtins_store.zig", @embedFile("builtins_store.zig") },
+    .{ "builtins_text.zig", @embedFile("builtins_text.zig") },
+    .{ "builtins_lists.zig", @embedFile("builtins_lists.zig") },
+    .{ "builtins_time.zig", @embedFile("builtins_time.zig") },
+    .{ "builtins_format.zig", @embedFile("builtins_format.zig") },
 };
 
 /// What a portable file may not name: the file system but its path
@@ -74,4 +79,22 @@ test "the check fires on each refused name, planted, and not on one in a test bl
     try std.testing.expect(violation("// std.posix is not used\nconst a = 1;\n") == null);
     try std.testing.expect(violation("test \"x\" {\n    var t = std.Io.Threaded.init(a, .{});\n    _ = std.time;\n}\nconst b = 2;\n") == null);
     try std.testing.expect(violation("test \"x\" {\n}\nconst c = std.posix.fd_t;\n") != null);
+}
+
+test "the list above is every source of the module: a new file is checked too (builtins_v31.zig was missed once)" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var dir = try std.Io.Dir.cwd().openDir(io, "src/script", .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |en| {
+        if (en.kind != .file or !std.mem.endsWith(u8, en.name, ".zig") or std.mem.endsWith(u8, en.name, "_test.zig")) continue;
+        var listed = false;
+        inline for (sources) |s| listed = listed or std.mem.eql(u8, s[0], en.name);
+        if (!listed) {
+            std.debug.print("src/script/{s} is not in portable_test.zig's sources\n", .{en.name});
+            return error.TestUnexpectedResult;
+        }
+    }
 }

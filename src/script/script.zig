@@ -123,5 +123,6 @@ test {
     _ = @import("builtins_test.zig");
     _ = @import("examples_test.zig");
     _ = @import("portable_test.zig");
+    _ = builtins;
     _ = @import("fuzz_test.zig");
 }
