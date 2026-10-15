@@ -473,3 +473,24 @@ test "run: one huge charge stops the run a step past its budget, not at the char
         try testing.expectEqual(@as(u64, 1001), r.steps);
     }
 }
+
+test "run: a `..` chain's part of the wrong type stops at its own `..`, when a part is a chain, a map or a print (211's cold review of the VM)" {
+    // The VM once read the chain's positions mixed with a part's own.
+    const cases = [_]struct { src: []const u8, column: u32 }{
+        .{ .src = "local s = (\"a\" .. \"b\") .. nil", .column = 24 },
+        .{ .src = "local s = \"a\" .. (\"b\" .. \"c\") .. nil", .column = 31 },
+        .{ .src = "local s = \"x\" .. count({a = 1}) .. nil", .column = 33 },
+        .{ .src = "local s = (\"a\" .. \"b\") .. \"c\" .. {} .. \"d\"", .column = 37 },
+        .{ .src = "local t = {} local s = (\"a\" .. (\"q\" .. 1)) .. 2 .. t", .column = 49 },
+        .{ .src = "local s = \"p\" .. print(\"x\") .. 1", .column = 29 },
+    };
+    for (cases) |c| {
+        var r = runWith(c.src, .{});
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {?}\n", .{ c.src, r.stop });
+        try testing.expectEqual(script.diag.Class.type, r.stop.?.class);
+        try testing.expectEqual(c.column, r.stop.?.column);
+    }
+    // And `attempt` gives the same column as a value.
+    try expectOutput("function f() return (\"a\" .. \"b\") .. nil end local r = attempt(f) print(r.column)", "34\n");
+}

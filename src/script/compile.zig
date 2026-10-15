@@ -288,6 +288,7 @@ const Compiler = struct {
                 if (i.otherwise) |o| try c.block(o, d + 1);
                 const end = try c.label();
                 for (ends.items) |j| c.patch(j, end);
+                ends.deinit(c.a);
             },
             .@"while" => |w| {
                 const head = try c.label();
@@ -458,19 +459,22 @@ const Compiler = struct {
     /// the chain; part k is checked at the `..` whose left it is, the last
     /// at the innermost's.
     fn concat(c: *Compiler, pos: ast.Pos, le: *const ast.Expr, re: *const ast.Expr, d: u32) Error!void {
-        const first: u32 = @intCast(c.positions.items.len);
-        try c.positions.append(c.a, pos);
+        // **THE CHAIN'S PLACES KEPT APART** while its parts compile: a part
+        // that is itself a chain, a map or a `print` adds places of its own
+        // (211's cold review: the chain read them as its own).
+        var at: std.ArrayList(ast.Pos) = .empty;
+        try at.append(c.a, pos);
         try c.expr(le, d + 1);
-        var n: u32 = 1;
         var r = re;
         while (r.kind == .binary and r.kind.binary.op == .concat) : (r = r.kind.binary.right) {
-            try c.positions.append(c.a, r.pos);
+            try at.append(c.a, r.pos);
             try c.expr(r.kind.binary.left, d + 1);
-            n += 1;
         }
-        try c.positions.append(c.a, c.positions.items[c.positions.items.len - 1]);
+        try at.append(c.a, at.items[at.items.len - 1]);
         try c.expr(r, d + 1);
-        n += 1;
+        const n: u32 = @intCast(at.items.len);
+        const first: u32 = @intCast(c.positions.items.len);
+        try c.positions.appendSlice(c.a, at.items);
         _ = try c.emit(.{ .tag = .concat, .a = n, .b = first, .pos = pos });
         c.pop(n - 1);
     }

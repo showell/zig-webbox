@@ -135,13 +135,13 @@ pub const Run = struct {
         return error.Stop;
     }
 
-    /// Steps, charged; `n` for a builtin's work in proportion to what it
-    /// touches.
     /// Work done (see `work`): nothing outside tests.
     pub inline fn tally(self: *Run, n: u64) void {
         if (@import("builtin").is_test) self.work +|= n;
     }
 
+    /// Steps, charged; `n` for a builtin's work in proportion to what it
+    /// touches.
     pub fn charge(self: *Run, pos: ast.Pos, n: u64) Error!void {
         // **A CHARGE PAST WHAT IS LEFT STOPS A STEP PAST THE BUDGET**, as a
         // step does: the run never did that work, so its count is not the
