@@ -129,8 +129,14 @@ pub const Run = struct {
     }
 
     pub fn charge(self: *Run, pos: ast.Pos, n: u64) Error!void {
-        self.steps +|= n;
-        if (self.steps > self.budgets.steps) return self.budgetStop(pos, .steps);
+        // **A CHARGE PAST WHAT IS LEFT STOPS A STEP PAST THE BUDGET**, as a
+        // step does: the run never did that work, so its count is not the
+        // charge's size (`rep("ab", 2^62)` reported 2^63 steps).
+        if (n > self.budgets.steps -| self.steps) {
+            self.steps = self.budgets.steps +| 1;
+            return self.budgetStop(pos, .steps);
+        }
+        self.steps += n;
     }
 
     /// A step, one level deeper, and the stack it took so far.

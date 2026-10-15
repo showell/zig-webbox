@@ -444,3 +444,14 @@ test "run: the arena budget bounds the memory a run takes: the backing allocator
         try testing.expect(r.arena_bytes <= limit);
     }
 }
+
+test "run: one huge charge stops the run a step past its budget, not at the charge's size" {
+    // 209 (the box's review of 208, cosmetic): `rep("ab", 2^62)` reported
+    // 9223372036854775812 steps.
+    for ([_][]const u8{ "local x = rep(\"ab\", 4611686018427387904)", "local x = 1 local y = rep(\"ab\", 1000000000)" }) |src| {
+        var r = runWith(src, .{ .steps = 1000 });
+        defer r.deinit();
+        try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
+        try testing.expectEqual(@as(u64, 1001), r.steps);
+    }
+}
