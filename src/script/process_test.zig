@@ -225,3 +225,17 @@ test "process: a slice ends after any store call, however many steps it has left
     defer w.kill();
     try testing.expectEqual(process.Outcome.finished, w.step(.{}));
 }
+
+test "process: it keeps its own source: the caller's freed after start, the run goes on (a crash on Dog Park's host, metal-vmm QUEUE 214)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // From the page allocator: freed is unmapped, so a read of it faults.
+    const text = "local m = {a = \"one\"}\nlocal n = 0\nfor name in ls(\"notes\") do n = n + 1 end\nprint(m.a, n, m[\"a\"])\n";
+    const source = try std.heap.page_allocator.dupe(u8, text);
+    const p = try f.start(testing.allocator, source, .background);
+    defer p.kill();
+    std.heap.page_allocator.free(source);
+    while (p.step(.{}) == .paused) {}
+    try testing.expectEqualStrings("one\t2\tone\n", p.output());
+}

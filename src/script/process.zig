@@ -11,8 +11,11 @@
 //!
 //! **IT OWNS ALL IT HOLDS**, from the allocator `start` is handed (never a
 //! request's heap), under the run's budgets: the values' arena, the
-//! machine's memory (the tree, the code, the frames, the operands) and its
-//! output. `kill` gives every byte of it back.
+//! machine's memory (its own copy of the source, which the tree's names
+//! and strings point into; the tree, the code, the frames, the operands)
+//! and its output. So it may outlive what started it: a background run
+//! outlives its request (a crash on Dog Park's host, before it kept its
+//! source). `kill` gives every byte of it back.
 //!
 //! **TWO MODES:** an `atomic` run is today's, whole inside one handler, and
 //! may change the store; a `background` run is stepped in slices between
@@ -122,9 +125,11 @@ pub const Process = struct {
         if (source.len > budgets.source_bytes) return p.stopWith(.{ .line = 1, .column = 1, .class = .budget, .budget = .source, .message = "the source is larger than the source budget" });
         const machine_stop: Stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the machine's memory (the code, the frames, the operands) is past its budget" };
         const tree = p.machine.tree.allocator();
+        // **ITS OWN SOURCE**: the tree points into it (above).
+        const own = tree.dupe(u8, source) catch return p.stopWith(machine_stop);
         const program = tree.create(ast.Program) catch return p.stopWith(machine_stop);
         var stop: ?Stop = null;
-        program.* = parse.parseMeasured(tree, p.machine.budget.allocator(), source, budgets.nesting, &stop, &p.parse_stack) catch |e| return p.stopWith(switch (e) {
+        program.* = parse.parseMeasured(tree, p.machine.budget.allocator(), own, budgets.nesting, &stop, &p.parse_stack) catch |e| return p.stopWith(switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => machine_stop,
         });

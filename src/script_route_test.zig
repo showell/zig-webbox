@@ -439,3 +439,31 @@ test "a background run takes the background budgets when the host gives them, th
     while (route.sliceBackground(f.threaded.io(), now)) {}
     try testing.expect(std.mem.startsWith(u8, try Fixture.status(), "background seq=2 finished: "));
 }
+
+test "a background run owns its source: the request's memory gone, the run goes on (a crash on Dog Park's host, metal-vmm QUEUE 214)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    defer route.background.reset();
+    // The request's body and everything it allocated, freed when it is
+    // answered, as a host frees a request's arena; the run's names, keys
+    // and strings must not live there.
+    {
+        // From the page allocator, as a host's is: freed is unmapped.
+        var request: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer request.deinit();
+        const a = request.allocator();
+        const source = "local m = {a = \"one\", b = \"two\"}\nlocal n = 0\nfor e in walk(\"chat\") do n = n + 1 end\nprint(m.a, m[\"b\"], n)\n";
+        const signed = try route.signedBytesIn(a, "test.example", 1, now + 600, .background, source);
+        const sig = try f.kp.sign(signed, null);
+        const body = try route.envelope(a, sig.toBytes(), signed);
+        var o = try route.handle(f.threaded.io(), a, body, .{ .paths = f.paths, .data_root = f.data, .budgets = .{}, .now = now, .out = &out_buf, .backing = testing.allocator });
+        o.deinit();
+    }
+    while (route.sliceBackground(f.threaded.io(), now)) {}
+    const st = try Fixture.status();
+    if (!std.mem.endsWith(u8, st, "one\ttwo\t2\n")) {
+        std.debug.print("status: {s}\n", .{st});
+        return error.TestUnexpectedResult;
+    }
+}
