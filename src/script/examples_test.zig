@@ -292,6 +292,22 @@ test "every read-only script of the cookbook finishes on the site-shaped store i
     }
 }
 
+test "every cookbook script that walks gives the same answer walking in parts of three entries as in parts of 256 (metal-vmm QUEUE 211, the caps)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var whole_buf: [64 * 1024]u8 = undefined;
+    for ([_][]const u8{ where_the_bytes_are, chat_topics, stale_caches, find_message }) |src| {
+        var whole = script.run(f.threaded.io(), testing.allocator, f.root, src, .{}, 1791936000, &whole_buf);
+        defer whole.deinit();
+        try finished(&whole);
+        var parts = script.run(f.threaded.io(), testing.allocator, f.root, src, .{ .call_entries = 3 }, 1791936000, &out_buf);
+        defer parts.deinit();
+        try finished(&parts);
+        try testing.expectEqualStrings(whole.output, parts.output);
+    }
+}
+
 // ── 209(b): docs/SHALE.md's snippets run ─────────────────────────────────
 
 /// One ```shale block of the reference: its source, and what it must do,

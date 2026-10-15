@@ -54,6 +54,11 @@ pub const Budgets = struct {
     /// bytes one `read` (or one scan) takes from the store in one call. A
     /// bigger file is read in parts, `read(p, offset, n)`, each a call.
     call_bytes: u64 = 1024 * 1024,
+    /// **WHAT ONE `walk` CONSIDERS** (QUEUE 211, the caps): the entries one
+    /// call takes from its folders' listings, each a stat if it is kept. A
+    /// walk with more ends its list with a `more` entry, and goes on from
+    /// it with `walk(p, {after = its path})`.
+    call_entries: u64 = 256,
 };
 
 /// One store change the script attempted, in order, root-relative.

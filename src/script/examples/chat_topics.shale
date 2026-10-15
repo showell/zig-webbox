@@ -1,8 +1,8 @@
 -- The chat, topic by topic, without reading a transcript: messages from
 -- each topic's count cache, bytes and the last change from the store; the
 -- topics with the most messages; those quiet for QUIET_DAYS; and the count
--- caches that are stale. Reads only, and cheap on a site of any size: one
--- read a folder (walk) and one a cache.
+-- caches that are stale. Reads only, and cheap: a read a folder and an entry
+-- (walk) and one a cache.
 --
 -- A topic is chat/<a>_<b>/sessions/<sid>.md (a conversation) or
 -- chat/channels/<name>/sessions/<sid>.md. Its cache, <sid>.count, is
@@ -10,6 +10,21 @@
 -- transcript's size when it was counted, then "<offset> <uid>". A cache
 -- whose size is not the transcript's is stale: the server recounts it at
 -- its next read.
+
+-- Every entry `walk` gives, a part at a time: one call considers at most
+-- the call-entries cap (256) and ends its part with where to go on from.
+function walk_all(path, opts)
+  local got = {}
+  opts.after = ""
+  while true do
+    local more = nil
+    for e in walk(path, opts) do
+      if e.kind == "more" then more = e.path else push(got, e) end
+    end
+    if more == nil then return got end
+    opts.after = more
+  end
+end
 
 const MOST = 15
 const QUIET_DAYS = 90
@@ -43,7 +58,7 @@ local quiet = {}
 local stale = {}
 local messages = 0
 local bytes = 0
-for e in walk("chat") do
+for e in walk_all("chat", {}) do
   local topic = nil
   if e.kind == "file" then topic = label(split(e.path, "/")) end
   if topic ~= nil then

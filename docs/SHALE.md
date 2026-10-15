@@ -405,7 +405,7 @@ names the builtin and the argument.
 | `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
 | `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
 | `find_in(p, s[, offset[, n]])` | the 0-based offset of the first `s`, a `read` offset, or nil; of a range, the first that starts in it, so a file found in parts gives what the whole file's would | as `count_in`, stopping at the first | as `count_in` |
-| `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **one read a folder listed**, not one an entry; a step an entry and each path's bytes | `store`; `argument` for an unknown option |
+| `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **a read a folder listed and an entry stat'ed** (each a store call, a disk command on metal); a step an entry and each path's bytes. **At most `call_entries` (256) entries a call**: with more to come, the list ends with `{path, kind = "more"}`, and `walk(p, {after = that path})` goes on from it (see the cookbook's `walk_all`). A background run passes by an entry gone between its folder's listing and its stat | `store`; `argument` for an unknown option, or an `after` not under `p` |
 | `replace(p, s)` | writes the file whole: never a torn file. There is no plain `write` | a change; each byte a change byte and a step | `store`, logged |
 | `append(p, s)` | adds to the end | as `replace` | `store`, logged |
 | `mkdir(p)` | a folder, and its parents | a change | `store`, logged |
@@ -417,6 +417,10 @@ names the builtin and the argument.
 - `like`: a pattern for the entries' names (`like` below). Folders are
   walked into whether they match or not.
 - `kind`: `"file"`, `"directory"` or `"other"`.
+- `after`: where an earlier call's part ended (its `more` entry's path,
+  or "" for the start). The walk goes on after it in its own order, the
+  path there or not: each folder on it is listed again, and the walk
+  takes the first name past it. In parts, a walk gives each entry once.
 
 An entry that `like` or `kind` leaves out is never stat'ed.
 
@@ -543,12 +547,13 @@ not name is Shale's default, the machine's included.
 | call depth | | 64 | 64 |
 | depth | expressions and statements the walk is inside of at once, across every call (see below) | 2,000 | 2,000 |
 | output | at most `out.len` | 256 KiB | 256 KiB |
-| reads | `ls`, `stat`, `exists`, `is_dir`, `read` and each scan count one; `walk` one a folder | 10,000 | 500 |
+| reads | `ls`, `stat`, `exists`, `is_dir`, `read` and each scan count one; `walk` one a folder and one an entry's stat | 10,000 | 500 |
 | read bytes | what the reads bring; `read` gets what remains as its limit | 64 MiB | 16 MiB |
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
 | machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two). **Every source within the source budget compiles in half of it** (tested: the worst shapes, short statements and list literals, take about 113 bytes of tree and code a byte of source, 7.4 MB for 64 KiB); the other half is for the frames and the operands | 16 MiB | 16 MiB (the route sets none; with its 8 MiB arena, a run takes at most 24 MiB of the host's memory) |
 | call bytes | **what one builtin call brings from the store** (QUEUE 211, the caps: a builtin is never cut, so its work is bounded instead). A `read` or a scan past it is an `argument` error; a bigger file is read or scanned in parts, `read(p, offset, n)` or `count_in(p, s, offset, n)`, a call each, so a host can let a request in between | 1 MiB | 1 MiB |
+| call entries | **what one `walk` call considers** (QUEUE 211, the caps): its folders' entries, each a stat if it is kept. A walk with more ends its part with a `more` entry and goes on from it | 256 | 256 |
 | kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |
 | nesting | how deep the source nests when parsed (a parenthesis costs two: an expression and its operand) | 200 | 200 |
@@ -798,7 +803,7 @@ budgets, and changes nothing.
 
 | script | what it does | how it keeps to the budgets |
 |---|---|---|
-| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | `walk`: one read a folder |
+| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | `walk`, in parts (`walk_all`): a read a folder and an entry |
 | `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars |
 | `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_in`, and only for transcripts under 1 MiB; the rest are listed by size |
 | `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_in`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget and says how far it got |

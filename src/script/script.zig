@@ -15,6 +15,7 @@ pub const value = @import("value.zig");
 pub const interp = @import("interp.zig");
 pub const builtins = @import("builtins.zig");
 pub const builtins_text = @import("builtins_text.zig");
+pub const builtins_store = @import("builtins_store.zig");
 pub const compile = @import("compile.zig");
 pub const vm = @import("vm.zig");
 pub const process = @import("process.zig");

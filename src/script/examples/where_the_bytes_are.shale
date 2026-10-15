@@ -1,13 +1,28 @@
 -- Where the data root's bytes are: each top-level folder's files, bytes and
--- empty files, then the largest files. Reads only, one store read a folder
--- (walk), so a site of any size gives the whole answer.
+-- empty files, then the largest files. Reads only: a store read a folder and
+-- an entry (walk).
 
 const LARGEST = 15
+
+-- Every entry `walk` gives, a part at a time: one call considers at most
+-- the call-entries cap (256) and ends its part with where to go on from.
+function walk_all(path, opts)
+  local got = {}
+  opts.after = ""
+  while true do
+    local more = nil
+    for e in walk(path, opts) do
+      if e.kind == "more" then more = e.path else push(got, e) end
+    end
+    if more == nil then return got end
+    opts.after = more
+  end
+end
 
 local folders = {}
 local order = {}
 local files = {}
-for e in walk("") do
+for e in walk_all("", {}) do
   if e.kind == "file" then
     local parts = split(e.path, "/")
     local top = "(the root)"
