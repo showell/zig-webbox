@@ -828,24 +828,31 @@ The sizes are to within a tenth.
 | `topics` | 10 (~2 KiB) | 343 topics | 729 KiB | reads |
 | `topics` | 100 (~21 KiB) | 163 topics | 3.4 MiB | arena |
 | `topics` | 1000 (~215 KiB) | 17 topics | 3.6 MiB | steps |
-| `stale_caches` | 10 | 124 topics | 263 KiB | reads |
-| `stale_caches` | 100 | 124 topics | 2.6 MiB | reads |
+| `stale_caches` | 10 | 94 topics | 199 KiB | reads |
+| `stale_caches` | 100 | 94 topics | 2.0 MiB | reads |
 | `stale_caches` | 1000 | 72 topics | 15.2 MiB | steps |
-| `find_message` | 10 | 196 topics | 416 KiB | reads |
-| `find_message` | 100 | 196 topics | 4.1 MiB | reads |
+| `find_message` | 10 | 124 topics | 263 KiB | reads |
+| `find_message` | 100 | 124 topics | 2.6 MiB | reads |
 | `find_message` | 1000 | 72 topics | 15.2 MiB | read bytes: it stops itself and says how far it got |
-| `chat_topics` | any | 196 topics | 41 MiB at 1000 | reads: an `exists` and a `read` a topic |
-| `where_the_bytes_are` | any | 1175 topics (about 3,500 files) | 249 MiB at 1000 | arena: every entry held, as maps |
+| `chat_topics` | any | 60 topics | 12.6 MiB at 1000 | reads: walk's stats, an `exists` and a `read` a topic |
+| `where_the_bytes_are` | any | 94 topics (about 280 files) | 19.8 MiB at 1000 | reads: walk's stats |
 | `big_files` | any | 46 topics | 9.7 MiB at 1000 | reads: an `is_dir` and a `stat` an entry |
+
+**Since walk's stats count as reads** (QUEUE 211, the caps: each is a
+store call, a disk command on metal), every script that walks the chat
+fits fewer topics at the site's 500 reads: `where_the_bytes_are` 94 where
+it fit 1,175, `chat_topics` 60 where it fit 196, `find_message` 124 where
+196, `stale_caches` 94 where 124. The reads budget now bounds what it was
+set to bound, the disk commands a run makes; whether the site's 500 should
+grow with it is the box's and Steve's to say.
 
 **The news is mostly bad.** At angry-gopher's scale (its chat is about
 190 MB), nothing that reads transcripts finishes in one run: a
 transcript-reading script answers for a few hundred topics at most, and
 for a few dozen when they are large. The read count, not the bytes,
-binds first. Even the scripts that read no transcript stop near 200
-topics (`chat_topics`, two reads a topic) and 1,200 (`where_the_bytes_are`,
-its arena). `big_files`, the old way (`ls`, `is_dir` and `stat` an entry),
-fits 46 topics; `walk` does the same work in one read a folder.
+binds first. Even the scripts that read no transcript stop near 60 to 100 topics, on
+walk's stats. `big_files`, the old way (`ls`, `is_dir` and `stat` an
+entry), fits 46 topics.
 
 ## What was decided, and what was refused
 
