@@ -297,6 +297,15 @@ test "every read-only script of the cookbook finishes on the site-shaped store i
 /// One ```shale block of the reference: its source, and what it must do,
 /// from its last comment lines: `-- prints:` and the output, a line of it
 /// each as `-- text` (or `--` for an empty line), or `-- stops: <class>`.
+/// **A PASSING RUN PRINTS NOTHING THAT SAYS "FAILED"** (the box, 209): the
+/// planted cases below expect these complaints, so they are kept quiet
+/// there, and said only when a real doc check fails.
+var quiet = false;
+
+fn complain(comptime fmt: []const u8, args: anytype) void {
+    if (!quiet) std.debug.print(fmt, args);
+}
+
 const Snippet = struct { line: usize, source: []const u8, prints: ?[]const u8, stops: ?[]const u8 };
 
 fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
@@ -323,7 +332,7 @@ fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
         if (std.mem.startsWith(u8, line, "```")) {
             const lang = line[3..];
             if (lang.len == 0) {
-                std.debug.print("docs/SHALE.md:{d}: a code block with no language: say what it is (shale, zig, sh, ebnf)\n", .{n});
+                complain("docs/SHALE.md:{d}: a code block with no language: say what it is (shale, zig, sh, ebnf)\n", .{n});
                 return error.TestUnexpectedResult;
             }
             in_block = lang;
@@ -333,12 +342,12 @@ fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
         // A fence indented (inside a list) is never read as one here, so
         // its block would never run: fences start their line.
         if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) {
-            std.debug.print("docs/SHALE.md:{d}: an indented fence: start it at the line's start, outside the list\n", .{n});
+            complain("docs/SHALE.md:{d}: an indented fence: start it at the line's start, outside the list\n", .{n});
             return error.TestUnexpectedResult;
         }
         // An indented code block would never run: every block is fenced.
         if (prev_blank and std.mem.startsWith(u8, line, "    ") and !std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "-")) {
-            std.debug.print("docs/SHALE.md:{d}: an indented code block: fence it, with its language\n", .{n});
+            complain("docs/SHALE.md:{d}: an indented code block: fence it, with its language\n", .{n});
             return error.TestUnexpectedResult;
         }
         prev_blank = std.mem.trim(u8, line, " ").len == 0;
@@ -352,7 +361,7 @@ fn parseSnippet(a: std.mem.Allocator, line: usize, text: []const u8) !Snippet {
         return .{ .line = line, .source = text[0 .. at + 1], .prints = null, .stops = class };
     }
     const mark = std.mem.indexOf(u8, text, "-- prints:\n") orelse {
-        std.debug.print("docs/SHALE.md:{d}: a shale block with no `-- prints:` or `-- stops:`: say what it does\n", .{line});
+        complain("docs/SHALE.md:{d}: a shale block with no `-- prints:` or `-- stops:`: say what it does\n", .{line});
         return error.TestUnexpectedResult;
     };
     var want: std.ArrayList(u8) = .empty;
@@ -366,7 +375,7 @@ fn parseSnippet(a: std.mem.Allocator, line: usize, text: []const u8) !Snippet {
             try want.appendSlice(a, l[3..]);
             try want.append(a, '\n');
         } else {
-            std.debug.print("docs/SHALE.md:{d}: after `-- prints:`, only `-- ` lines\n", .{line});
+            complain("docs/SHALE.md:{d}: after `-- prints:`, only `-- ` lines\n", .{line});
             return error.TestUnexpectedResult;
         }
     }
@@ -389,23 +398,23 @@ fn checkDoc(doc: []const u8) !usize {
         defer r.deinit();
         if (sn.stops) |class| {
             const s = r.stop orelse {
-                std.debug.print("docs/SHALE.md:{d}: finished, and should stop with {s}\n", .{ sn.line, class });
+                complain("docs/SHALE.md:{d}: finished, and should stop with {s}\n", .{ sn.line, class });
                 return error.TestUnexpectedResult;
             };
             if (!std.mem.eql(u8, @tagName(s.class), class)) {
-                std.debug.print("docs/SHALE.md:{d}: stopped {s} ({s}), not {s}\n", .{ sn.line, @tagName(s.class), s.message, class });
+                complain("docs/SHALE.md:{d}: stopped {s} ({s}), not {s}\n", .{ sn.line, @tagName(s.class), s.message, class });
                 return error.TestUnexpectedResult;
             }
             continue;
         }
         if (r.stop) |s| {
-            std.debug.print("docs/SHALE.md:{d}: stopped {d}:{d} {s}: {s}\n", .{ sn.line, s.line, s.column, @tagName(s.class), s.message });
+            complain("docs/SHALE.md:{d}: stopped {d}:{d} {s}: {s}\n", .{ sn.line, s.line, s.column, @tagName(s.class), s.message });
             return error.TestUnexpectedResult;
         }
         const got = try std.mem.replaceOwned(u8, a, r.output, "\t", "<TAB>");
         if (!std.mem.eql(u8, got, sn.prints.?)) {
             // Every block that differs is said, so a doc is fixed in one go.
-            std.debug.print("docs/SHALE.md:{d}: prints\n{s}-- not --\n{s}", .{ sn.line, got, sn.prints.? });
+            complain("docs/SHALE.md:{d}: prints\n{s}-- not --\n{s}", .{ sn.line, got, sn.prints.? });
             wrong += 1;
         }
     }
@@ -430,6 +439,8 @@ test "docs/SHALE.md's check fires: a snippet whose output is wrong, one with no 
         "```shale\nprint(1)\n-- stops: type\n```\n",
         "- an item\n\n  ```shale\n  print(1)\n  ```\n",
     };
+    quiet = true;
+    defer quiet = false;
     for (planted) |p| try testing.expectError(error.TestUnexpectedResult, checkDoc(p));
     try testing.expectEqual(@as(usize, 1), try checkDoc("```shale\nprint(1, 2)\n-- prints:\n-- 1<TAB>2\n```\n"));
 }

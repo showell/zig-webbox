@@ -533,7 +533,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | budget | what it counts | default | the site's (angry-gopher v30) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
-| arena | **the memory the run holds, all of it.** (The tree a source parses to has an arena of its own, bounded by the source and nesting budgets; the machine's own memory is beside it, see "The Zig stack".) Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
+| arena | **the memory the run holds, all of it.** (The tree a source parses to and the machine's own memory are beside it, under the machine budget.) Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
 | call depth | | 64 | 64 |
 | depth | expressions and statements the walk is inside of at once, across every call (see below) | 2,000 | 2,000 |
 | output | at most `out.len` | 256 KiB | 256 KiB |
@@ -541,6 +541,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | read bytes | what the reads bring; `read` gets what remains as its limit | 64 MiB | 16 MiB |
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
+| machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two) | 4 MiB | 4 MiB |
 | kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |
 | nesting | how deep the source nests when parsed (a parenthesis costs two: an expression and its operand) | 200 | 200 |
