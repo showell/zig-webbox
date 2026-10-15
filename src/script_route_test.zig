@@ -9,6 +9,7 @@ const testing = std.testing;
 const Ed25519 = std.crypto.sign.Ed25519;
 
 var out_buf: [64 * 1024]u8 = undefined;
+var status_buf: [64 * 1024]u8 = undefined;
 
 const seed: [32]u8 = @splat(7);
 const other_seed: [32]u8 = @splat(9);
@@ -76,6 +77,25 @@ const Fixture = struct {
         return route.envelope(a, sig.toBytes(), signed);
     }
 
+    fn bodyIn(f: *Fixture, sequence: u64, mode: route.Mode, source: []const u8) ![]u8 {
+        const a = f.arena.allocator();
+        const signed = try route.signedBytesIn(a, "test.example", sequence, now + 600, mode, source);
+        const sig = try f.kp.sign(signed, null);
+        return route.envelope(a, sig.toBytes(), signed);
+    }
+
+    /// A request on a host that steps background runs, from the testing
+    /// allocator: a leak of the run is the test's failure.
+    fn sendHosted(f: *Fixture, b: []const u8) !route.Outcome {
+        return route.handle(f.threaded.io(), f.arena.allocator(), b, .{ .paths = f.paths, .data_root = f.data, .budgets = .{}, .now = now, .out = &out_buf, .backing = testing.allocator });
+    }
+
+    fn status() ![]const u8 {
+        var w: std.Io.Writer = .fixed(&status_buf);
+        try route.writeBackgroundStatus(&w);
+        return w.buffered();
+    }
+
     fn send(f: *Fixture, b: []const u8) !route.Outcome {
         return route.handle(f.threaded.io(), f.arena.allocator(), b, .{ .paths = f.paths, .data_root = f.data, .budgets = .{}, .now = now, .out = &out_buf });
     }
@@ -92,7 +112,7 @@ const Fixture = struct {
                 std.debug.print("refused {s} ({s}), not {s}\n", .{ @tagName(r.why), r.detail, @tagName(why) });
                 return error.TestUnexpectedResult;
             },
-            .ran => return error.TestUnexpectedResult,
+            .ran, .started, .killed => return error.TestUnexpectedResult,
         }
     }
 
@@ -322,4 +342,83 @@ test "refused: the auth root inside the data root, or the other way, or the same
     try testing.expect(!try route.nested(a, "x/data", "x/data2"));
     try testing.expect(!try route.nested(a, "data", "auth"));
     try testing.expect(try route.nested(a, "x/data", "x/data/auth"));
+}
+
+// ── background runs (metal-vmm QUEUE 211, step 5) ──────────────────────
+
+const walk_source = "for e in walk(\"chat\") do print(e.path, e.size) end\n";
+
+test "a background run is answered at once with its number, steps a slice at a time between requests, and prints what the atomic run prints" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    defer route.background.reset();
+    var o = try f.sendHosted(try f.bodyIn(1, .background, walk_source));
+    defer o.deinit();
+    try testing.expectEqual(std.http.Status.accepted, o.status());
+    try testing.expect(std.mem.startsWith(u8, try Fixture.status(), "background seq=1 running: 0 steps, 0 slices\n"));
+    // The walk is one store call: a slice to its end, and one after.
+    var slices: usize = 1;
+    while (route.sliceBackground(f.threaded.io(), now + 1)) slices += 1;
+    try testing.expectEqual(@as(usize, 2), slices);
+    const st = try Fixture.status();
+    try testing.expect(std.mem.startsWith(u8, st, "background seq=1 finished: background, 2 slices: finished ("));
+    // The atomic run of the same script prints the same.
+    var a = try f.send(try f.body(f.kp, "test.example", 2, now + 600, walk_source));
+    defer a.deinit();
+    try testing.expect(std.mem.endsWith(u8, st, a.ran.result.output));
+    try testing.expectEqualStrings("chat/a.md\t5\nchat/b.md\t6\n", a.ran.result.output);
+    const log = try f.log();
+    try testing.expect(std.mem.indexOf(u8, log, "seq=1 sha256=") != null);
+    try testing.expect(std.mem.indexOf(u8, log, " mode=background started\n") != null);
+    try testing.expect(std.mem.indexOf(u8, log, "seq=1 background, ") != null);
+}
+
+test "a second background run is refused busy, its number unspent; a kill ends the first, everything given back" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    defer route.background.reset();
+    var o = try f.sendHosted(try f.bodyIn(1, .background, "local n = 0 while true do n = n + 1 end"));
+    defer o.deinit();
+    try testing.expect(route.sliceBackground(f.threaded.io(), now));
+    try testing.expect(route.sliceBackground(f.threaded.io(), now));
+    var second = try f.sendHosted(try f.bodyIn(2, .background, walk_source));
+    defer second.deinit();
+    try testing.expectEqual(route.Refusal.busy, second.refused.why);
+    try testing.expectEqual(std.http.Status.service_unavailable, second.status());
+    try testing.expectEqual(@as(u64, 1), try f.last());
+    var kill = try f.sendHosted(try f.bodyIn(2, .kill, ""));
+    defer kill.deinit();
+    try testing.expectEqual(@as(u64, 1), kill.killed.sequence);
+    try testing.expectEqual(@as(u64, 2), kill.killed.slices);
+    try testing.expect(!route.sliceBackground(f.threaded.io(), now));
+    try testing.expect(std.mem.startsWith(u8, try Fixture.status(), "background seq=1 killed: killed by seq=2 after "));
+    try testing.expect(std.mem.indexOf(u8, try f.log(), "seq=1 killed by seq=2") != null);
+    // Nothing running now: a kill has nothing to end, a run may start.
+    var again = try f.sendHosted(try f.bodyIn(3, .kill, ""));
+    defer again.deinit();
+    try testing.expectEqual(route.Refusal.not_running, again.refused.why);
+    var next = try f.sendHosted(try f.bodyIn(4, .background, walk_source));
+    defer next.deinit();
+    try testing.expectEqual(std.http.Status.accepted, next.status());
+}
+
+test "a background run that changes the store stops, naming atomic, and changes nothing; a host that steps none refuses one" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    defer route.background.reset();
+    var o = try f.sendHosted(try f.bodyIn(1, .background, "print(1) remove(\"chat/a.md\")"));
+    defer o.deinit();
+    while (route.sliceBackground(f.threaded.io(), now)) {}
+    const st = try Fixture.status();
+    try testing.expect(std.mem.indexOf(u8, st, "stopped at 1:10") != null);
+    try testing.expect(std.mem.indexOf(u8, st, "`atomic`") != null);
+    try testing.expect((try store.readOrNull(f.threaded.io(), f.arena.allocator(), try std.fs.path.join(f.arena.allocator(), &.{ f.data, "chat", "a.md" }), .unlimited)) != null);
+    try f.expectRefused(try f.bodyIn(2, .background, walk_source), .no_background);
+    // `mode=atomic` is not a spelling: none is.
+    const a = f.arena.allocator();
+    const signed = try std.mem.concat(a, u8, &.{ "shale-1 target=test.example sequence=3 expires=1800000600 mode=atomic\n", walk_source });
+    try f.expectRefused(try route.envelope(a, (try f.kp.sign(signed, null)).toBytes(), signed), .malformed);
 }

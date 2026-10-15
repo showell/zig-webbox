@@ -10,8 +10,16 @@
 //! **THE ENVELOPE** (the request's body), three parts, nothing optional:
 //!
 //!     shale-signature <128 hex digits>\n
-//!     shale-1 target=<host> sequence=<n> expires=<unix seconds>\n
+//!     shale-1 target=<host> sequence=<n> expires=<unix seconds>[ mode=<m>]\n
 //!     <the script's bytes, to the end of the body>
+//!
+//! **THE MODE** (metal-vmm QUEUE 211, Steve's model), its one optional
+//! field: none is `atomic`, today's run, whole inside the request, which may
+//! change the store. `mode=background` starts a run that only reads, stepped
+//! in slices between handlers (`sliceBackground`), and is answered at once
+//! with its number (202); one at a time, a second refused 503 `busy` before
+//! its number is spent. `mode=kill` ends the background run (its script is
+//! ignored). `mode=atomic` is not a spelling: none is.
 //!
 //! The signature is over every byte after the first line: the second line
 //! and the script. The second line has one spelling for its values (its
@@ -66,11 +74,14 @@ pub const header_bytes = 512;
 /// that leaked is not good for long.
 pub const max_ahead_s: i64 = 24 * 60 * 60;
 
+pub const Mode = enum { atomic, background, kill };
+
 pub const Envelope = struct {
     signature: [Ed25519.Signature.encoded_length]u8,
     target: []const u8,
     sequence: u64,
     expires: i64,
+    mode: Mode = .atomic,
     /// The bytes the signature is over: the second line and the script.
     signed: []const u8,
     source: []const u8,
@@ -88,27 +99,44 @@ pub const Refusal = enum {
     replayed,
     sequence_unreadable,
     not_recorded,
+    /// A background run while one runs: one at a time (Steve: "refuse the
+    /// second job for now").
+    busy,
+    /// A background run on a host that steps none.
+    no_background,
+    /// A kill with no background run.
+    not_running,
 
     pub fn status(r: Refusal) std.http.Status {
         return switch (r) {
             .malformed => .bad_request,
             .no_key, .bad_signature, .wrong_target, .expired, .expires_too_far => .forbidden,
             .bad_config => .internal_server_error,
-            .replayed => .conflict,
-            .sequence_unreadable, .not_recorded => .service_unavailable,
+            .replayed, .not_running => .conflict,
+            .sequence_unreadable, .not_recorded, .busy => .service_unavailable,
+            .no_background => .not_implemented,
         };
     }
 };
 
 /// The second line, as it must be spelled for these values.
-pub fn headerLine(buf: []u8, target: []const u8, sequence: u64, expires: i64) ![]const u8 {
-    return std.fmt.bufPrint(buf, format ++ " target={s} sequence={d} expires={d}\n", .{ target, sequence, expires });
+pub fn headerLine(buf: []u8, target: []const u8, sequence: u64, expires: i64, mode: Mode) ![]const u8 {
+    const m = switch (mode) {
+        .atomic => "",
+        .background => " mode=background",
+        .kill => " mode=kill",
+    };
+    return std.fmt.bufPrint(buf, format ++ " target={s} sequence={d} expires={d}{s}\n", .{ target, sequence, expires, m });
 }
 
 /// The bytes a signer signs: the second line and the script.
 pub fn signedBytes(alloc: std.mem.Allocator, target: []const u8, sequence: u64, expires: i64, source: []const u8) ![]u8 {
+    return signedBytesIn(alloc, target, sequence, expires, .atomic, source);
+}
+
+pub fn signedBytesIn(alloc: std.mem.Allocator, target: []const u8, sequence: u64, expires: i64, mode: Mode, source: []const u8) ![]u8 {
     var buf: [header_bytes]u8 = undefined;
-    const line = try headerLine(&buf, target, sequence, expires);
+    const line = try headerLine(&buf, target, sequence, expires, mode);
     return std.mem.concat(alloc, u8, &.{ line, source });
 }
 
@@ -151,13 +179,14 @@ pub fn parse(body: []const u8) error{Malformed}!Envelope {
     const target = try field(fields.next(), "target=");
     const sequence = std.fmt.parseInt(u64, try field(fields.next(), "sequence="), 10) catch return error.Malformed;
     const expires = std.fmt.parseInt(i64, try field(fields.next(), "expires="), 10) catch return error.Malformed;
+    const mode: Mode = if (fields.next()) |m| std.meta.stringToEnum(Mode, try field(m, "mode=")) orelse return error.Malformed else .atomic;
     if (fields.next() != null) return error.Malformed;
     if (!validTarget(target) or sequence == 0) return error.Malformed;
     // **ONE SPELLING**: written again from what was read, it is what came.
     var again: [header_bytes]u8 = undefined;
-    const line = headerLine(&again, target, sequence, expires) catch return error.Malformed;
+    const line = headerLine(&again, target, sequence, expires, mode) catch return error.Malformed;
     if (!std.mem.eql(u8, line, signed[0 .. second_end + 1])) return error.Malformed;
-    return .{ .signature = sig, .target = target, .sequence = sequence, .expires = expires, .signed = signed, .source = signed[second_end + 1 ..] };
+    return .{ .signature = sig, .target = target, .sequence = sequence, .expires = expires, .mode = mode, .signed = signed, .source = signed[second_end + 1 ..] };
 }
 
 fn field(got: ?[]const u8, comptime name: []const u8) error{Malformed}![]const u8 {
@@ -228,6 +257,9 @@ pub const Request = struct {
     now: i64,
     /// Where the script's `print` goes: its output budget is at most this.
     out: []u8,
+    /// **A BACKGROUND RUN'S MEMORY**, the host's own allocator, never a
+    /// request's heap: null on a host that steps no background run.
+    backing: ?std.mem.Allocator = null,
 };
 
 pub const Ran = struct {
@@ -246,20 +278,26 @@ pub const Ran = struct {
 pub const Outcome = union(enum) {
     refused: struct { why: Refusal, detail: []const u8 },
     ran: Ran,
+    /// A background run started: its number.
+    started: u64,
+    /// The background run ended by a kill: its number, steps and slices.
+    killed: struct { sequence: u64, steps: u64, slices: u64 },
 
     pub fn deinit(o: *Outcome) void {
         switch (o.*) {
             .ran => |*r| r.result.deinit(),
-            .refused => {},
+            .refused, .started, .killed => {},
         }
     }
 
     /// The reply's status: a run is 200 however it ended, 500 when its end
-    /// went unlogged.
+    /// went unlogged; a background run started, 202.
     pub fn status(o: *const Outcome) std.http.Status {
         return switch (o.*) {
             .refused => |r| r.why.status(),
             .ran => |r| if (r.log_failed != null) .internal_server_error else .ok,
+            .started => .accepted,
+            .killed => .ok,
         };
     }
 };
@@ -289,6 +327,15 @@ pub fn handle(io: Io, alloc: std.mem.Allocator, body: []const u8, req: Request) 
         return refuse(.sequence_unreadable, try std.fmt.allocPrint(alloc, "the last sequence number cannot be read: {s}", .{@errorName(e)}));
     if (env.sequence <= last)
         return refuse(.replayed, try std.fmt.allocPrint(alloc, "sequence {d} is not past the last one run, {d}", .{ env.sequence, last }));
+    switch (env.mode) {
+        .atomic => {},
+        .background => {
+            if (req.backing == null) return refuse(.no_background, "this host steps no background run: send it as an atomic one");
+            if (background.process) |_|
+                return refuse(.busy, try std.fmt.allocPrint(alloc, "background run {d} is running: one at a time (kill it, or wait)", .{background.sequence}));
+        },
+        .kill => if (background.process == null) return refuse(.not_running, "no background run to kill"),
+    }
 
     var sha: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(env.source, &sha, .{});
@@ -297,12 +344,158 @@ pub fn handle(io: Io, alloc: std.mem.Allocator, body: []const u8, req: Request) 
     record(io, alloc, req, env, sha) catch |e|
         return refuse(.not_recorded, try std.fmt.allocPrint(alloc, "sequence {d} could not be recorded durably ({s}): not run", .{ env.sequence, @errorName(e) }));
 
+    switch (env.mode) {
+        .atomic => {},
+        .background => {
+            startBackground(io, req, env, sha) catch |e| {
+                // Recorded, so the number is spent; the run is not.
+                logLine(io, req.paths.log, alloc, "{d} seq={d} background not started: {s}\n", .{ req.now, env.sequence, @errorName(e) }) catch {};
+                return refuse(.not_recorded, try std.fmt.allocPrint(alloc, "background run {d} could not start ({s})", .{ env.sequence, @errorName(e) }));
+            };
+            return .{ .started = env.sequence };
+        },
+        .kill => {
+            const p = background.process.?;
+            const st = p.status();
+            const killed = background.sequence;
+            background.end(io, req.now, "killed", st.steps, st.slices, env.sequence);
+            return .{ .killed = .{ .sequence = killed, .steps = st.steps, .slices = st.slices } };
+        },
+    }
     const result = script.run(io, alloc, req.data_root, env.source, req.budgets, req.now, req.out);
     var ran: Ran = .{ .sequence = env.sequence, .sha256 = sha, .result = result, .log_failed = null };
     logEnd(io, alloc, req, &ran) catch |e| {
         ran.log_failed = e;
     };
     return .{ .ran = ran };
+}
+
+// ── the background run (metal-vmm QUEUE 211, step 5) ────────────────────
+
+/// **ONE BACKGROUND RUN AT A TIME**, the process's: a host steps it a slice
+/// at a time between handlers (`sliceBackground`), under the turn. What it
+/// holds is from the host's allocator (`Request.backing`).
+pub const Background = struct {
+    process: ?*script.process.Process = null,
+    backing: std.mem.Allocator = undefined,
+    sequence: u64 = 0,
+    /// Its own copies of the paths it uses after its request is gone.
+    root: []u8 = &.{},
+    log: []u8 = &.{},
+    last_logged: i64 = 0,
+    /// The run that ended last, for `writeBackgroundStatus`.
+    ended: ?struct { sequence: u64, how: []const u8, steps: u64, slices: u64, output: []u8, ending: []u8 } = null,
+
+    /// Its end: logged, what a status shows kept, and everything given back.
+    fn end(b: *Background, io: Io, now: i64, how: []const u8, steps: u64, slices: u64, by: ?u64) void {
+        const p = b.process.?;
+        const a = b.backing;
+        var said: std.ArrayList(u8) = .empty;
+        defer said.deinit(a);
+        if (by) |k| {
+            said.print(a, "killed by seq={d} after {d} steps, {d} slices\n", .{ k, steps, slices }) catch {};
+        } else {
+            said.print(a, "background, {d} slices: ", .{slices}) catch {};
+            endingLine(a, &said, p.status().stop, steps) catch {};
+        }
+        logLine(io, b.log, a, "{d} seq={d} {s}", .{ now, b.sequence, said.items }) catch {};
+        b.forgetEnded();
+        b.ended = .{ .sequence = b.sequence, .how = how, .steps = steps, .slices = slices, .output = a.dupe(u8, p.output()) catch &.{}, .ending = a.dupe(u8, said.items) catch &.{} };
+        p.kill();
+        b.process = null;
+        a.free(b.root);
+        a.free(b.log);
+        b.root = &.{};
+        b.log = &.{};
+    }
+
+    fn forgetEnded(b: *Background) void {
+        if (b.ended) |e| {
+            b.backing.free(e.output);
+            b.backing.free(e.ending);
+        }
+        b.ended = null;
+    }
+
+    /// Everything given back, for a test's end.
+    pub fn reset(b: *Background) void {
+        if (b.process) |p| {
+            p.kill();
+            b.backing.free(b.root);
+            b.backing.free(b.log);
+        }
+        b.forgetEnded();
+        b.* = .{};
+    }
+};
+
+pub var background: Background = .{};
+
+/// **A SLICE'S STEPS**: at about 7 ns a step, a slice of pure work is under
+/// a millisecond; one with a store call ends after it, its work capped by
+/// the call caps (`call_bytes`, `call_entries`).
+pub const slice_steps: u64 = 100_000;
+/// How often a running background run's progress is logged, at most: its
+/// start and end always are, so a reboot leaves its log honest.
+pub const progress_every_s: i64 = 10;
+
+fn startBackground(io: Io, req: Request, env: Envelope, sha: [Sha256.digest_length]u8) !void {
+    _ = sha;
+    const a = req.backing.?;
+    background.forgetEnded();
+    const root = try a.dupe(u8, req.data_root);
+    errdefer a.free(root);
+    const log = try a.dupe(u8, req.paths.log);
+    errdefer a.free(log);
+    const p = try script.process.Process.start(io, a, root, env.source, .background, req.budgets, req.now, req.budgets.output_bytes);
+    background = .{ .process = p, .backing = a, .sequence = env.sequence, .root = root, .log = log, .last_logged = req.now };
+}
+
+/// **ONE SLICE OF THE BACKGROUND RUN**, for a host to call between
+/// handlers, under the turn: whether a run is still going after it.
+pub fn sliceBackground(io: Io, now: i64) bool {
+    const p = background.process orelse return false;
+    const outcome = p.step(.{ .steps = slice_steps, .now = now });
+    const st = p.status();
+    switch (outcome) {
+        .paused => {
+            if (now - background.last_logged >= progress_every_s) {
+                background.last_logged = now;
+                logLine(io, background.log, background.backing, "{d} seq={d} background running: {d} steps, {d} slices\n", .{ now, background.sequence, st.steps, st.slices }) catch {};
+            }
+            return true;
+        },
+        .finished, .stopped => {
+            background.end(io, now, @tagName(outcome), st.steps, st.slices, null);
+            return false;
+        },
+    }
+}
+
+/// **WHAT A STATUS SHOWS**: the background run going, or the one that
+/// ended last, its output so far and how it stands.
+pub fn writeBackgroundStatus(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (background.process) |p| {
+        const st = p.status();
+        try w.print("background seq={d} running: {d} steps, {d} slices\n", .{ background.sequence, st.steps, st.slices });
+        try w.writeAll(p.output());
+    } else if (background.ended) |e| {
+        try w.print("background seq={d} {s}: {s}", .{ e.sequence, e.how, e.ending });
+        try w.writeAll(e.output);
+    } else try w.writeAll("no background run since the server started\n");
+}
+
+fn logLine(io: Io, path: []const u8, a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
+    const line = try std.fmt.allocPrint(a, fmt, args);
+    defer a.free(line);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    _ = try store.append(io, arena.allocator(), path, line);
+}
+
+fn endingLine(a: std.mem.Allocator, w: *std.ArrayList(u8), stop: ?script.Stop, steps: u64) !void {
+    var r: script.Result = .{ .arena = .{ .backing = a, .limit = 0 }, .stop = stop, .output = "", .effects = &.{}, .steps = steps };
+    try ending(a, w, &r);
 }
 
 fn refuse(why: Refusal, detail: []const u8) Outcome {
@@ -351,7 +544,12 @@ fn record(io: Io, alloc: std.mem.Allocator, req: Request, env: Envelope, sha: [S
     const source_path = try std.fs.path.join(alloc, &.{ req.paths.runs, try std.fmt.allocPrint(alloc, "{d}.shale", .{env.sequence}) });
     try store.replace(io, alloc, source_path, env.source, .{});
     const hex = std.fmt.bytesToHex(sha, .lower);
-    _ = try store.append(io, alloc, req.paths.log, try std.fmt.allocPrint(alloc, "{d} seq={d} sha256={s} target={s} bytes={d} started\n", .{ req.now, env.sequence, &hex, env.target, env.source.len }));
+    const mode = switch (env.mode) {
+        .atomic => "",
+        .background => " mode=background",
+        .kill => " mode=kill",
+    };
+    _ = try store.append(io, alloc, req.paths.log, try std.fmt.allocPrint(alloc, "{d} seq={d} sha256={s} target={s} bytes={d}{s} started\n", .{ req.now, env.sequence, &hex, env.target, env.source.len, mode }));
     if (!store.makeDurable()) return error.NotDurable;
 }
 
@@ -393,6 +591,8 @@ fn ending(alloc: std.mem.Allocator, w: *std.ArrayList(u8), r: *const script.Resu
 pub fn writeReply(o: *const Outcome, w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (o.*) {
         .refused => |r| try w.print("refused ({s}): {s}\nnot run\n", .{ @tagName(r.why), r.detail }),
+        .started => |n| try w.print("started seq {d} in the background: it only reads, a slice at a time between requests\n", .{n}),
+        .killed => |k| try w.print("killed background seq {d} after {d} steps, {d} slices\n", .{ k.sequence, k.steps, k.slices }),
         .ran => |r| {
             if (r.log_failed) |e| try w.print("── THE LOG WAS NOT WRITTEN ({s}): this run is on the store's sequence and source, not its log ──\n", .{@errorName(e)});
             try w.writeAll(r.result.output);
