@@ -76,6 +76,9 @@ pub const Run = struct {
     /// to a multiple of the steps: an uncharged loop shows.
     work: u64 = 0,
     depth: u32 = 0,
+    /// The yields that collected (`collect.zig`): a run's steps and arena
+    /// differ from a walker's by them, and by nothing else.
+    collections: u64 = 0,
     /// The walk's recursion now (`Budgets.depth`).
     walk: u32 = 0,
     reads: u64 = 0,

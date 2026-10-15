@@ -44,6 +44,8 @@ pub const Result = struct {
     stack_bytes: usize = 0,
     /// The arena bytes the run held at its end, never past its budget.
     arena_bytes: usize = 0,
+    /// The yields that collected (`interp.Run.collections`).
+    collections: u64 = 0,
     /// **THE PARSE'S OWN ARENA** (metal-vmm QUEUE 211, M1): the tree, its
     /// strings and names, apart from the values, so a `yield` that trades
     /// the values' arena for a fresh one leaves the code's literals and the
@@ -145,6 +147,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     result.output = out[0..r.out_len];
     result.effects = r.effects.items;
     result.steps = r.steps;
+    result.collections = r.collections;
     result.work = r.work;
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
     result.arena_bytes = budgeted.held;

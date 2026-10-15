@@ -108,6 +108,7 @@ const Copier = struct {
 /// it holds) reach, with the run's consts and effects. The slices and
 /// tables are updated in place to the copies.
 pub fn collect(r: *Run, pos: ast.Pos, slots: []const []Value, tables: []const *?*Table) Error!void {
+    r.collections += 1;
     var old = r.budgeted.*;
     r.budgeted.* = .{ .backing = old.backing, .limit = old.limit };
     var c: Copier = .{ .r = r, .pos = pos };

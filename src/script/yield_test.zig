@@ -166,3 +166,14 @@ test "yield: a string reached many times is kept once (the box's review of M1)" 
     try testing.expectEqualStrings("200\t160000\n", r.output);
     try testing.expect(r.arena_bytes < 512 * 1024);
 }
+
+test "yield: the gate exempts only a run that collected, not a source that says the word (the box's review)" {
+    // A comment and a string naming yield: no collection, so the gate
+    // still holds the steps and the arena to the walker's.
+    var r = runWith("-- yield here\nlocal s = \"yield\" print(s)", .{});
+    defer r.deinit();
+    try testing.expectEqual(@as(u64, 0), r.collections);
+    var y = runWith("yield() yield()", .{});
+    defer y.deinit();
+    try testing.expectEqual(@as(u64, 2), y.collections);
+}
