@@ -107,7 +107,11 @@ const Copier = struct {
             // item's call yielded has reserved room for the rest (the box's
             // review of M1: a copy with only what it held, and the next item
             // appended into room that wasn't there).
-            new.list.ensureTotalCapacity(a, old.list.capacity) catch return c.r.budgetStop(c.pos, .kept);
+            // **EXACTLY THE ROOM IT HAD** (the box's re-review, FEEDBACK
+            // 1599c8f): `ensureTotalCapacity` rounds up by half, so a kept
+            // list grew 1.5x a yield until 30 ints ran out the kept budget.
+            // A map is sized from its count, not its room, so it stays put.
+            new.list.ensureTotalCapacityPrecise(a, old.list.capacity) catch return c.r.budgetStop(c.pos, .kept);
             for (old.list.items) |item| new.list.appendAssumeCapacity(try c.copy(item));
             new.map.ensureTotalCapacity(a, old.map.count()) catch return c.r.budgetStop(c.pos, .kept);
             var it = old.map.iterator();

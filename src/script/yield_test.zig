@@ -177,3 +177,21 @@ test "yield: the gate exempts only a run that collected, not a source that says 
     defer y.deinit();
     try testing.expectEqual(@as(u64, 2), y.collections);
 }
+
+test "yield: a kept list or map takes the same room after 100 yields as after 10: its room is copied exactly, never rounded up (the box's re-review, FEEDBACK 1599c8f)" {
+    // The re-review's repros: 30 ints kept stopped `budget kept`, and a push
+    // a yield died around the 20th.
+    try expectOutput("local l = {} for i = 1, 30 do push(l, 7) end for i = 1, 30 do yield() end print(#l)", "30\n");
+    try expectOutput("local l = {} for i = 1, 25 do push(l, 7) yield() end print(#l)", "25\n");
+    try expectOutput("local l = {} for i = 1, 25 do l[#l + 1] = 7 yield() end print(#l)", "25\n");
+    try expectOutput("local m = {} for i = 1, 25 do m[\"k\" .. i] = i yield() end print(#keys(m))", "25\n");
+    var held: [2]usize = undefined;
+    for ([_][]const u8{ "10", "100" }, 0..) |n, i| {
+        var src: [256]u8 = undefined;
+        var r = runWith(try std.fmt.bufPrint(&src, "local l = {{}} local m = {{}} for i = 1, 30 do push(l, i) m[\"k\" .. i] = i end for i = 1, {s} do yield() end print(#l, #keys(m))", .{n}), .{});
+        defer r.deinit();
+        try testing.expect(r.finished());
+        held[i] = r.arena_bytes;
+    }
+    try testing.expectEqual(held[0], held[1]);
+}
