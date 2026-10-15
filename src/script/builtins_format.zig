@@ -57,6 +57,7 @@ fn padded(run: *Run, pos: ast.Pos, text: []const u8, width: i64) Error![]const u
     const w: usize = @intCast(@min(@abs(width), std.math.maxInt(u32)));
     if (text.len >= w) return text;
     try run.charge(pos, w);
+    run.tally(w);
     const out = run.alloc.alloc(u8, w) catch return run.oom(pos);
     const gap = w - text.len;
     if (width < 0) {
@@ -125,6 +126,7 @@ fn table(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             if (v != .int) numeric[c] = false;
             const t = try cellText(run, pos, v, "table");
             try run.charge(pos, t.len);
+            run.tally(1 + n.len + t.len);
             cells[r * nc + c] = t;
             widths[c] = @max(widths[c], t.len);
         }

@@ -34,6 +34,7 @@ fn push(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 fn reverse(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const t = try bi.listArg(run, pos, .reverse, args[0]);
     try run.charge(pos, t.list.items.len);
+    run.tally(t.list.items.len);
     std.mem.reverse(Value, t.list.items);
     return .nil;
 }
@@ -45,6 +46,7 @@ fn keys(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     try run.charge(pos, t.map.count());
     out.list.ensureTotalCapacity(run.alloc, t.map.count()) catch return run.oom(pos);
     for (t.map.keys()) |k| out.list.appendAssumeCapacity(.{ .string = k });
+    run.tally(t.map.count());
     out.kind = .list;
     return .{ .table = out };
 }
@@ -53,6 +55,7 @@ fn hasKey(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const t = try bi.mapArg(run, pos, .has_key, args[0]);
     const k = try bi.stringArg(run, pos, .has_key, args[1], "its key");
     try run.charge(pos, k.len);
+    run.tally(k.len);
     return .{ .boolean = t.map.contains(k) };
 }
 
@@ -86,6 +89,7 @@ fn sort(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     try run.charge(pos, bi.sortBound(items.len, bytes));
     var ctx: bi.SortContext = .{};
     std.sort.pdq(Value, items, &ctx, bi.SortContext.lessThan);
+    run.tally(ctx.comparisons + ctx.bytes);
     return .nil;
 }
 
@@ -125,5 +129,6 @@ fn sortByKey(run: *Run, pos: ast.Pos, t: *value.Table, key_arg: Value) Error!Val
         }
     }.lt);
     for (items, pairs) |*item, p| item.* = p.row;
+    run.tally(ctx.comparisons + ctx.bytes + 2 * items.len * key.len);
     return .nil;
 }

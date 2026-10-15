@@ -59,6 +59,11 @@ pub const Run = struct {
     out_len: usize = 0,
     out_cap: usize,
     steps: u64 = 0,
+    /// **THE WORK DONE, COUNTED APART FROM WHAT IS CHARGED** (209(c)): the
+    /// bytes, compares, stops and items the builtins' and operators' inner
+    /// loops touch, in tests only (`tally`), so a test can hold the work
+    /// to a multiple of the steps: an uncharged loop shows.
+    work: u64 = 0,
     depth: u32 = 0,
     /// The walk's recursion now (`Budgets.depth`).
     walk: u32 = 0,
@@ -118,6 +123,11 @@ pub const Run = struct {
 
     /// Steps, charged; `n` for a builtin's work in proportion to what it
     /// touches.
+    /// Work done (see `work`): nothing outside tests.
+    pub inline fn tally(self: *Run, n: u64) void {
+        if (@import("builtin").is_test) self.work +|= n;
+    }
+
     pub fn charge(self: *Run, pos: ast.Pos, n: u64) Error!void {
         self.steps +|= n;
         if (self.steps > self.budgets.steps) return self.budgetStop(pos, .steps);
@@ -315,6 +325,7 @@ pub const Run = struct {
                 // (209's cold review: a 900 KB key set a million times ran
                 // 11 s inside the site's budgets).
                 try self.charge(pos, k.len);
+                self.tally(k.len);
                 const g = t.map.getOrPut(self.alloc, k) catch return self.oom(pos);
                 g.value_ptr.* = v;
                 t.kind = .map;
@@ -338,6 +349,7 @@ pub const Run = struct {
             .string => |k| {
                 if (t.kind == .list) return self.fail(pos, .type, "a list's keys are integers: this one is a list, indexed by a string", .{});
                 try self.charge(pos, k.len);
+                self.tally(k.len);
                 return t.map.get(k) orelse self.fail(pos, .index, "no key \"{s}\" in the map (`has_key` asks first)", .{k});
             },
             else => return self.fail(pos, .type, "a key must be an integer (a list) or a string (a map), not {s}", .{key.typeName()}),
@@ -543,6 +555,7 @@ pub const Run = struct {
         };
         var len: usize = if (in_place) first.len else 0;
         try self.charge(pos, total - len);
+        self.tally(total - len);
         for (parts[if (in_place) 1 else 0..]) |v| {
             switch (v) {
                 .string => |x| @memcpy(buf[len..][0..x.len], x),
@@ -580,6 +593,7 @@ pub const Run = struct {
             .string => |a| switch (r) {
                 .string => |b| blk: {
                     try self.charge(pos, @min(a.len, b.len));
+                    self.tally(@min(a.len, b.len));
                     break :blk std.mem.order(u8, a, b);
                 },
                 else => return self.fail(pos, .type, "`{s}` compares {s} with {s}", .{ opText(op), l.typeName(), r.typeName() }),
@@ -604,6 +618,7 @@ pub const Run = struct {
             .int => |a| a == r.int,
             .string => |a| blk: {
                 try self.charge(pos, @min(a.len, r.string.len));
+                self.tally(@min(a.len, r.string.len));
                 break :blk std.mem.eql(u8, a, r.string);
             },
             .table => unreachable,

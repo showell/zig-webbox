@@ -35,6 +35,8 @@ pub const Result = struct {
     /// stopped: a run has no rollback, so this says what it changed.
     effects: []const Effect,
     steps: u64,
+    /// The work counted in tests (`interp.Run.work`); 0 outside them.
+    work: u64 = 0,
     /// The most Zig stack the parse or the walk took, in bytes (docs/SHALE.md,
     /// "The Zig stack").
     stack_bytes: usize = 0,
@@ -105,6 +107,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     result.output = out[0..r.out_len];
     result.effects = r.effects.items;
     result.steps = r.steps;
+    result.work = r.work;
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
     result.arena_bytes = budgeted.held;
     return result;

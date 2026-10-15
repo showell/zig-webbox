@@ -46,6 +46,7 @@ fn rep(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const out = run.alloc.alloc(u8, @intCast(total)) catch return run.oom(pos);
     var at: usize = 0;
     while (at < out.len) : (at += str.len) @memcpy(out[at..][0..str.len], str);
+    run.tally(total);
     return .{ .string = out };
 }
 
@@ -76,6 +77,7 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         w += new.len;
     }
     @memcpy(out[w..], str[at..]);
+    run.tally(total);
     return .{ .string = out };
 }
 
@@ -108,6 +110,7 @@ pub const Finder = struct {
             if (std.mem.eql(u8, hay[i + 1 ..][0 .. n.len - 1], n[1..])) break i;
             at = i + 1;
         } else null;
+        f.run.tally((if (found) |i| i + n.len else hay.len) -| from + stops + compared);
         try f.run.charge(f.pos, stops + (std.math.divCeil(u64, compared, bi.bytes_per_step) catch unreachable));
         return found;
     }
@@ -124,6 +127,7 @@ fn split(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     while (try finder.find(str, at)) |i| : (at = i + sep.len) {
         // A piece is an item made: a step each, as the haystack is cheap.
         try run.charge(pos, 1);
+        run.tally(1);
         out.list.append(run.alloc, .{ .string = str[at..i] }) catch return run.oom(pos);
     }
     out.list.append(run.alloc, .{ .string = str[at..] }) catch return run.oom(pos);
@@ -144,6 +148,7 @@ fn join(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             else => return run.fail(pos, .type, "`join` takes strings and integers, and item {d} is {s}", .{ i + 1, item.typeName() }),
         };
         try run.charge(pos, piece.len + sep.len);
+        run.tally(piece.len + sep.len);
         buf.appendSlice(run.alloc, piece) catch return run.oom(pos);
     }
     return .{ .string = buf.items };
@@ -161,6 +166,7 @@ fn lines(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         const nl = std.mem.indexOfScalar(u8, rest, '\n');
         const line = if (nl) |i| rest[0..i] else rest;
         out.list.append(run.alloc, .{ .string = line }) catch return run.oom(pos);
+        run.tally(line.len + 1);
         rest = if (nl) |i| rest[i + 1 ..] else "";
     }
     return .{ .table = out };
@@ -174,6 +180,7 @@ fn words(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     out.kind = .list;
     var it = std.mem.tokenizeAny(u8, str, " \t\r\n\x0b\x0c");
     while (it.next()) |w| out.list.append(run.alloc, .{ .string = w }) catch return run.oom(pos);
+    run.tally(str.len);
     return .{ .table = out };
 }
 
@@ -189,8 +196,14 @@ fn looks(comptime l: Look) bi.Impl {
             const sub_s = try bi.stringArg(run, pos, b, args[1], "what it looks for");
             try bi.chargeBytes(run, pos, str.len);
             return .{ .boolean = switch (l) {
-                .starts_with => std.mem.startsWith(u8, str, sub_s),
-                .ends_with => std.mem.endsWith(u8, str, sub_s),
+                .starts_with => blk: {
+                    run.tally(sub_s.len);
+                    break :blk std.mem.startsWith(u8, str, sub_s);
+                },
+                .ends_with => blk: {
+                    run.tally(sub_s.len);
+                    break :blk std.mem.endsWith(u8, str, sub_s);
+                },
                 .contains => (try (try Finder.init(run, pos, sub_s)).find(str, 0)) != null,
             } };
         }
@@ -212,6 +225,7 @@ fn sub(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const j = if (args.len > 2) try bi.intArg(run, pos, .sub, args[2], "its end") else -1;
     const r = subRange(str.len, i, j);
     try run.charge(pos, r.len);
+    run.tally(r.len);
     return .{ .string = str[r.start..][0..r.len] };
 }
 
@@ -230,6 +244,7 @@ pub fn subRange(len: usize, i: i64, j: i64) struct { start: usize, len: usize } 
 fn trim(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .trim, args[0], "its string");
     try run.charge(pos, str.len);
+    run.tally(str.len);
     return .{ .string = std.mem.trim(u8, str, " \t\r\n") };
 }
 
@@ -243,6 +258,7 @@ fn cased(comptime c: Case) bi.Impl {
             try run.charge(pos, str.len);
             const out = run.alloc.alloc(u8, str.len) catch return run.oom(pos);
             for (str, out) |ch, *o| o.* = if (c == .upper) std.ascii.toUpper(ch) else std.ascii.toLower(ch);
+            run.tally(str.len);
             return .{ .string = out };
         }
     }.f;
@@ -252,12 +268,14 @@ fn tostring(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     var buf: [24]u8 = undefined;
     const t = try bi.scalarText(run, pos, args[0], &buf, "tostring");
     try run.charge(pos, t.len);
+    run.tally(t.len);
     return .{ .string = run.alloc.dupe(u8, t) catch return run.oom(pos) };
 }
 
 fn tonumber(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .tonumber, args[0], "its string");
     try run.charge(pos, str.len);
+    run.tally(str.len);
     return .{ .int = bi.parseInteger(str) orelse return run.fail(pos, .argument, "`tonumber`: \"{s}\" is not an integer (an optional `-`, then decimal digits)", .{str[0..@min(str.len, 40)]}) };
 }
 
@@ -282,6 +300,7 @@ pub fn likeCharged(run: *Run, pos: ast.Pos, s: []const u8, p: []const u8) Error!
     while (si < s.len) {
         looked += 1;
         if (looked == 1024) {
+            run.tally(looked);
             try run.charge(pos, looked);
             looked = 0;
         }
@@ -297,11 +316,13 @@ pub fn likeCharged(run: *Run, pos: ast.Pos, s: []const u8, p: []const u8) Error!
             mark += 1;
             si = mark;
         } else {
+            run.tally(looked);
             try run.charge(pos, looked);
             return false;
         }
     }
     while (pi < p.len and p[pi] == '*') pi += 1;
+    run.tally(looked + p.len);
     try run.charge(pos, looked + p.len);
     return pi == p.len;
 }

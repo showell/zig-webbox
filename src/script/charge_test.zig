@@ -139,6 +139,13 @@ const Fixture = struct {
 
     /// The steps `src` (with `N` as `n`) takes; it must finish.
     fn steps(self: *Fixture, src: []const u8, n: usize) !u64 {
+        return (try self.measure(src, n)).steps;
+    }
+
+    const Measured = struct { steps: u64, work: u64 };
+
+    /// The steps `src` takes, and the work it does (`Run.work`).
+    fn measure(self: *Fixture, src: []const u8, n: usize) !Measured {
         var num: [24]u8 = undefined;
         const text = try std.mem.replaceOwned(u8, testing.allocator, src, "N", try std.fmt.bufPrint(&num, "{d}", .{n}));
         defer testing.allocator.free(text);
@@ -150,7 +157,7 @@ const Fixture = struct {
             std.debug.print("{s}\n  stopped {d}:{d}: {s}\n", .{ text, s.line, s.column, s.message });
             return error.TestUnexpectedResult;
         }
-        return r.steps;
+        return .{ .steps = r.steps, .work = r.work };
     }
 };
 
@@ -201,4 +208,59 @@ test "every builtin whose work grows charges at least a step for each byte or it
             }
         },
     };
+}
+
+/// The call's own steps and work at size `n`: the whole script's less its
+/// setup's.
+fn callMeasure(store: Setup, setup: []const u8, call: []const u8, n: usize) !Fixture.Measured {
+    var f: Fixture = undefined;
+    try f.init(store, n);
+    defer f.deinit();
+    const before = try f.measure(setup, n);
+    const whole_src = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ setup, call });
+    defer testing.allocator.free(whole_src);
+    const all = try f.measure(whole_src, n);
+    return .{ .steps = all.steps - before.steps, .work = all.work - before.work };
+}
+
+/// **THE UPPER BOUND** (209(c)): the most units of work a step may buy.
+/// A unit is a byte touched, a compare, a place a search stops, an item
+/// made; bulk byte work buys 16 a step, and a search's stops and compares
+/// sit on top. An uncharged loop's work grows with nothing to match it.
+const work_per_step_most = 40;
+
+/// Shapes that are hard on the searches and scans: dense matches, near
+/// misses, many pieces.
+const hard_cases = [_]struct { name: []const u8, store: Setup = .none, setup: []const u8, call: []const u8 }{
+    .{ .name = "substitute, a match a byte", .setup = "local s = rep(\"a\", N)", .call = "local x = substitute(s, \"a\", \"\")" },
+    .{ .name = "split, a piece a byte", .setup = "local s = rep(\"a\", N)", .call = "local x = split(s, \"a\")" },
+    .{ .name = "find, a near-match at every byte", .setup = "local s = rep(\"a\", N)", .call = "local x = find(s, \"aaaab\")" },
+    .{ .name = "contains, a long near-match", .setup = "local s = rep(\"a\", N)", .call = "local x = contains(s, rep(\"a\", 40) .. \"b\")" },
+    .{ .name = "count_in, a match every three bytes", .store = .big_file, .setup = "", .call = "local x = count_in(\"big\", \"a\")" },
+    .{ .name = "count_lines", .store = .big_file, .setup = "", .call = "local x = count_lines(\"big\")" },
+    .{ .name = "find_in, a near-match", .store = .big_file, .setup = "", .call = "local x = find_in(\"big\", \"ab\\nab\\nab\\nX\")" },
+    .{ .name = "lines, a line a byte", .setup = "local s = rep(\"\\n\", N)", .call = "local x = lines(s)" },
+    .{ .name = "like, backtracking", .setup = "local s = rep(\"a\", N)", .call = "local x = like(s, \"*a*a*b\")" },
+    .{ .name = "sort, strings sharing a prefix", .setup = "local l = {} for i = 1, N do push(l, rep(\"x\", 20) .. (N - i)) end", .call = "sort(l)" },
+};
+
+test "steps bound the work: no builtin or operator does more than a fixed amount of work a step, on its hardest shapes (209(c))" {
+    const n = 2000;
+    var worst: f64 = 0;
+    for (cases) |c| if (c.grows == .scales) {
+        const m = try callMeasure(c.store, c.setup, c.call, n);
+        try within(@tagName(c.b), m, &worst);
+    };
+    for (op_cases) |c| try within(c.name, try callMeasure(.none, c.setup, c.call, n), &worst);
+    for (hard_cases) |c| try within(c.name, try callMeasure(c.store, c.setup, c.call, n), &worst);
+    std.debug.print("the most work a step: {d:.1}\n", .{worst});
+}
+
+fn within(name: []const u8, m: Fixture.Measured, worst: *f64) !void {
+    const ratio = @as(f64, @floatFromInt(m.work)) / @as(f64, @floatFromInt(@max(m.steps, 1)));
+    worst.* = @max(worst.*, ratio);
+    if (m.work > work_per_step_most * @max(m.steps, 1)) {
+        std.debug.print("{s}: {d} work for {d} steps\n", .{ name, m.work, m.steps });
+        return error.TestUnexpectedResult;
+    }
 }

@@ -158,6 +158,7 @@ fn readPart(run: *Run, pos: ast.Pos, p: Path, offset: u64, n: ?u64) Error!Value 
     if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
     const buf = run.alloc.alloc(u8, @intCast(want)) catch return run.oom(pos);
     const got = store.readAt(run.io, run.alloc, p.full, offset, buf) catch |e| return storeFailed(run, pos, .read, p.rel, e);
+    run.tally(got);
     run.read_bytes += got;
     try bi.chargeBytes(run, pos, got);
     return .{ .string = buf[0..got] };
@@ -226,6 +227,7 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
         const got = store.readAt(run.io, run.alloc, p.full, at, buf[kept..][0..want]) catch |e| return storeFailed(run, pos, b, p.rel, e);
         run.read_bytes += got;
         try bi.chargeBytes(run, pos, got);
+        run.tally(got);
         if (got == 0) break; // the file shrank under the scan
         at += got;
         const window = buf[0 .. kept + got];
@@ -254,11 +256,15 @@ fn sortedEntries(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u
     var name_bytes: u64 = 0;
     for (entries) |en| name_bytes += en.name.len;
     try run.charge(pos, entries.len + bi.sortBound(entries.len, name_bytes));
-    std.sort.pdq(store.Entry, entries, {}, struct {
-        fn lt(_: void, x: store.Entry, y: store.Entry) bool {
+    var ctx: bi.SortContext = .{};
+    std.sort.pdq(store.Entry, entries, &ctx, struct {
+        fn lt(c: *bi.SortContext, x: store.Entry, y: store.Entry) bool {
+            c.comparisons += 1;
+            c.bytes += @min(x.name.len, y.name.len);
             return std.mem.lessThan(u8, x.name, y.name);
         }
     }.lt);
+    run.tally(entries.len + ctx.comparisons + ctx.bytes);
     return entries;
 }
 
@@ -322,6 +328,7 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         const depth = top.depth;
         const rel = if (top.rel.len == 0) en.name else std.fmt.allocPrint(a, "{s}/{s}", .{ top.rel, en.name }) catch return run.oom(pos);
         try run.charge(pos, rel.len);
+        run.tally(rel.len);
         const into = en.kind == .directory and (o.depth == null or depth < o.depth.?);
         const full: ?[]const u8 = if (en.kind != .other or into) std.fmt.allocPrint(a, "{s}/{s}", .{ run.root, rel }) catch return run.oom(pos) else null;
         var keep = o.kind == null or o.kind.? == en.kind;
