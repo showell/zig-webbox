@@ -404,3 +404,15 @@ test "run: the smallest integer can be written, with its minus; its magnitude al
     try expectStop("local m = 1 - 9223372036854775808", .syntax, null);
     try expectStop("local m = -(-9223372036854775808)", .arithmetic, null);
 }
+
+test "run: 208's cold review: attempt needs its commas; a long chain in a loop costs no arena; a middle part's error is at its own `..`" {
+    try expectStop("function f(x) return x end local r = attempt(f 41)", .syntax, null);
+    try expectStop("function f(x) return x end local r = attempt(f,)", .syntax, null);
+    var r = runWith("local a = \"x\" for i = 1, 100000 do local t = a .. a .. a .. a .. a .. a .. a .. a .. a .. a .. a end", .{ .steps = 50_000_000 });
+    defer r.deinit();
+    try testing.expect(r.finished());
+    try testing.expect(r.arena_bytes < 4 * 1024 * 1024);
+    var m = runWith("local b = {} local x = \"a\" .. b .. \"c\"", .{});
+    defer m.deinit();
+    try testing.expectEqual(@as(u32, 33), m.stop.?.column);
+}

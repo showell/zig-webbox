@@ -14,6 +14,7 @@ pub const parse = @import("parse.zig");
 pub const value = @import("value.zig");
 pub const interp = @import("interp.zig");
 pub const builtins = @import("builtins.zig");
+pub const builtins_text = @import("builtins_text.zig");
 
 const std = @import("std");
 const Io = @import("host_io").Io;

@@ -79,6 +79,14 @@ pub const Run = struct {
     tail_ptr: ?[*]u8 = null,
     tail_used: usize = 0,
     tail_cap: usize = 0,
+    /// The parts of the `..` chains being joined, one stack for every
+    /// chain (a chain inside a part stacks its own above), so a long chain
+    /// costs no arena each time it runs.
+    chain_parts: std.ArrayList(Value) = .empty,
+    chain_ops: std.ArrayList(ast.Pos) = .empty,
+    /// The buffer every scan of the file reuses (`count_in`, `find_in`,
+    /// `count_lines`).
+    scan_buf: []u8 = &.{},
     /// The top-level `const`s, each null until its line has run.
     consts: []?Value = &.{},
     /// The lowest frame address the walk reached: the Zig stack it took,
@@ -471,32 +479,47 @@ pub const Run = struct {
     noinline fn concatChain(self: *Run, pos: ast.Pos, le: *const ast.Expr, re: *const ast.Expr) Error!Value {
         // The parts, and the `..` before each but the first (the first's is
         // its own: the chain's first operator).
-        var small_parts: [8]Value = undefined;
-        var small_ops: [8]ast.Pos = undefined;
         var n: usize = 2;
         var r = re;
         while (r.kind == .binary and r.kind.binary.op == .concat) : (r = r.kind.binary.right) n += 1;
-        const parts = if (n <= small_parts.len) small_parts[0..n] else self.alloc.alloc(Value, n) catch return self.oom(pos);
-        const ops = if (n <= small_ops.len) small_ops[0..n] else self.alloc.alloc(ast.Pos, n) catch return self.oom(pos);
-        parts[0] = try self.eval(le);
-        ops[0] = pos;
-        ops[1] = pos;
+        // On the run's stack of parts: a part's own chain stacks above, and
+        // the stack can move as it grows, so the parts are reached by index.
+        const base = self.chain_parts.items.len;
+        self.chain_parts.appendNTimes(self.alloc, .nil, n) catch return self.oom(pos);
+        self.chain_ops.appendNTimes(self.alloc, pos, n) catch return self.oom(pos);
+        defer {
+            self.chain_parts.shrinkRetainingCapacity(base);
+            self.chain_ops.shrinkRetainingCapacity(base);
+        }
+        // `ops[k]` is the `..` whose left is part k (the chain's first for
+        // part 0); the last part's is the innermost, as part n - 2's.
+        {
+            const v = try self.eval(le);
+            self.chain_parts.items[base] = v;
+        }
         r = re;
         var k: usize = 1;
         while (r.kind == .binary and r.kind.binary.op == .concat) : (r = r.kind.binary.right) {
-            parts[k] = try self.eval(r.kind.binary.left);
-            ops[k + 1] = r.pos;
+            const v = try self.eval(r.kind.binary.left);
+            self.chain_parts.items[base + k] = v;
+            self.chain_ops.items[base + k] = r.pos;
             k += 1;
         }
-        parts[k] = try self.eval(r);
+        {
+            const v = try self.eval(r);
+            self.chain_parts.items[base + k] = v;
+        }
+        const parts = self.chain_parts.items[base..][0..n];
+        const ops = self.chain_ops.items[base..][0..n];
+        ops[n - 1] = ops[n - 2];
         // Checked as the nested joins would have: the innermost pair, then
-        // outward.
+        // outward, each at its own `..`.
         var total: usize = 0;
         var at = n;
         while (at > 0) {
             at -= 1;
             const i = if (at == n - 1) n - 2 else if (at == n - 2) n - 1 else at;
-            total += try self.partLen(if (i == 0) ops[0] else ops[@max(i, 1)], parts[i]);
+            total += try self.partLen(ops[i], parts[i]);
         }
         const first: []const u8 = switch (parts[0]) {
             .string => |x| x,

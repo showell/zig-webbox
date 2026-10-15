@@ -531,3 +531,90 @@ test "builtins: seconds gives only what date can write: 1970 to 9999" {
     try f.expectStop("print(seconds(\"1970-01-01T00:30:00+01:00\"))", .argument);
     try f.expectStop("print(seconds(\"0000-01-01\"))", .argument);
 }
+
+// ── 208's cold review ────────────────────────────────────────────────────
+
+test "builtins: the linear finder finds what std's search finds, every match, on needles long enough to use it" {
+    // Proves Finder's KMP against the plain search, on a two-letter
+    // alphabet where long needles nearly match everywhere.
+    var prng: std.Random.DefaultPrng = .init(208);
+    const r = prng.random();
+    var hay: [600]u8 = undefined;
+    var needle: [48]u8 = undefined;
+    for (0..300) |_| {
+        for (&hay) |*c| c.* = "ab"[r.uintLessThan(u8, if (r.boolean()) 2 else 1)];
+        const len = r.intRangeAtMost(usize, 17, needle.len);
+        // Often a piece of the haystack itself, so it is found.
+        if (r.boolean()) {
+            const at = r.uintLessThan(usize, hay.len - len);
+            @memcpy(needle[0..len], hay[at..][0..len]);
+        } else for (needle[0..len]) |*c| {
+            c.* = "ab"[r.uintLessThan(u8, 2)];
+        }
+        const n = needle[0..len];
+        var from: usize = 0;
+        var ref_from: usize = 0;
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const f = try finderFor(arena.allocator(), n);
+        while (true) {
+            const got = f.find(&hay, from);
+            const want = std.mem.indexOfPos(u8, &hay, ref_from, n);
+            try testing.expectEqual(want, got);
+            if (got == null) break;
+            from = got.? + 1;
+            ref_from = want.? + 1;
+        }
+    }
+}
+
+/// A Finder outside a run, for the property above: its table built as
+/// `Finder.init` builds it.
+fn finderFor(a: std.mem.Allocator, needle: []const u8) !script.builtins_text.Finder {
+    const t = try a.alloc(u32, needle.len);
+    t[0] = 0;
+    var k: u32 = 0;
+    for (1..needle.len) |i| {
+        while (k > 0 and needle[i] != needle[k]) k = t[k - 1];
+        if (needle[i] == needle[k]) k += 1;
+        t[i] = k;
+    }
+    return .{ .needle = needle, .table = t };
+}
+
+test "builtins: a long near-match needle costs what its haystack does: find, contains, substitute, split and count_in all stay linear" {
+    // At 208's first cut each of these did haystack × needle work for a
+    // step a haystack byte: tens of seconds inside the budget.
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const big = try testing.allocator.alloc(u8, 300_000);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/as.txt", .data = big });
+    try f.expectOutput(
+        \\local hay = rep("a", 300000)
+        \\local needle = rep("a", 30000) .. "b"
+        \\print(find(hay, needle), contains(hay, needle), #substitute(hay, needle, "x"), #split(hay, needle))
+        \\print(count_in("as.txt", needle), find_in("as.txt", needle), count_in("as.txt", rep("a", 30000)))
+    , "nil\tfalse\t300000\t1\n0\tnil\t10\n");
+}
+
+test "builtins: every scan of a run reuses one buffer: five hundred files scanned cost no more arena than one" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    try f.tmp.dir.createDirPath(io, "data/many");
+    const body = try testing.allocator.alloc(u8, 70_000);
+    defer testing.allocator.free(body);
+    @memset(body, 'x');
+    for (0..20) |i| {
+        var name: [32]u8 = undefined;
+        try f.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "data/many/f{d}", .{i}), .data = body });
+    }
+    var r = f.run("local n = 0 for k = 1, 25 do for e in walk(\"many\") do n = n + count_in(e.path, \"y\") end end print(n)", .{ .steps = 100_000_000 });
+    defer r.deinit();
+    try testing.expect(r.finished());
+    try testing.expect(r.arena_bytes < 2 * 1024 * 1024);
+}

@@ -213,7 +213,13 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
     var r: Scanned = .{ .size = size };
     if (size == 0) return r;
     const keep_most = needle.len - 1;
-    const buf = run.alloc.alloc(u8, @intCast(@min(size, scan_chunk) + keep_most)) catch return run.oom(pos);
+    const finder = try text.Finder.init(run, pos, needle);
+    // **ONE BUFFER FOR EVERY SCAN OF THE RUN** (208's cold review): a
+    // fresh one a call would spend 64 KiB of arena a file, and a scan of
+    // the chat's topics would run the site's 8 MiB out.
+    const need: usize = @intCast(@min(size, scan_chunk) + keep_most);
+    if (run.scan_buf.len < need) run.scan_buf = run.alloc.alloc(u8, @max(need, @min(scan_chunk, need * 2))) catch return run.oom(pos);
+    const buf = run.scan_buf[0..need];
     // `buf[0..kept]` holds the last window's tail, from file offset `base`.
     var kept: usize = 0;
     var base: u64 = 0;
@@ -229,7 +235,7 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
         const window = buf[0 .. kept + got];
         r.last = window[window.len - 1];
         var from: usize = 0;
-        while (std.mem.indexOfPos(u8, window, from, needle)) |i| {
+        while (finder.find(window, from)) |i| {
             if (r.first == null) r.first = base + i;
             r.count += 1;
             if (first_only) return r;

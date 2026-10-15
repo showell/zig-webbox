@@ -58,24 +58,78 @@ fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const new = try bi.stringArg(run, pos, .substitute, args[2], "what it puts instead");
     if (old.len == 0) return run.fail(pos, .argument, "`substitute` of \"\" is an error: there is nothing to replace", .{});
     try run.charge(pos, str.len);
-    const n = std.mem.count(u8, str, old);
+    const finder = try Finder.init(run, pos, old);
+    var n: usize = 0;
+    var at: usize = 0;
+    while (finder.find(str, at)) |i| : (at = i + old.len) n += 1;
     if (n == 0) return .{ .string = str };
     const added = std.math.mul(usize, n, new.len) catch return run.budgetStop(pos, .arena);
     const total = str.len - n * old.len + added;
     try run.charge(pos, total);
     const out = run.alloc.alloc(u8, total) catch return run.oom(pos);
-    _ = std.mem.replace(u8, str, old, new, out);
+    var w: usize = 0;
+    at = 0;
+    while (finder.find(str, at)) |i| : (at = i + old.len) {
+        @memcpy(out[w..][0 .. i - at], str[at..i]);
+        w += i - at;
+        @memcpy(out[w..][0..new.len], new);
+        w += new.len;
+    }
+    @memcpy(out[w..], str[at..]);
     return .{ .string = out };
 }
+
+/// **A NEEDLE FOUND IN LINEAR TIME** (208's cold review): every builtin
+/// that looks for text in text charges a step a byte of the haystack, so
+/// the search must cost about that. std's search costs up to haystack ×
+/// needle (a long near-match, `rep("a", 30000) .. "b"` in a run of `a`,
+/// took 75 s inside the step budget). A needle of up to `short` bytes is
+/// searched by std (at most `short` compares a byte); a longer one by
+/// Knuth-Morris-Pratt, linear, its table charged a step a byte.
+pub const Finder = struct {
+    needle: []const u8,
+    table: ?[]u32 = null,
+
+    pub const short = 16;
+
+    pub fn init(run: *Run, pos: ast.Pos, needle: []const u8) Error!Finder {
+        if (needle.len <= short) return .{ .needle = needle };
+        try run.charge(pos, needle.len);
+        const t = run.alloc.alloc(u32, needle.len) catch return run.oom(pos);
+        t[0] = 0;
+        var k: u32 = 0;
+        for (1..needle.len) |i| {
+            while (k > 0 and needle[i] != needle[k]) k = t[k - 1];
+            if (needle[i] == needle[k]) k += 1;
+            t[i] = k;
+        }
+        return .{ .needle = needle, .table = t };
+    }
+
+    /// Where the needle first is in `hay` at or after `from`.
+    pub fn find(f: *const Finder, hay: []const u8, from: usize) ?usize {
+        const t = f.table orelse return std.mem.indexOfPos(u8, hay, from, f.needle);
+        var k: usize = 0;
+        var i = from;
+        while (i < hay.len) : (i += 1) {
+            while (k > 0 and hay[i] != f.needle[k]) k = t[k - 1];
+            if (hay[i] == f.needle[k]) k += 1;
+            if (k == f.needle.len) return i + 1 - k;
+        }
+        return null;
+    }
+};
 
 fn split(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .split, args[0], "its string");
     const sep = try bi.stringArg(run, pos, .split, args[1], "its separator");
     if (sep.len == 0) return run.fail(pos, .argument, "`split` by \"\" is an error: there is no empty separator", .{});
     try run.charge(pos, str.len);
+    const finder = try Finder.init(run, pos, sep);
     const out = try run.newTable(pos);
-    var it = std.mem.splitSequence(u8, str, sep);
-    while (it.next()) |part| out.list.append(run.alloc, .{ .string = part }) catch return run.oom(pos);
+    var at: usize = 0;
+    while (finder.find(str, at)) |i| : (at = i + sep.len) out.list.append(run.alloc, .{ .string = str[at..i] }) catch return run.oom(pos);
+    out.list.append(run.alloc, .{ .string = str[at..] }) catch return run.oom(pos);
     out.kind = .list;
     return .{ .table = out };
 }
@@ -140,7 +194,7 @@ fn looks(comptime l: Look) bi.Impl {
             return .{ .boolean = switch (l) {
                 .starts_with => std.mem.startsWith(u8, str, sub_s),
                 .ends_with => std.mem.endsWith(u8, str, sub_s),
-                .contains => std.mem.indexOf(u8, str, sub_s) != null,
+                .contains => (try Finder.init(run, pos, sub_s)).find(str, 0) != null,
             } };
         }
     }.f;
@@ -151,7 +205,7 @@ fn find(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const str = try bi.stringArg(run, pos, .find, args[0], "its string");
     const sub_s = try bi.stringArg(run, pos, .find, args[1], "what it looks for");
     try run.charge(pos, str.len);
-    const at = std.mem.indexOf(u8, str, sub_s) orelse return .nil;
+    const at = (try Finder.init(run, pos, sub_s)).find(str, 0) orelse return .nil;
     return .{ .int = @intCast(at + 1) };
 }
 

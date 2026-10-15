@@ -610,7 +610,10 @@ pub const Parser = struct {
             const f = try self.expect(.name, "the name of the function `attempt` calls");
             if (self.tok.tag == .lparen) return self.failAt(self.here(), .syntax, "`attempt(f, a, b)` calls `f` itself: name it, without its own parentheses");
             attempted = f.text;
-            if (self.tok.tag == .comma) try self.advance();
+            if (self.tok.tag == .comma) {
+                try self.advance();
+                if (self.tok.tag == .rparen) return self.failAt(self.here(), .syntax, "expected a value after `,`, found `)`");
+            } else if (self.tok.tag != .rparen) return self.failf(self.here(), .syntax, "expected `,` or `)` after the function's name, found {s}", .{describe(self.tok)});
         }
         var args: std.ArrayList(*ast.Expr) = .empty;
         if (self.tok.tag != .rparen) {

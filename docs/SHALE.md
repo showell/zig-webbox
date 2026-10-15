@@ -134,7 +134,9 @@ From the loosest to the tightest:
   the previous chain made, and its buffer has room, the rest is written
   after it in place. So `s = s .. x` in a loop is linear, not quadratic,
   in time and in arena. No string ever changes: the room is past the end
-  of every string that shares the buffer.
+  of every string that shares the buffer. A part that is not a string or
+  an integer is a `type` error at the `..` before it (the first part's,
+  at the chain's first `..`), as the nested joins would have said.
 
 ### Names
 
@@ -147,10 +149,12 @@ From the loosest to the tightest:
   a builtin is that local wherever it is a value. A call by that name is
   the script's own function first, if it declares one anywhere, and the
   builtin otherwise. So **a builtin added to the language never breaks a
-  script.** Two exceptions:
-  - Lua's library names (`pairs`, `pcall`, `string`, ...) are refused,
-    kept to say what to write instead;
-  - `attempt` is the language's own.
+  script.** Two exceptions, for functions and calls only (a local may
+  take either name):
+  - Lua's library names (`pairs`, `pcall`, `string`, ...): no function
+    takes one, and a call by one is refused, kept to say what to write
+    instead;
+  - `attempt`: no function takes it, and a call by it is the language's.
 - Keywords: `and break const continue do else elseif end false for
   function if in local nil not or return then true while`.
 
@@ -271,7 +275,7 @@ names the builtin and the argument.
 | `is_dir(p)` | whether a folder is there | a read | `store` |
 | `read(p)` | the whole file | a read; each byte a read byte and a step | `budget read_bytes` when the file is longer than what is left; `store` |
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count; `store` for a folder or a missing file |
-| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte and a step; at most 64 KiB of arena whatever the file's size | `store` |
+| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte and a step; one buffer for every scan of the run, at most 64 KiB and the needle's length, whatever the file's size and however many files | `store` |
 | `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines` | `argument` for "" or a needle over 64 KiB |
 | `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_lines`, stopping at the first | as `count_in` |
 | `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **one read a folder listed**, not one an entry; a step an entry and each path's bytes | `store`; `argument` for an unknown option |
@@ -292,7 +296,10 @@ An entry that `like` or `kind` leaves out is never stat'ed.
 ### Text
 
 Plain text everywhere: **not Lua's patterns.** Positions in strings are
-1-based, as Lua's are.
+1-based, as Lua's are. **Every search is linear in its haystack**
+(`find`, `contains`, `split`, `substitute`, and the store's scans): a
+needle of up to 16 bytes by the usual search, at most 16 compares a byte;
+a longer one by Knuth-Morris-Pratt, its table charged a step a byte.
 
 | builtin | gives |
 |---|---|
@@ -382,7 +389,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | budget | what it counts | default | the site's (angry-gopher v30) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
-| arena | every value of the run lives in one arena. Every allocation counts, and a free never counts back (an arena keeps a list's outgrown buffers), so the budget bounds the arena's true size. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
+| arena | every value of the run lives in one arena. Every allocation counts, and a free never counts back (an arena keeps a list's outgrown buffers), so the budget bounds the arena's true size, give or take the arena's own bookkeeping and slack (about an eighth more, measured). An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
 | call depth | | 64 | 64 |
 | depth | expressions and statements the walk is inside of at once, across every call (see below) | 2,000 | 2,000 |
 | output | at most `out.len` | 256 KiB | 256 KiB |
