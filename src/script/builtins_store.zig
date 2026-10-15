@@ -9,6 +9,7 @@ const ast = @import("ast.zig");
 const interp = @import("interp.zig");
 const value = @import("value.zig");
 const bi = @import("builtins.zig");
+const text = @import("builtins_text.zig");
 
 const store = @import("../store.zig");
 
@@ -23,8 +24,11 @@ pub const specs = [_]bi.Spec{
     spec(.stat, 1, 1, stat),
     spec(.exists, 1, 1, exists),
     spec(.is_dir, 1, 1, isDir),
-    spec(.read, 1, 1, read),
-    spec(.walk, 1, 1, walk),
+    spec(.read, 1, 3, read),
+    spec(.count_lines, 1, 1, countLines),
+    spec(.count_in, 2, 2, scanner(.count)),
+    spec(.find_in, 2, 2, scanner(.find)),
+    spec(.walk, 1, 2, walk),
     spec(.replace, 2, 2, change(.replace)),
     spec(.append, 2, 2, change(.append)),
     spec(.mkdir, 1, 1, change(.mkdir)),
@@ -118,10 +122,21 @@ fn isDir(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .boolean = if (st) |x| x.kind == .directory else false };
 }
 
-/// **`read(p)`**: the whole file. The read budget's rest is the read's
-/// limit (README, "Budgets").
+/// **`read(p)`**: the whole file. **`read(p, offset[, n])`**: from byte
+/// `offset` (0-based, as the site's own sidecars count), `n` bytes or to
+/// the end, fewer where the file ends; "" from its end or past it. Only
+/// the bytes asked for are read and counted: a part of a file a
+/// hundred megabytes long costs what the part does. The read budget's rest
+/// is the read's limit (README, "Budgets").
 fn read(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .read, args[0], false);
+    if (args.len > 1) {
+        const offset = try bi.intArg(run, pos, .read, args[1], "its offset");
+        if (offset < 0) return run.fail(pos, .argument, "`read`: offset {d} is before the file's start", .{offset});
+        const n: ?i64 = if (args.len > 2) try bi.intArg(run, pos, .read, args[2], "its count of bytes") else null;
+        if (n != null and n.? < 0) return run.fail(pos, .argument, "`read`: a count of {d} bytes", .{n.?});
+        return readPart(run, pos, p, @intCast(offset), if (n) |x| @intCast(x) else null);
+    }
     try countRead(run, pos);
     const left = run.budgets.read_bytes -| run.read_bytes;
     const bytes = store.read(run.io, run.alloc, p.full, .limited(@intCast(@min(left, std.math.maxInt(usize))))) catch |e| switch (e) {
@@ -131,6 +146,103 @@ fn read(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     run.read_bytes += bytes.len;
     try run.charge(pos, bytes.len);
     return .{ .string = bytes };
+}
+
+/// A file's size, for a read of part of it: one store call, the read's.
+fn fileSize(run: *Run, pos: ast.Pos, b: B, p: Path) Error!u64 {
+    const st = (store.statOrNull(run.io, run.alloc, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e)) orelse return storeFailed(run, pos, b, p.rel, error.FileNotFound);
+    if (st.kind != .file) return storeFailed(run, pos, b, p.rel, error.IsDir);
+    return st.size;
+}
+
+fn readPart(run: *Run, pos: ast.Pos, p: Path, offset: u64, n: ?u64) Error!Value {
+    try countRead(run, pos);
+    const size = try fileSize(run, pos, .read, p);
+    if (offset >= size) return .{ .string = "" };
+    const want = @min(n orelse size - offset, size - offset);
+    if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
+    const buf = run.alloc.alloc(u8, @intCast(want)) catch return run.oom(pos);
+    const got = store.readAt(run.io, run.alloc, p.full, offset, buf) catch |e| return storeFailed(run, pos, .read, p.rel, e);
+    run.read_bytes += got;
+    try run.charge(pos, got);
+    return .{ .string = buf[0..got] };
+}
+
+// ── scanning a file without holding it ───────────────────────────────────
+
+/// How much of a file a scan holds at once.
+const scan_chunk = 64 * 1024;
+
+const Scan = enum { count, find };
+
+fn scanner(comptime how: Scan) bi.Impl {
+    return struct {
+        fn f(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+            const b: B = if (how == .count) .count_in else .find_in;
+            const p = try pathArg(run, pos, b, args[0], false);
+            const needle = try bi.stringArg(run, pos, b, args[1], "what it looks for");
+            if (needle.len == 0) return run.fail(pos, .argument, "`{s}` of \"\" is an error: there is nothing to look for", .{@tagName(b)});
+            if (needle.len > scan_chunk) return run.fail(pos, .argument, "`{s}`: what it looks for is longer than {d} bytes", .{ @tagName(b), scan_chunk });
+            const r = try scan(run, pos, b, p, needle, how == .find);
+            return switch (how) {
+                .count => .{ .int = @intCast(r.count) },
+                .find => if (r.first) |at| .{ .int = @intCast(at) } else .nil,
+            };
+        }
+    }.f;
+}
+
+/// **`count_lines(p)`**: the lines in a file, as `#lines(read(p))` counts
+/// them (a last line without its newline counts too), without holding the
+/// file: a megabyte at a time is at most 64 KiB of arena.
+fn countLines(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const p = try pathArg(run, pos, .count_lines, args[0], false);
+    const r = try scan(run, pos, .count_lines, p, "\n", false);
+    return .{ .int = @intCast(r.count + @intFromBool(r.size > 0 and r.last != '\n')) };
+}
+
+const Scanned = struct { count: u64 = 0, first: ?u64 = null, size: u64 = 0, last: u8 = 0 };
+
+/// **A SCAN**: the file `scan_chunk` bytes at a time, one buffer reused,
+/// counting `needle`'s occurrences (none overlapping) or stopping at the
+/// first (`first_only`), across the chunks' seams. One store read for the
+/// call; every byte counted against the read budget and charged a step.
+fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: bool) Error!Scanned {
+    try countRead(run, pos);
+    const size = try fileSize(run, pos, b, p);
+    var r: Scanned = .{ .size = size };
+    if (size == 0) return r;
+    const keep_most = needle.len - 1;
+    const buf = run.alloc.alloc(u8, @intCast(@min(size, scan_chunk) + keep_most)) catch return run.oom(pos);
+    // `buf[0..kept]` holds the last window's tail, from file offset `base`.
+    var kept: usize = 0;
+    var base: u64 = 0;
+    var at: u64 = 0;
+    while (at < size) {
+        const want: usize = @intCast(@min(size - at, buf.len - kept));
+        if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
+        const got = store.readAt(run.io, run.alloc, p.full, at, buf[kept..][0..want]) catch |e| return storeFailed(run, pos, b, p.rel, e);
+        run.read_bytes += got;
+        try run.charge(pos, got);
+        if (got == 0) break; // the file shrank under the scan
+        at += got;
+        const window = buf[0 .. kept + got];
+        r.last = window[window.len - 1];
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, window, from, needle)) |i| {
+            if (r.first == null) r.first = base + i;
+            r.count += 1;
+            if (first_only) return r;
+            from = i + needle.len;
+        }
+        // Keep what could still start a match: the last `keep_most` bytes,
+        // none a match already took.
+        const next = @max(from, window.len -| keep_most);
+        kept = window.len - next;
+        std.mem.copyForwards(u8, buf[0..kept], window[next..]);
+        base += next;
+    }
+    return r;
 }
 
 /// What a folder holds, its names sorted, charged as `ls` is: an entry a
@@ -148,21 +260,53 @@ fn sortedEntries(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u
     return entries;
 }
 
-/// **`walk(p)`** (QUEUE 206): every entry under `p`, depth first, each
-/// folder's names sorted and a folder before what it holds, as `{path,
-/// size, kind, modified}` with `path` relative to the root. **ONE READ A
-/// FOLDER LISTED**, not one an entry: what a walk of the whole root costs
-/// is its folders. A folder's size is 0 (the hosts disagree on it). Kept on
-/// a stack of its own, not the Zig stack: a tree's depth is the store's.
+/// What `walk`'s second argument asks: how deep, and which entries.
+const WalkOptions = struct {
+    /// 1 lists only the folder's own entries.
+    depth: ?u64 = null,
+    /// The entries whose names match (`like`); folders are walked into
+    /// whether they match or not.
+    like: ?[]const u8 = null,
+    kind: ?store.Kind = null,
+};
+
+fn walkOptions(run: *Run, pos: ast.Pos, v: Value) Error!WalkOptions {
+    const m = try bi.mapArg(run, pos, .walk, v);
+    var o: WalkOptions = .{};
+    for (m.map.keys(), m.map.values()) |k, x| {
+        if (std.mem.eql(u8, k, "depth")) {
+            const d = try bi.intArg(run, pos, .walk, x, "its depth");
+            if (d < 1) return run.fail(pos, .argument, "`walk`: a depth of {d}: 1 is the folder's own entries", .{d});
+            o.depth = @intCast(d);
+        } else if (std.mem.eql(u8, k, "like")) {
+            o.like = try bi.stringArg(run, pos, .walk, x, "its `like`");
+        } else if (std.mem.eql(u8, k, "kind")) {
+            const s = try bi.stringArg(run, pos, .walk, x, "its `kind`");
+            o.kind = std.meta.stringToEnum(store.Kind, s) orelse return run.fail(pos, .argument, "`walk`: a kind of \"{s}\": \"file\", \"directory\" or \"other\"", .{s});
+        } else return run.fail(pos, .argument, "`walk` takes `depth`, `like` and `kind`, not `{s}`", .{k});
+    }
+    return o;
+}
+
+/// **`walk(p[, {depth, like, kind}])`** (QUEUE 206, 208(b)): every entry
+/// under `p`, depth first, each folder's names sorted and a folder before
+/// what it holds, as `{path, size, kind, modified}` with `path` relative to
+/// the root. **ONE READ A FOLDER LISTED**, not one an entry: what a walk
+/// of the whole root costs is its folders. A folder's size is 0 (the hosts
+/// disagree on it). `depth` stops it (1: the folder's own entries, which
+/// is `ls` with each one's stat); `like` and `kind` keep only the entries
+/// that match, and an entry left out is never stat'ed. Kept on a stack of
+/// its own, not the Zig stack: a tree's depth is the store's.
 fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .walk, args[0], true);
+    const o: WalkOptions = if (args.len > 1) try walkOptions(run, pos, args[1]) else .{};
     const a = run.alloc;
     try countRead(run, pos);
     const st = (store.statOrNull(run.io, a, p.full) catch |e| return storeFailed(run, pos, .walk, p.rel, e)) orelse return storeFailed(run, pos, .walk, p.rel, error.FileNotFound);
     if (st.kind != .directory) return storeFailed(run, pos, .walk, p.rel, error.NotDir);
-    const Level = struct { rel: []const u8, entries: []store.Entry, at: usize = 0 };
+    const Level = struct { rel: []const u8, entries: []store.Entry, at: usize = 0, depth: u64 };
     var levels: std.ArrayList(Level) = .empty;
-    levels.append(a, .{ .rel = p.rel, .entries = try sortedEntries(run, pos, .walk, p.full, p.rel) }) catch return run.oom(pos);
+    levels.append(a, .{ .rel = p.rel, .entries = try sortedEntries(run, pos, .walk, p.full, p.rel), .depth = 1 }) catch return run.oom(pos);
     const out = try run.newTable(pos);
     out.kind = .list;
     while (levels.items.len > 0) {
@@ -173,31 +317,40 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         }
         const en = top.entries[top.at];
         top.at += 1;
+        const depth = top.depth;
         const rel = if (top.rel.len == 0) en.name else std.fmt.allocPrint(a, "{s}/{s}", .{ top.rel, en.name }) catch return run.oom(pos);
-        const full = std.fmt.allocPrint(a, "{s}/{s}", .{ run.root, rel }) catch return run.oom(pos);
         try run.charge(pos, rel.len);
-        // **THE LISTING'S KIND, NEVER A STAT'S**: a stat follows a link, so
-        // a symlink inside the root to `/` would walk the host's files, and
-        // a link loop would recurse. The listing names a link `other`; it
-        // is reported, not stat'ed, and never entered. (Metal's FAT has no
-        // links, so both hosts walk the same tree.)
-        const m = try run.newTable(pos);
-        m.map.put(a, "path", .{ .string = rel }) catch return run.oom(pos);
-        m.map.put(a, "kind", .{ .string = @tagName(en.kind) }) catch return run.oom(pos);
-        if (en.kind == .other) {
-            m.map.put(a, "size", .{ .int = 0 }) catch return run.oom(pos);
-            m.map.put(a, "modified", .{ .int = 0 }) catch return run.oom(pos);
-        } else {
-            const es = store.stat(run.io, a, full) catch |e| return storeFailed(run, pos, .walk, rel, e);
-            m.map.put(a, "size", .{ .int = if (en.kind == .directory) 0 else @intCast(es.size) }) catch return run.oom(pos);
-            m.map.put(a, "modified", .{ .int = modifiedSeconds(es.mtime) }) catch return run.oom(pos);
+        const into = en.kind == .directory and (o.depth == null or depth < o.depth.?);
+        const full: ?[]const u8 = if (en.kind != .other or into) std.fmt.allocPrint(a, "{s}/{s}", .{ run.root, rel }) catch return run.oom(pos) else null;
+        var keep = o.kind == null or o.kind.? == en.kind;
+        if (keep) if (o.like) |pat| {
+            keep = try text.likeCharged(run, pos, en.name, pat);
+        };
+        if (keep) {
+            // **THE LISTING'S KIND, NEVER A STAT'S**: a stat follows a
+            // link, so a symlink inside the root to `/` would walk the
+            // host's files, and a link loop would recurse. The listing
+            // names a link `other`; it is reported, not stat'ed, and never
+            // entered. (Metal's FAT has no links, so both hosts walk the
+            // same tree.)
+            const m = try run.newTable(pos);
+            m.map.put(a, "path", .{ .string = rel }) catch return run.oom(pos);
+            m.map.put(a, "kind", .{ .string = @tagName(en.kind) }) catch return run.oom(pos);
+            if (en.kind == .other) {
+                m.map.put(a, "size", .{ .int = 0 }) catch return run.oom(pos);
+                m.map.put(a, "modified", .{ .int = 0 }) catch return run.oom(pos);
+            } else {
+                const es = store.stat(run.io, a, full.?) catch |e| return storeFailed(run, pos, .walk, rel, e);
+                m.map.put(a, "size", .{ .int = if (en.kind == .directory) 0 else @intCast(es.size) }) catch return run.oom(pos);
+                m.map.put(a, "modified", .{ .int = modifiedSeconds(es.mtime) }) catch return run.oom(pos);
+            }
+            m.kind = .map;
+            out.list.append(a, .{ .table = m }) catch return run.oom(pos);
         }
-        m.kind = .map;
-        out.list.append(a, .{ .table = m }) catch return run.oom(pos);
-        if (en.kind == .directory) {
+        if (into) {
             try countRead(run, pos);
-            const entries = try sortedEntries(run, pos, .walk, full, rel);
-            levels.append(a, .{ .rel = rel, .entries = entries }) catch return run.oom(pos);
+            const entries = try sortedEntries(run, pos, .walk, full.?, rel);
+            levels.append(a, .{ .rel = rel, .entries = entries, .depth = depth + 1 }) catch return run.oom(pos);
         }
     }
     return .{ .table = out };

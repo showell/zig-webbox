@@ -371,3 +371,132 @@ test "builtins: like, with * and ? only, the whole string" {
     defer r.deinit();
     try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
 }
+
+// ── 208(b): reading part of a file, scanning one, walking with options ───
+
+test "builtins: read(p, offset, n) reads only the part, 0-based, clamped at the end, and counts only those bytes" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(read(\"chat/a.md\", 1, 3), read(\"chat/a.md\", 3), \"[\" .. read(\"chat/a.md\", 5, 2) .. read(\"chat/a.md\", 99) .. \"]\", read(\"chat/a.md\", 0, 0) == \"\")", "ell\tlo\t[]\ttrue\n");
+    try f.expectStop("print(read(\"chat/a.md\", -1, 2))", .argument);
+    try f.expectStop("print(read(\"chat/a.md\", 0, -2))", .argument);
+    try f.expectStop("print(read(\"chat\", 0, 2))", .store);
+    try f.expectStop("print(read(\"chat/none.md\", 0, 2))", .store);
+    // Three bytes of budget: a part of three reads, of four stops; the
+    // whole file (five) would have too.
+    var ok = f.run("print(read(\"chat/a.md\", 1, 3))", .{ .read_bytes = 3 });
+    defer ok.deinit();
+    try testing.expect(ok.finished());
+    var over = f.run("print(read(\"chat/a.md\", 0, 4))", .{ .read_bytes = 3 });
+    defer over.deinit();
+    try testing.expectEqual(script.diag.Budget.read_bytes, over.stop.?.budget.?);
+}
+
+/// A file of `n` pseudo-random bytes from a small alphabet, so short
+/// needles match often, on every seam of the scan's chunks too.
+fn plantedFile(f: *Fixture, sub: []const u8, n: usize, seed: u64) ![]u8 {
+    const data = try testing.allocator.alloc(u8, n);
+    var prng: std.Random.DefaultPrng = .init(seed);
+    for (data) |*c| c.* = "ab\n"[prng.random().uintLessThan(u8, 3)];
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = sub, .data = data });
+    return data;
+}
+
+test "builtins: count_in, find_in and count_lines agree with the whole file's own counts, across every chunk's seam, in a fraction of its size in arena" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // Three and a bit chunks of 64 KiB, so matches straddle seams.
+    const data = try plantedFile(&f, "data/big.txt", 3 * 65536 + 1234, 7);
+    defer testing.allocator.free(data);
+    for ([_][]const u8{ "a", "ab", "aab", "\nb\n", "abba", "bbbbbbbb" }) |needle| {
+        var src: [256]u8 = undefined;
+        const s = try std.fmt.bufPrint(&src, "print(count_in(\"big.txt\", \"{s}\"), find_in(\"big.txt\", \"{s}\"))", .{ needle, needle });
+        const esc = try std.mem.replaceOwned(u8, testing.allocator, s, "\n", "\\n");
+        defer testing.allocator.free(esc);
+        var r = f.run(esc, .{});
+        defer r.deinit();
+        try testing.expect(r.finished());
+        var want: [64]u8 = undefined;
+        const first = std.mem.indexOf(u8, data, needle);
+        const w = if (first) |i| try std.fmt.bufPrint(&want, "{d}\t{d}\n", .{ std.mem.count(u8, data, needle), i }) else try std.fmt.bufPrint(&want, "0\tnil\n", .{});
+        testing.expectEqualStrings(w, r.output) catch |e| {
+            std.debug.print("needle {s}\n", .{needle});
+            return e;
+        };
+        try testing.expect(r.arena_bytes < 160 * 1024);
+    }
+    // Long runs of `a`: every seam falls inside a run, so a count of
+    // `aaa` (none overlapping) depends on each seam carried right.
+    const runs = try testing.allocator.alloc(u8, 3 * 65536 + 777);
+    defer testing.allocator.free(runs);
+    var prng: std.Random.DefaultPrng = .init(11);
+    var i: usize = 0;
+    while (i < runs.len) : (i += 1) runs[i] = if (prng.random().uintLessThan(u16, 300) == 0) 'b' else 'a';
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/runs.txt", .data = runs });
+    // And one run of `a` from end to end: the first window (64 KiB and two)
+    // ends on a match of `aaa` exactly, which must not be counted again.
+    const solid = try testing.allocator.alloc(u8, 2 * 65536 + 5);
+    defer testing.allocator.free(solid);
+    @memset(solid, 'a');
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/solid.txt", .data = solid });
+    try f.expectOutput("print(count_in(\"solid.txt\", \"aaa\"), count_in(\"solid.txt\", \"aa\"), find_in(\"solid.txt\", \"aaaa\"))", "43692\t65538\t0\n");
+    for ([_][]const u8{ "aaa", "aaaaaaa", "ab", "ba", "aba" }) |needle| {
+        var src: [256]u8 = undefined;
+        var r = f.run(try std.fmt.bufPrint(&src, "print(count_in(\"runs.txt\", \"{s}\"))", .{needle}), .{});
+        defer r.deinit();
+        var want: [32]u8 = undefined;
+        testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{d}\n", .{std.mem.count(u8, runs, needle)}), r.output) catch |e| {
+            std.debug.print("needle {s}\n", .{needle});
+            return e;
+        };
+    }
+    var lines = f.run("print(count_lines(\"big.txt\"), #lines(read(\"big.txt\")))", .{});
+    defer lines.deinit();
+    const nl = std.mem.count(u8, data, "\n") + @intFromBool(data[data.len - 1] != '\n');
+    var want: [64]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{d}\t{d}\n", .{ nl, nl }), lines.output);
+    // Empty files and needles.
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/empty", .data = "" });
+    try f.expectOutput("print(count_lines(\"empty\"), count_in(\"empty\", \"x\"), find_in(\"empty\", \"x\"), count_lines(\"top.txt\"))", "0\t0\tnil\t1\n");
+    try f.expectStop("print(count_in(\"top.txt\", \"\"))", .argument);
+}
+
+test "builtins: a scan is one store read, every byte counted against the read budget and charged a step" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const data = try plantedFile(&f, "data/big.txt", 200_000, 9);
+    defer testing.allocator.free(data);
+    var r = f.run("print(count_lines(\"big.txt\")) print(budget().reads, budget().read_bytes)", .{ .reads = 10, .read_bytes = 1_000_000 });
+    defer r.deinit();
+    try testing.expect(std.mem.endsWith(u8, r.output, "\t800000\n") and std.mem.indexOf(u8, r.output, "\n9\t") != null);
+    try testing.expect(r.steps > 200_000);
+    var over = f.run("print(count_lines(\"big.txt\"))", .{ .read_bytes = 150_000 });
+    defer over.deinit();
+    try testing.expectEqual(script.diag.Budget.read_bytes, over.stop.?.budget.?);
+}
+
+test "builtins: walk's options: depth stops it and reads fewer folders, like and kind keep the entries that match, unknown options are refused" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    try f.tmp.dir.createDirPath(io, "data/chat/deep/deeper");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/deep/deeper/c.md", .data = "x" });
+    try f.expectOutput("for e in walk(\"\", {depth = 1}) do print(e.path, e.kind, e.size) end", "chat\tdirectory\t0\ntop.txt\tfile\t3\n");
+    try f.expectOutput("for e in walk(\"chat\", {like = \"*.md\"}) do print(e.path) end", "chat/a.md\nchat/b.md\nchat/deep/deeper/c.md\n");
+    try f.expectOutput("for e in walk(\"\", {kind = \"directory\", depth = 2}) do print(e.path) end", "chat\nchat/deep\n");
+    // depth 1 is one folder read; the whole walk is four.
+    var shallow = f.run("local w = walk(\"\", {depth = 1}) print(10 - budget().reads)", .{ .reads = 10 });
+    defer shallow.deinit();
+    try testing.expectEqualStrings("1\n", shallow.output);
+    var whole = f.run("local w = walk(\"\") print(10 - budget().reads)", .{ .reads = 10 });
+    defer whole.deinit();
+    try testing.expectEqualStrings("4\n", whole.output);
+    try f.expectStop("local w = walk(\"\", {deep = 1})", .argument);
+    try f.expectStop("local w = walk(\"\", {depth = 0})", .argument);
+    try f.expectStop("local w = walk(\"\", {kind = \"link\"})", .argument);
+    try f.expectStop("local w = walk(\"\", {1, 2})", .type);
+}
