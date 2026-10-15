@@ -248,6 +248,14 @@ was in. The classes are:
 | `store` | a store call failed (it names the path) |
 | `budget` | a budget ran out (it names which) |
 
+**The message says what to do.** Each one names what was wrong and, where
+there is one, the way that works: a store error gives its plain words, its
+name and what asks first (`` `read("none.txt")`: not found (FileNotFound):
+`exists(p)` asks first ``); a budget gives its number. The golden corpus,
+`src/script/errors_test.zig`, holds a wrong script of every kind and the
+exact class, place and message it gets, so a message changed is a line
+changed in review.
+
 ### `attempt`: surviving one bad file
 
 ```shale

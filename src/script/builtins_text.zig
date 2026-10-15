@@ -38,7 +38,7 @@ pub const specs = [_]bi.Spec{
 /// **`rep(s, n)`**: `s` `n` times over. Charged a step a byte before the
 /// string is made.
 fn rep(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .rep, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .rep, args[0], "its first argument");
     const n = try bi.intArg(run, pos, .rep, args[1], "how many times");
     if (n < 0) return run.fail(pos, .argument, "`rep`: {d} times", .{n});
     const total = std.math.mul(u64, str.len, @intCast(n)) catch return run.budgetStop(pos, .arena);
@@ -54,7 +54,7 @@ fn rep(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// overlapping, left to right) put as `new`. A step a byte of `s` and of
 /// what it makes.
 fn substitute(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .substitute, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .substitute, args[0], "its first argument");
     const old = try bi.stringArg(run, pos, .substitute, args[1], "what it replaces");
     const new = try bi.stringArg(run, pos, .substitute, args[2], "what it puts instead");
     if (old.len == 0) return run.fail(pos, .argument, "`substitute` of \"\" is an error: there is nothing to replace", .{});
@@ -117,7 +117,7 @@ pub const Finder = struct {
 };
 
 fn split(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .split, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .split, args[0], "its first argument");
     const sep = try bi.stringArg(run, pos, .split, args[1], "its separator");
     if (sep.len == 0) return run.fail(pos, .argument, "`split` by \"\" is an error: there is no empty separator", .{});
     try bi.chargeBytes(run, pos, str.len);
@@ -157,7 +157,7 @@ fn join(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// **`lines(s)`**: `s` split at each `\n`, with no last empty piece after a
 /// final newline (`#lines("a\nb\n")` is 2).
 fn lines(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .lines, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .lines, args[0], "its first argument");
     try run.charge(pos, str.len);
     const out = try run.newTable(pos);
     out.kind = .list;
@@ -174,7 +174,7 @@ fn lines(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 
 /// **`words(s)`**: the runs between ASCII whitespace, none empty.
 fn words(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .words, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .words, args[0], "its first argument");
     try run.charge(pos, str.len);
     const out = try run.newTable(pos);
     out.kind = .list;
@@ -192,7 +192,7 @@ fn looks(comptime l: Look) bi.Impl {
             const b: B = switch (l) {
                 inline else => |t| @field(B, @tagName(t)),
             };
-            const str = try bi.stringArg(run, pos, b, args[0], "its string");
+            const str = try bi.stringArg(run, pos, b, args[0], "its first argument");
             const sub_s = try bi.stringArg(run, pos, b, args[1], "what it looks for");
             try bi.chargeBytes(run, pos, str.len);
             return .{ .boolean = switch (l) {
@@ -212,7 +212,7 @@ fn looks(comptime l: Look) bi.Impl {
 
 /// **`find(s, t)`**: where `t` first is in `s`, 1-based; nil when absent.
 fn find(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .find, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .find, args[0], "its first argument");
     const sub_s = try bi.stringArg(run, pos, .find, args[1], "what it looks for");
     try bi.chargeBytes(run, pos, str.len);
     const at = (try (try Finder.init(run, pos, sub_s)).find(str, 0)) orelse return .nil;
@@ -220,7 +220,7 @@ fn find(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 }
 
 fn sub(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .sub, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .sub, args[0], "its first argument");
     const i = try bi.intArg(run, pos, .sub, args[1], "its start");
     const j = if (args.len > 2) try bi.intArg(run, pos, .sub, args[2], "its end") else -1;
     const r = subRange(str.len, i, j);
@@ -242,7 +242,7 @@ pub fn subRange(len: usize, i: i64, j: i64) struct { start: usize, len: usize } 
 }
 
 fn trim(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .trim, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .trim, args[0], "its first argument");
     try run.charge(pos, str.len);
     run.tally(str.len);
     return .{ .string = std.mem.trim(u8, str, " \t\r\n") };
@@ -254,7 +254,7 @@ fn cased(comptime c: Case) bi.Impl {
     return struct {
         fn f(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             const b: B = if (c == .upper) .upper else .lower;
-            const str = try bi.stringArg(run, pos, b, args[0], "its string");
+            const str = try bi.stringArg(run, pos, b, args[0], "its first argument");
             try run.charge(pos, str.len);
             const out = run.alloc.alloc(u8, str.len) catch return run.oom(pos);
             for (str, out) |ch, *o| o.* = if (c == .upper) std.ascii.toUpper(ch) else std.ascii.toLower(ch);
@@ -273,7 +273,7 @@ fn tostring(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 }
 
 fn tonumber(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const str = try bi.stringArg(run, pos, .tonumber, args[0], "its string");
+    const str = try bi.stringArg(run, pos, .tonumber, args[0], "its first argument");
     try run.charge(pos, str.len);
     run.tally(str.len);
     return .{ .int = bi.parseInteger(str) orelse return run.fail(pos, .argument, "`tonumber`: \"{s}\" is not an integer (an optional `-`, then decimal digits)", .{str[0..@min(str.len, 40)]}) };
@@ -283,7 +283,7 @@ fn tonumber(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// `*` is any run of bytes (none included), `?` is one byte, and every other
 /// byte is itself. No classes, no escapes: not Lua's patterns.
 fn like(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    const s = try bi.stringArg(run, pos, .like, args[0], "its string");
+    const s = try bi.stringArg(run, pos, .like, args[0], "its first argument");
     const p = try bi.stringArg(run, pos, .like, args[1], "its pattern");
     return .{ .boolean = try likeCharged(run, pos, s, p) };
 }

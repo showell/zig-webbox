@@ -60,9 +60,37 @@ fn pathArg(run: *Run, pos: ast.Pos, b: B, v: Value, allow_root: bool) Error!Path
     return .{ .full = full, .rel = rel };
 }
 
+/// A store error in plain words; its name follows in parentheses.
+fn storeWords(e: anyerror) []const u8 {
+    return switch (e) {
+        error.FileNotFound => "not found",
+        error.NotDir => "a part of the path is a file, not a folder",
+        error.IsDir => "a folder, not a file",
+        error.NotFile => "not a file",
+        error.PathAlreadyExists => "already there",
+        error.DirNotEmpty => "the folder is not empty",
+        error.AccessDenied, error.PermissionDenied => "the store refuses it",
+        error.NoSpaceLeft => "the store is full",
+        error.SymLinkLoop => "a link loop",
+        error.NameTooLong => "the name is too long",
+        else => "the store failed",
+    };
+}
+
+/// What to do about it, when there is something.
+fn storeHint(e: anyerror) []const u8 {
+    return switch (e) {
+        error.FileNotFound => ": `exists(p)` asks first",
+        error.NotDir, error.IsDir, error.NotFile => ": `is_dir(p)` asks first",
+        error.PathAlreadyExists => ": `exists(p)` asks first",
+        error.DirNotEmpty => ": `remove_tree(p)` removes a folder and what is in it",
+        else => "",
+    };
+}
+
 fn storeFailed(run: *Run, pos: ast.Pos, b: B, rel: []const u8, e: anyerror) Error {
     if (e == error.OutOfMemory) return run.oom(pos);
-    return run.fail(pos, .store, "`{s}(\"{s}\")`: {s}", .{ @tagName(b), rel, @errorName(e) });
+    return run.fail(pos, .store, "`{s}(\"{s}\")`: {s} ({s}){s}", .{ @tagName(b), rel, storeWords(e), @errorName(e), storeHint(e) });
 }
 
 fn countRead(run: *Run, pos: ast.Pos) Error!void {

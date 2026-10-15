@@ -84,6 +84,18 @@ pub const Parser = struct {
         return self.failAt(pos, class, try std.fmt.allocPrint(self.alloc, fmt, args));
     }
 
+    /// A token as an error message names it: words for the end, a string
+    /// and a name or number shown, any other token quoted.
+    fn describe(self: *Parser, t: Token) []const u8 {
+        return switch (t.tag) {
+            .eof => "the end of the script",
+            .string => "a string",
+            .name => std.fmt.allocPrint(self.alloc, "the name `{s}`", .{t.text}) catch "a name",
+            .int => std.fmt.allocPrint(self.alloc, "the number {s}", .{t.text}) catch "a number",
+            else => std.fmt.allocPrint(self.alloc, "`{s}`", .{t.text}) catch t.text,
+        };
+    }
+
     fn here(self: *const Parser) ast.Pos {
         return .{ .line = self.tok.line, .column = self.tok.column };
     }
@@ -117,7 +129,7 @@ pub const Parser = struct {
     }
 
     fn expect(self: *Parser, tag: Tag, what: []const u8) Error!Token {
-        if (self.tok.tag != tag) return self.failf(self.here(), .syntax, "expected {s}, found {s}", .{ what, describe(self.tok) });
+        if (self.tok.tag != tag) return self.failf(self.here(), .syntax, "expected {s}, found {s}", .{ what, self.describe(self.tok) });
         const t = self.tok;
         try self.advance();
         return t;
@@ -320,7 +332,7 @@ pub const Parser = struct {
                     return .{ .pos = pos, .kind = .{ .assign = .{ .target = target, .value = value } } };
                 }
                 if (self.tok.tag == .comma) return self.failAt(self.here(), .refused, "multiple assignment is not in this language: one assignment each");
-                if (target.kind != .call) return self.failf(pos, .syntax, "a statement must be a call or an assignment, found {s}", .{describe(self.tok)});
+                if (target.kind != .call) return self.failf(pos, .syntax, "a statement must be a call or an assignment, found {s}", .{self.describe(self.tok)});
                 return .{ .pos = pos, .kind = .{ .call = target } };
             },
         }
@@ -584,7 +596,7 @@ pub const Parser = struct {
                 if (std.meta.stringToEnum(ast.Builtin, t.text) != null) return self.failf(pos, .refused, "`{s}` is a builtin, not a value: call it, `{s}(...)`", .{ t.text, t.text });
                 return self.unknownName(t.text, pos);
             },
-            else => return self.failf(pos, .syntax, "expected a value, found {s}", .{describe(t)}),
+            else => return self.failf(pos, .syntax, "expected a value, found {s}", .{self.describe(t)}),
         }
     }
 
@@ -611,7 +623,7 @@ pub const Parser = struct {
             if (self.tok.tag == .comma) {
                 try self.advance();
                 if (self.tok.tag == .rparen) return self.failAt(self.here(), .syntax, "expected a value after `,`, found `)`");
-            } else if (self.tok.tag != .rparen) return self.failf(self.here(), .syntax, "expected `,` or `)` after the function's name, found {s}", .{describe(self.tok)});
+            } else if (self.tok.tag != .rparen) return self.failf(self.here(), .syntax, "expected `,` or `)` after the function's name, found {s}", .{self.describe(self.tok)});
         } else {
             if (self.lookup(name) != null or (self.in_function and self.constant(name) != null))
                 return self.failf(pos, .refused, "`{s}` is a value here, not a function: a local, a parameter or a `const` of that name hides the function or builtin; name it otherwise", .{name});
@@ -634,7 +646,7 @@ pub const Parser = struct {
             }
         }
         _ = try self.expect(.rparen, "`)` to close the call");
-        if (params) |n| if (args.items.len != n) return self.failf(pos, .argument, "`{s}` takes {d} arguments, given {d}", .{ shown, n, args.items.len });
+        if (params) |n| if (args.items.len != n) return self.failf(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ shown, n, if (n == 1) "" else "s", args.items.len });
         return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .call = .{ .target = target, .args = args.items } } });
     }
 
@@ -681,16 +693,6 @@ pub const Parser = struct {
     }
 };
 
-fn describe(t: Token) []const u8 {
-    return switch (t.tag) {
-        .eof => "the end of the script",
-        .name => "a name",
-        .int => "a number",
-        .string => "a string",
-        else => t.text,
-    };
-}
-
 /// The whole source, parsed. On `error.Parse`, `stop` says where and why.
 pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop) Error!ast.Program {
     return parseMeasured(alloc, source, max_nesting, stop, null);
@@ -707,6 +709,6 @@ pub fn parseMeasured(alloc: std.mem.Allocator, source: []const u8, max_nesting: 
     try p.advance();
     p.frame.depth = 0;
     const body = try p.block();
-    if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{describe(p.tok)});
+    if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{p.describe(p.tok)});
     return .{ .functions = p.functions.items, .const_names = p.consts.items, .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
 }

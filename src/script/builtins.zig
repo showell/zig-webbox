@@ -70,6 +70,11 @@ fn printIsTheInterpreters(_: *Run, _: ast.Pos, _: []const Value) Error!Value {
     unreachable;
 }
 
+/// "s" after a count that is not 1.
+pub fn plural(n: usize) []const u8 {
+    return if (n == 1) "" else "s";
+}
+
 pub fn tooMany(run: *Run, pos: ast.Pos, b: B) Error {
     return run.fail(pos, .argument, "`{s}` takes at most {d} arguments", .{ @tagName(b), specs.get(b).at_most });
 }
@@ -79,7 +84,7 @@ pub fn tooMany(run: *Run, pos: ast.Pos, b: B) Error {
 pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
     const s = specs.get(b);
     if (args.len < s.at_least or args.len > s.at_most) {
-        if (s.at_least == s.at_most) return run.fail(pos, .argument, "`{s}` takes {d} arguments, given {d}", .{ @tagName(b), s.at_least, args.len });
+        if (s.at_least == s.at_most) return run.fail(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ @tagName(b), s.at_least, plural(s.at_least), args.len });
         return run.fail(pos, .argument, "`{s}` takes {d} to {d} arguments, given {d}", .{ @tagName(b), s.at_least, s.at_most, args.len });
     }
     return s.impl(run, pos, args);
@@ -95,7 +100,7 @@ pub fn scalarText(run: *Run, pos: ast.Pos, v: Value, buf: *[24]u8, what: []const
         .boolean => |b| if (b) "true" else "false",
         .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable,
         .string => |s| s,
-        .table => run.fail(pos, .type, "`{s}` takes scalars, not {s}: walk it", .{ what, v.typeName() }),
+        .table => run.fail(pos, .type, "`{s}` takes scalars, not {s}: `for x in l do {s}(x) end` takes a list's items one by one", .{ what, v.typeName(), what }),
     };
 }
 

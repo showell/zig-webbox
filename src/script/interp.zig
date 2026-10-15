@@ -106,9 +106,9 @@ pub const Run = struct {
 
     pub fn budgetStop(self: *Run, pos: ast.Pos, b: diag.Budget) Error {
         self.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = b, .function = self.function, .message = switch (b) {
-            .steps => "the step budget ran out",
+            .steps => std.fmt.allocPrint(self.alloc, "the step budget ({d} steps) ran out", .{self.budgets.steps}) catch "the step budget ran out",
             .arena => "the arena budget ran out",
-            .call_depth => "calls nest deeper than the call-depth budget",
+            .call_depth => std.fmt.allocPrint(self.alloc, "calls nest deeper than the call-depth budget ({d})", .{self.budgets.call_depth}) catch "calls nest deeper than the call-depth budget",
             .output => "the output budget ran out",
             .reads => "the store-read budget (count) ran out",
             .read_bytes => "the store-read budget (bytes) ran out",
@@ -316,7 +316,7 @@ pub const Run = struct {
                 } else if (k == len + 1) {
                     t.list.append(self.alloc, v) catch return self.oom(pos);
                     t.kind = .list;
-                } else return self.fail(pos, .index, "index {d} is outside the list (length {d}; only {d} appends)", .{ k, len, len + 1 });
+                } else return self.fail(pos, .index, "index {d} is outside the list (length {d}): only index {d} appends, and `push(l, x)` says so", .{ k, len, len + 1 });
             },
             .string => |k| {
                 if (t.kind == .list) return self.fail(pos, .type, "a list's keys are integers: this one is a list, indexed by a string", .{});
@@ -399,7 +399,7 @@ pub const Run = struct {
         switch (op) {
             .not => return .{ .boolean = !v.truthy() },
             .neg => switch (v) {
-                .int => |i| return .{ .int = std.math.negate(i) catch return self.fail(pos, .arithmetic, "-{d} overflows 64 bits", .{i}) },
+                .int => |i| return .{ .int = std.math.negate(i) catch return self.fail(pos, .arithmetic, "negating {d} overflows 64 bits", .{i}) },
                 else => return self.fail(pos, .type, "`-` takes an integer, not {s}", .{v.typeName()}),
             },
             .len => switch (v) {
@@ -459,14 +459,18 @@ pub const Run = struct {
         };
     }
 
+    fn toNumberHint(v: Value) []const u8 {
+        return if (v == .string) " (`tonumber(s)` reads one from a string)" else "";
+    }
+
     noinline fn arith(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const a = switch (l) {
             .int => |i| i,
-            else => return self.fail(pos, .type, "arithmetic on {s}", .{l.typeName()}),
+            else => return self.fail(pos, .type, "`{s}` takes integers, and its left is {s}{s}", .{ opText(op), l.typeName(), toNumberHint(l) }),
         };
         const b = switch (r) {
             .int => |i| i,
-            else => return self.fail(pos, .type, "arithmetic on {s}", .{r.typeName()}),
+            else => return self.fail(pos, .type, "`{s}` takes integers, and its right is {s}{s}", .{ opText(op), r.typeName(), toNumberHint(r) }),
         };
         const result: ?i64 = switch (op) {
             .add => std.math.add(i64, a, b) catch null,

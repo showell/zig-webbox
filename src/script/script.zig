@@ -130,4 +130,5 @@ test {
     _ = builtins;
     _ = @import("fuzz_test.zig");
     _ = @import("charge_test.zig");
+    _ = @import("errors_test.zig");
 }

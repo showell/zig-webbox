@@ -90,7 +90,7 @@ const keywords = std.StaticStringMap(Tag).initComptime(.{
 
 /// Lua's words this language refuses, each with why.
 const refused_words = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "goto", "`goto` is not in this language" },
+    .{ "goto", "`goto` is not in this language: `break` and `continue` leave or go round a loop" },
     .{ "repeat", "`repeat ... until` is not in this language: use `while`" },
     .{ "until", "`repeat ... until` is not in this language: use `while`" },
 });
@@ -110,6 +110,16 @@ pub const Lexer = struct {
     fn fail(self: *Lexer, line: u32, column: u32, refused: bool, message: []const u8) error{Lex} {
         self.err = .{ .line = line, .column = column, .refused = refused, .message = message };
         return error.Lex;
+    }
+
+    fn failf(self: *Lexer, line: u32, column: u32, refused: bool, comptime fmt: []const u8, args: anytype) error{ Lex, OutOfMemory } {
+        return self.fail(line, column, refused, try std.fmt.allocPrint(self.alloc, fmt, args));
+    }
+
+    /// A byte shown in a message: quoted when it prints, as `\xHH` when not.
+    fn shown(self: *Lexer, b: u8) []const u8 {
+        if (std.ascii.isPrint(b)) return std.fmt.allocPrint(self.alloc, "`{c}`", .{b}) catch "";
+        return std.fmt.allocPrint(self.alloc, "the byte \\x{X:0>2}", .{b}) catch "";
     }
 
     fn peekAt(self: *const Lexer, k: usize) u8 {
@@ -223,8 +233,8 @@ pub const Lexer = struct {
             },
             ':' => return self.fail(line, column, true, if (two == ':') "labels (`::name::`) are not in this language" else "`:` method calls are not in this language: call a builtin, `f(x, ...)`"),
             '&', '|' => return self.fail(line, column, true, "bitwise operators are not in this language"),
-            '^' => return self.fail(line, column, true, "`^` (exponent) gives a float, and this language has no floats"),
-            else => return self.fail(line, column, false, "a character no token starts with"),
+            '^' => return self.fail(line, column, true, "`^` (exponent) gives a float, and this language has no floats: multiply, `x * x`"),
+            else => return self.failf(line, column, false, "a character no token starts with, {s}", .{self.shown(self.src[start])}),
         };
         return .{ .tag = tag, .text = self.src[start..self.at], .line = line, .column = column };
     }
@@ -241,7 +251,7 @@ pub const Lexer = struct {
         const text = self.src[start..self.at];
         const value = std.fmt.parseInt(i64, text, 10) catch {
             if (std.mem.eql(u8, text, "9223372036854775808")) return .{ .tag = .int, .text = text, .line = line, .column = column, .int = std.math.minInt(i64), .min_magnitude = true };
-            return self.fail(line, column, false, "an integer literal too big for 64 bits");
+            return self.fail(line, column, false, "an integer literal too big for 64 bits: they run from -9223372036854775808 to 9223372036854775807");
         };
         return .{ .tag = .int, .text = text, .line = line, .column = column, .int = value };
     }
