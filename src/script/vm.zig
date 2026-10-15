@@ -239,7 +239,10 @@ const Machine = struct {
                 .list_item => {
                     const v = m.pop();
                     if (v == .nil) return r.fail(op.pos, .type, "a list cannot hold nil", .{});
-                    m.top().table.list.appendAssumeCapacity(v);
+                    // Through the allocator: the room `list_begin` reserved
+                    // is there unless a yield made it again, and then this
+                    // takes none either (`collect` keeps the room).
+                    m.top().table.list.append(r.alloc, v) catch return r.oom(op.pos);
                 },
                 .map_begin => {
                     const t = try r.newTable(op.pos);

@@ -75,7 +75,11 @@ const Copier = struct {
         while (c.todo.pop()) |job| {
             const old = job.old;
             const new = job.new;
-            new.list.ensureTotalCapacity(a, old.list.items.len) catch return c.r.budgetStop(c.pos, .kept);
+            // **THE ROOM KEPT TOO**: a list literal half built when its
+            // item's call yielded has reserved room for the rest (the box's
+            // review of M1: a copy with only what it held, and the next item
+            // appended into room that wasn't there).
+            new.list.ensureTotalCapacity(a, old.list.capacity) catch return c.r.budgetStop(c.pos, .kept);
             for (old.list.items) |item| new.list.appendAssumeCapacity(try c.copy(item));
             new.map.ensureTotalCapacity(a, old.map.count()) catch return c.r.budgetStop(c.pos, .kept);
             var it = old.map.iterator();

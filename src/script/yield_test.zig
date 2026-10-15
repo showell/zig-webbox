@@ -147,3 +147,11 @@ test "yield: the effects so far are still the run's after one" {
     try testing.expectEqualStrings("note.txt", r.effects[0].path);
     try testing.expectEqualStrings("append", r.effects[1].op);
 }
+
+test "yield: inside a list or map literal being built, the literal goes on (the box's review of M1)" {
+    // The copy kept only the room a half-built list held, and the next
+    // item was appended assuming the room its literal reserved.
+    try expectOutput("function f() yield() return 3 end print(#{f(), 2, 4})", "3\n");
+    try expectOutput("function f() yield() return 3 end local l = {1, f(), f(), 4} print(l[2] + l[3] + #l)", "10\n");
+    try expectOutput("function f() yield() return \"v\" end local m = {a = f(), b = 2, c = f()} print(m.a .. m.c, m.b)", "vv\t2\n");
+}
