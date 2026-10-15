@@ -26,7 +26,7 @@ pub const Stop = diag.Stop;
 /// What a run did. It owns the run's arena: every string in it lives there,
 /// so the caller reads it, then calls `deinit`.
 pub const Result = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: value.Budgeted,
     /// Null when the script finished; where and why it stopped otherwise.
     stop: ?Stop,
     /// What `print` wrote: a prefix of the caller's `out`.
@@ -68,8 +68,8 @@ pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writ
 /// `out`, and the output budget is at most `out.len`. It always returns a
 /// Result: a source however hostile ends finished or stopped.
 pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
-    var result: Result = .{ .arena = .init(backing), .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
-    var budgeted: value.Budgeted = .{ .child = result.arena.allocator(), .limit = budgets.arena_bytes };
+    var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
+    const budgeted = &result.arena;
     const alloc = budgeted.allocator();
     if (source.len > budgets.source_bytes) {
         result.stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .source, .message = "the source is larger than the source budget" };
@@ -88,7 +88,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     var r: interp.Run = .{
         .io = io,
         .alloc = alloc,
-        .budgeted = &budgeted,
+        .budgeted = budgeted,
         .budgets = budgets,
         .root = root,
         .now = now,
@@ -106,7 +106,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     result.effects = r.effects.items;
     result.steps = r.steps;
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
-    result.arena_bytes = budgeted.used;
+    result.arena_bytes = budgeted.held;
     return result;
 }
 

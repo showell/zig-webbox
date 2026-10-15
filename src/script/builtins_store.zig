@@ -137,15 +137,10 @@ fn read(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         if (n != null and n.? < 0) return run.fail(pos, .argument, "`read`: a count of {d} bytes", .{n.?});
         return readPart(run, pos, p, @intCast(offset), if (n) |x| @intCast(x) else null);
     }
-    try countRead(run, pos);
-    const left = run.budgets.read_bytes -| run.read_bytes;
-    const bytes = store.read(run.io, run.alloc, p.full, .limited(@intCast(@min(left, std.math.maxInt(usize))))) catch |e| switch (e) {
-        error.StreamTooLong => return run.budgetStop(pos, .read_bytes),
-        else => return storeFailed(run, pos, .read, p.rel, e),
-    };
-    run.read_bytes += bytes.len;
-    try run.charge(pos, bytes.len);
-    return .{ .string = bytes };
+    // The whole file is the part from 0 to its end: sized by its stat, one
+    // buffer of exactly that, never grown (a buffer grown by doubling cost
+    // 4x the time once each big one had a chunk of its own).
+    return readPart(run, pos, p, 0, null);
 }
 
 /// A file's size, for a read of part of it: one store call, the read's.
@@ -217,9 +212,10 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
     // **ONE BUFFER FOR EVERY SCAN OF THE RUN** (208's cold review): a
     // fresh one a call would spend 64 KiB of arena a file, and a scan of
     // the chat's topics would run the site's 8 MiB out.
-    const need: usize = @intCast(@min(size, scan_chunk) + keep_most);
-    if (run.scan_buf.len < need) run.scan_buf = run.alloc.alloc(u8, @max(need, @min(scan_chunk, need * 2))) catch return run.oom(pos);
-    const buf = run.scan_buf[0..need];
+    // Sized once, for the longest needle and the fullest chunk (209's
+    // review: sized by the needle, a scan with a longer one took another).
+    if (run.scan_buf.len == 0) run.scan_buf = run.alloc.alloc(u8, 2 * scan_chunk) catch return run.oom(pos);
+    const buf = run.scan_buf[0..@intCast(@min(size, scan_chunk) + keep_most)];
     // `buf[0..kept]` holds the last window's tail, from file offset `base`.
     var kept: usize = 0;
     var base: u64 = 0;

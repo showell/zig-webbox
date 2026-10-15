@@ -95,7 +95,10 @@ pub const Finder = struct {
     pub fn init(run: *Run, pos: ast.Pos, needle: []const u8) Error!Finder {
         if (needle.len <= short) return .{ .needle = needle };
         try run.charge(pos, needle.len);
-        const t = run.alloc.alloc(u32, needle.len) catch return run.oom(pos);
+        // One table for the run, grown to the longest needle yet: a search
+        // is never inside another.
+        if (run.kmp_table.len < needle.len) run.kmp_table = run.alloc.alloc(u32, needle.len) catch return run.oom(pos);
+        const t = run.kmp_table[0..needle.len];
         t[0] = 0;
         var k: u32 = 0;
         for (1..needle.len) |i| {

@@ -416,3 +416,25 @@ test "run: 208's cold review: attempt needs its commas; a long chain in a loop c
     defer m.deinit();
     try testing.expectEqual(@as(u32, 33), m.stop.?.column);
 }
+
+test "run: the arena budget bounds the memory a run takes: the backing allocator's peak stays under it, for the review's shapes (209)" {
+    // At 208, std's arena held 1.7x and 2.0x what was counted: 14.1 MB
+    // for 200,000 tables against 8 MiB, 12.7 MB for 400,000 pushes.
+    const limit = 8 * 1024 * 1024;
+    const shapes = [_][]const u8{
+        "local l = {} for i = 1, 200000 do l[i] = {} end",
+        "local l = {} for i = 1, 400000 do push(l, i) end",
+        "local a = {} local b = {} for i = 1, 300000 do push(a, i) push(b, tostring(i)) end",
+        "local s = \"\" for i = 1, 100000 do s = s .. \"line \" .. i .. \"\\n\" end",
+    };
+    for (shapes) |src| {
+        var peak: script.value.Peak = .{ .child = testing.allocator };
+        var threaded = std.Io.Threaded.init(testing.allocator, .{});
+        defer threaded.deinit();
+        var r = script.run(threaded.io(), peak.allocator(), ".zig-cache/no-root", src, .{ .arena_bytes = limit, .steps = 100_000_000 }, 0, &out_buf);
+        defer r.deinit();
+        errdefer std.debug.print("{s}: peak {d}\n", .{ src, peak.most });
+        try testing.expect(peak.most <= limit);
+        try testing.expect(r.arena_bytes <= limit);
+    }
+}

@@ -408,7 +408,7 @@ test "builtins: count_in, find_in and count_lines agree with the whole file's ow
     try f.init();
     defer f.deinit();
     // Three and a bit chunks of 64 KiB, so matches straddle seams.
-    const data = try plantedFile(&f, "data/big.txt", 3 * 65536 + 1234, 7);
+    const data = try plantedFile(&f, "data/big.txt", 8 * 65536 + 1234, 7);
     defer testing.allocator.free(data);
     for ([_][]const u8{ "a", "ab", "aab", "\nb\n", "abba", "bbbbbbbb" }) |needle| {
         var src: [256]u8 = undefined;
@@ -425,7 +425,11 @@ test "builtins: count_in, find_in and count_lines agree with the whole file's ow
             std.debug.print("needle {s}\n", .{needle});
             return e;
         };
-        try testing.expect(r.arena_bytes < 160 * 1024);
+        // Half a megabyte scanned in the scan buffer (128 KiB) and change.
+        testing.expect(r.arena_bytes < 320 * 1024) catch |e| {
+            std.debug.print("held {d}\n", .{r.arena_bytes});
+            return e;
+        };
     }
     // Long runs of `a`: every seam falls inside a run, so a count of
     // `aaa` (none overlapping) depends on each seam carried right.
