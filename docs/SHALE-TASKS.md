@@ -1,6 +1,6 @@
 # Shale's long runs and streams: a design note
 
-**Not built.** This is a proposal for metal-vmm QUEUE 211's M2 to M6 and
+**Not built, but for section 1.** This is a proposal for metal-vmm QUEUE 211's M2 to M6 and
 its SSE item, written after V (the VM) and M1 (`yield`, copy at a yield)
 landed, for the box and Steve to cut down before anything touches a host.
 It is short on purpose, and every point is one to accept, change or
@@ -20,8 +20,12 @@ strike.
 
 ## 1. A slice: the one host-free piece both hosts need
 
-Proposed in `src/script/` (portable, no host): a `vm.Task` that owns a
-Run, its code and its machine, and steps it:
+**Built** (`vm.Task`, `script.Engine.vm_sliced`): a slice that runs out
+is a pause, and a `yield` can end a slice and return its seconds. Every
+run in the tests is also run cut into slices of 1 to 29 steps, which
+must equal the uncut run in everything; a planted resume that skips an
+op fires it in 41 tests. The stop mode (a task's per-slice budget) is
+M2's. As first proposed, a `vm.Task` owns a Run's machine and steps it:
 
 ```zig
 pub const Slice = struct { steps: u64 };

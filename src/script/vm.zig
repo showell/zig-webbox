@@ -49,6 +49,13 @@ const Machine = struct {
     pc: u32 = 0,
     /// The top frame's `walk`, kept here for every op's enters.
     walk: u32 = 0,
+    /// **WHERE THE SLICE ENDS** (`Task.step`): at the first op boundary
+    /// with the run's steps at or past it; never, for a run in one piece.
+    slice_end: u64 = std.math.maxInt(u64),
+    /// Whether a `yield` ends the slice (a task's) or only collects (a
+    /// one-shot run's), and the seconds the last one asked for.
+    yield_returns: bool = false,
+    yielded: u64 = 0,
 
     fn deinit(m: *Machine) void {
         m.operands.deinit(m.r.machine);
@@ -175,21 +182,24 @@ const Machine = struct {
         try collect.collect(r, pos, &.{ r.stack.items, m.operands.items }, outs.items);
     }
 
-    fn run(m: *Machine) Error!void {
+    const Exit = enum { finished, paused, yielded };
+
+    fn run(m: *Machine) Error!Exit {
         while (true) {
-            m.ops() catch |e| switch (e) {
+            return m.ops() catch |e| switch (e) {
                 error.OutOfMemory => return e,
                 error.Stop => if (try m.caught()) continue else return e,
             };
-            return;
         }
     }
 
-    /// Runs ops until the top level ends, or an error.
-    fn ops(m: *Machine) Error!void {
+    /// Runs ops until the top level ends, the slice does, a yield that
+    /// ends it, or an error.
+    fn ops(m: *Machine) Error!Exit {
         const r = m.r;
         const code = m.code;
         while (true) {
+            if (r.steps >= m.slice_end) return .paused;
             const op = &code.ops[m.pc];
             m.pc += 1;
             if (op.enters != 0) try m.enters(op);
@@ -282,8 +292,17 @@ const Machine = struct {
                 .builtin => {
                     const args = m.operands.items[m.operands.items.len - op.b ..];
                     const v = try builtins.call(r, op.pos, @enumFromInt(op.a), args);
+                    // `yield`'s seconds, read before its arguments go.
+                    const seconds: u64 = if (op.b > 0 and args[0] == .int) @intCast(@max(args[0].int, 0)) else 0;
                     m.operands.shrinkRetainingCapacity(m.operands.items.len - op.b);
-                    if (op.a == @intFromEnum(ast.Builtin.yield)) try m.yieldHere(op.pos);
+                    if (op.a == @intFromEnum(ast.Builtin.yield)) {
+                        try m.yieldHere(op.pos);
+                        if (m.yield_returns) {
+                            m.yielded = seconds;
+                            m.push(v);
+                            return .yielded;
+                        }
+                    }
                     m.push(v);
                 },
                 .print => {
@@ -305,8 +324,8 @@ const Machine = struct {
                     if (r.depth >= r.budgets.call_depth) return r.budgetStop(op.pos, .call_depth);
                     try m.enterFrame(op, &code.functions[op.a], op.b, out);
                 },
-                .ret => if (!try m.leave(m.pop())) return,
-                .ret_nil => if (!try m.leave(.nil)) return,
+                .ret => if (!try m.leave(m.pop())) return .finished,
+                .ret_nil => if (!try m.leave(.nil)) return .finished,
                 .for_int => _ = try r.intOf(op.pos, m.top().*, switch (op.a) {
                     0 => "a `for`'s start",
                     1 => "a `for`'s end",
@@ -369,16 +388,74 @@ const Machine = struct {
     }
 };
 
-/// **THE SCRIPT'S TOP LEVEL, RUN** on `r` as the walker's `Run.main` runs
-/// it: the consts first, then the main frame at the stack's foot.
+/// **A RUN IN SLICES** (metal-vmm QUEUE 211; docs/SHALE-TASKS.md): the
+/// machine kept between them, so a slice ends at any op boundary and the
+/// next goes on from there. The VM never recurses, so nothing of the run is
+/// on the Zig stack between slices.
+pub const Task = struct {
+    m: Machine,
+
+    pub const Outcome = union(enum) {
+        finished,
+        /// The run stopped (`Run.stop` says where and why): for good.
+        stopped,
+        /// The slice's steps ran out, and the run goes on in the next.
+        paused,
+        /// A `yield`, with the seconds it asked for.
+        yielded: u64,
+    };
+
+    pub const Slice = struct {
+        /// The most steps the slice may take, checked between ops: an op
+        /// that starts inside it finishes.
+        steps: u64 = std.math.maxInt(u64),
+        /// Whether a `yield` ends the slice (a task) or only collects.
+        yield_returns: bool = false,
+    };
+
+    /// The script's top level, ready to run, as the walker's `Run.main`
+    /// starts it: the consts first, then the main frame at the stack's foot.
+    pub fn init(r: *Run, code: *const Code) Error!Task {
+        r.consts = r.alloc.alloc(?Value, r.program.const_names.len) catch return r.oom(r.program.main.pos);
+        @memset(r.consts, null);
+        r.stack.appendNTimes(r.machine, .nil, code.main.frame) catch return r.oom(r.program.main.pos);
+        r.base = 0;
+        var t: Task = .{ .m = .{ .r = r, .code = code, .pc = code.main.entry } };
+        errdefer t.deinit();
+        t.m.operands.ensureUnusedCapacity(r.machine, code.main.operands + 1) catch return r.oom(r.program.main.pos);
+        t.m.frames.append(r.machine, .{ .func = &code.main, .ret_pc = 0, .base = 0, .walk = 0, .sp = 0, .caller = "" }) catch return r.oom(r.program.main.pos);
+        return t;
+    }
+
+    pub fn deinit(t: *Task) void {
+        t.m.deinit();
+    }
+
+    /// One slice. An allocation the host refused is the arena's stop.
+    pub fn step(t: *Task, slice: Slice) Outcome {
+        const r = t.m.r;
+        t.m.slice_end = r.steps +| slice.steps;
+        t.m.yield_returns = slice.yield_returns;
+        const exit = t.m.run() catch |e| {
+            if (e == error.OutOfMemory) r.stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" };
+            return .stopped;
+        };
+        return switch (exit) {
+            .finished => .finished,
+            .paused => .paused,
+            .yielded => .{ .yielded = t.m.yielded },
+        };
+    }
+};
+
+/// **THE SCRIPT'S TOP LEVEL, RUN** in one piece, its yields only
+/// collecting.
 pub fn main(r: *Run, code: *const Code) Error!void {
-    r.consts = r.alloc.alloc(?Value, r.program.const_names.len) catch return r.oom(r.program.main.pos);
-    @memset(r.consts, null);
-    r.stack.appendNTimes(r.machine, .nil, code.main.frame) catch return r.oom(r.program.main.pos);
-    r.base = 0;
-    var m: Machine = .{ .r = r, .code = code, .pc = code.main.entry };
-    defer m.deinit();
-    m.operands.ensureUnusedCapacity(r.machine, code.main.operands + 1) catch return r.oom(r.program.main.pos);
-    m.frames.append(r.machine, .{ .func = &code.main, .ret_pc = 0, .base = 0, .walk = 0, .sp = 0, .caller = "" }) catch return r.oom(r.program.main.pos);
-    try m.run();
+    var t = try Task.init(r, code);
+    defer t.deinit();
+    switch (t.step(.{})) {
+        .finished => {},
+        .stopped => return if (r.stop != null) error.Stop else error.OutOfMemory,
+        .paused, .yielded => unreachable,
+    }
 }

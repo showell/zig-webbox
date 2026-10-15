@@ -88,7 +88,13 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
 /// What runs a script: **the VM**, which the route and the runner use, or
 /// the tree-walker, kept as its second implementation (the tests' gate
 /// holds the two to the same run).
-pub const Engine = enum { vm, walker };
+pub const Engine = union(enum) {
+    vm,
+    walker,
+    /// The VM in slices of this many steps, each a pause the next goes on
+    /// from (`vm.Task`): the same run, cut (the tests' gate checks it).
+    vm_sliced: u64,
+};
 
 pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
     var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .ast = .init(backing), .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
@@ -128,6 +134,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     const ran = switch (engine) {
         .walker => r.main(),
         .vm => if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| vm.main(&r, &code) else |e| e,
+        .vm_sliced => |n| if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| runSliced(&r, &code, n) else |e| e,
     };
     ran catch |e| switch (e) {
         error.Stop => {},
@@ -142,6 +149,17 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
     result.arena_bytes = budgeted.held;
     return result;
+}
+
+fn runSliced(r: *interp.Run, code: *const compile.Code, steps: u64) interp.Error!void {
+    var t = try vm.Task.init(r, code);
+    defer t.deinit();
+    while (true) switch (t.step(.{ .steps = steps })) {
+        .finished => return,
+        .stopped => return if (r.stop != null) error.Stop else error.OutOfMemory,
+        .paused => {},
+        .yielded => unreachable, // one-shot: a yield only collects
+    };
 }
 
 fn arenaStop(result: *Result) Result {

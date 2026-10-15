@@ -19,25 +19,47 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     // **THE COPY'S PATH IS AS LONG AS THE ROOT'S**: a store call's full
     // path is made in the arena, so a longer one would stop the walker on
     // the arena budget sooner. A sibling, its name's last byte changed.
-    const copy = a.dupe(u8, std.mem.trimEnd(u8, root, "/")) catch @panic("the gate's path");
-    for ("~_#@") |c| {
-        copy[copy.len - 1] = c;
-        if (d.access(io, copy, .{})) |_| continue else |_| break;
-    }
+    const copy = sibling(io, a, root, "~_#@");
+    const cut_copy = sibling(io, a, root, "=+%^");
     const has_root = if (d.openDir(io, root, .{})) |dir| blk: {
         dir.close(io);
         break :blk true;
     } else |_| false;
-    if (has_root) copyTree(io, a, root, copy) catch |e| std.debug.panic("the gate can't copy {s}: {t}", .{ root, e });
-    defer if (has_root) d.deleteTree(io, copy) catch {};
+    if (has_root) {
+        copyTree(io, a, root, copy) catch |e| std.debug.panic("the gate can't copy {s}: {t}", .{ root, e });
+        copyTree(io, a, root, cut_copy) catch |e| std.debug.panic("the gate can't copy {s}: {t}", .{ root, e });
+    }
+    defer if (has_root) {
+        d.deleteTree(io, copy) catch {};
+        d.deleteTree(io, cut_copy) catch {};
+    };
 
-    const walker_out = backing.alloc(u8, out.len) catch @panic("the gate's output");
-    defer backing.free(walker_out);
+    const walker_out = std.testing.allocator.alloc(u8, out.len) catch @panic("the gate's output");
+    defer std.testing.allocator.free(walker_out);
     // The walker's memory is its own, so a test that measures the backing
     // allocator measures the VM's run alone.
     var w = script.runOn(.walker, io, std.testing.allocator, if (has_root) copy else root, source, budgets, now, walker_out);
     defer w.deinit();
     const v = script.runOn(.vm, io, backing, root, source, budgets, now, out);
+
+    // **THE SAME RUN, CUT INTO SLICES** (QUEUE 211): a pause between any
+    // two ops changes nothing, so the VM in slices of 1 to 29 steps (by the
+    // source) is the uncut VM in every respect.
+    const cut_out = std.testing.allocator.alloc(u8, out.len) catch @panic("the gate's output");
+    defer std.testing.allocator.free(cut_out);
+    const slice = 1 + std.hash.Wyhash.hash(0, source) % 29;
+    var cut = script.runOn(.{ .vm_sliced = slice }, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out);
+    defer cut.deinit();
+    if (!std.mem.eql(u8, v.output, cut.output) or v.steps != cut.steps or v.work != cut.work or v.arena_bytes != cut.arena_bytes or !sameStop(v.stop, cut.stop) or v.effects.len != cut.effects.len or
+        (has_root and !(sameTree(io, a, root, cut_copy) catch false)))
+    {
+        std.debug.print("\n── THE GATE: the VM in slices of {d} differs from the VM in one piece ──\n{s}\n", .{ slice, source });
+        for ([_]struct { name: []const u8, r: *const script.Result }{ .{ .name = "whole", .r = &v }, .{ .name = "cut", .r = &cut } }) |x| {
+            std.debug.print("── {s}: {d} steps, {d} work, {d} arena, {d} effects\n", .{ x.name, x.r.steps, x.r.work, x.r.arena_bytes, x.r.effects.len });
+            if (x.r.stop) |st| std.debug.print("   stopped {d}:{d} ({s}) {t} {?t}: {s}\n", .{ st.line, st.column, st.function, st.class, st.budget, st.message });
+        }
+        @panic("the VM in slices differs from the VM whole (metal-vmm QUEUE 211's gate)");
+    }
 
     var why: ?[]const u8 = null;
     // **A SCRIPT THAT YIELDS** (QUEUE 211, M1): the VM copies what it keeps
@@ -74,6 +96,17 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
         @panic("the VM and the tree-walker differ (metal-vmm QUEUE 211's gate)");
     }
     return v;
+}
+
+/// A sibling of `root` with a name as long as its own: its last byte the
+/// first of `bytes` no sibling has.
+fn sibling(io: Io, a: std.mem.Allocator, root: []const u8, bytes: []const u8) []u8 {
+    const p = a.dupe(u8, std.mem.trimEnd(u8, root, "/")) catch @panic("the gate's path");
+    for (bytes) |c| {
+        p[p.len - 1] = c;
+        if (Io.Dir.cwd().access(io, p, .{})) |_| continue else |_| break;
+    }
+    return p;
 }
 
 fn isArenaShaped(s: ?script.Stop) bool {
