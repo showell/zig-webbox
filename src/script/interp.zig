@@ -311,6 +311,10 @@ pub const Run = struct {
             .string => |k| {
                 if (t.kind == .list) return self.fail(pos, .type, "a list's keys are integers: this one is a list, indexed by a string", .{});
                 if (v == .nil) return self.fail(pos, .type, "a map cannot hold nil (`m.k = nil` is an error: there is no remove)", .{});
+                // **A KEY IS HASHED AND COMPARED WHOLE**: a step a byte
+                // (209's cold review: a 900 KB key set a million times ran
+                // 11 s inside the site's budgets).
+                try self.charge(pos, k.len);
                 const g = t.map.getOrPut(self.alloc, k) catch return self.oom(pos);
                 g.value_ptr.* = v;
                 t.kind = .map;
@@ -333,6 +337,7 @@ pub const Run = struct {
             },
             .string => |k| {
                 if (t.kind == .list) return self.fail(pos, .type, "a list's keys are integers: this one is a list, indexed by a string", .{});
+                try self.charge(pos, k.len);
                 return t.map.get(k) orelse self.fail(pos, .index, "no key \"{s}\" in the map (`has_key` asks first)", .{k});
             },
             else => return self.fail(pos, .type, "a key must be an integer (a list) or a string (a map), not {s}", .{key.typeName()}),
@@ -413,6 +418,7 @@ pub const Run = struct {
         for (entries) |en| {
             const v = try self.eval(en.value);
             if (v == .nil) return self.fail(en.pos, .type, "a map cannot hold nil", .{});
+            try self.charge(pos, en.key.len);
             t.map.put(self.alloc, en.key, v) catch return self.oom(pos);
         }
         t.kind = .map;

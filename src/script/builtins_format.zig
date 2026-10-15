@@ -120,6 +120,7 @@ fn table(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             else => return run.fail(pos, .type, "`table`: row {d} must be a map, not {s}", .{ r + 1, row.typeName() }),
         };
         for (names, 0..) |n, c| {
+            try run.charge(pos, n.len);
             const v = m.map.get(n) orelse return run.fail(pos, .index, "`table`: row {d} has no \"{s}\"", .{ r + 1, n });
             if (v != .int) numeric[c] = false;
             const t = try cellText(run, pos, v, "table");

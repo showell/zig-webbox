@@ -89,15 +89,6 @@ fn sort(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .nil;
 }
 
-const KeyContext = struct {
-    key: []const u8,
-    inner: bi.SortContext = .{},
-
-    fn lessThan(ctx: *KeyContext, x: Value, y: Value) bool {
-        return ctx.inner.lessThan(x.table.map.get(ctx.key).?, y.table.map.get(ctx.key).?);
-    }
-};
-
 /// **`sort(rows, key)`**: a list of maps, in place, by each one's `key`,
 /// all integers or all strings. **STABLE**: rows with equal keys keep
 /// their order, so a sort by one key then another orders by both.
@@ -105,6 +96,8 @@ fn sortByKey(run: *Run, pos: ast.Pos, t: *value.Table, key_arg: Value) Error!Val
     const key = try bi.stringArg(run, pos, .sort, key_arg, "its key");
     const items = t.list.items;
     if (items.len == 0) return .nil;
+    // Each row's key is hashed twice: once checked here, once taken below.
+    try run.charge(pos, 2 * @as(u64, items.len) * key.len);
     var kind: ?std.meta.Tag(Value) = null;
     var bytes: u64 = 0;
     for (items, 0..) |item, i| {
@@ -120,7 +113,17 @@ fn sortByKey(run: *Run, pos: ast.Pos, t: *value.Table, key_arg: Value) Error!Val
         if (k == .string) bytes += v.string.len;
     }
     try run.charge(pos, bi.sortBound(items.len, bytes));
-    var ctx: KeyContext = .{ .key = key };
-    std.sort.block(Value, items, &ctx, KeyContext.lessThan);
+    // **EACH ROW'S KEY LOOKED UP ONCE** (209's cold review), not twice a
+    // comparison: the pairs are sorted, then the rows written back.
+    const Pair = struct { key: Value, row: Value };
+    const pairs = run.alloc.alloc(Pair, items.len) catch return run.oom(pos);
+    for (items, pairs) |item, *p| p.* = .{ .key = item.table.map.get(key).?, .row = item };
+    var ctx: bi.SortContext = .{};
+    std.sort.block(Pair, pairs, &ctx, struct {
+        fn lt(c: *bi.SortContext, x: Pair, y: Pair) bool {
+            return c.lessThan(x.key, y.key);
+        }
+    }.lt);
+    for (items, pairs) |*item, p| item.* = p.row;
     return .nil;
 }

@@ -162,6 +162,29 @@ fn callSteps(c: Case, n: usize) !u64 {
     return try f.steps(whole_src, n) - setup;
 }
 
+/// **THE OPERATORS, TOO** (209): what grows with a value's size, as the
+/// builtins are held to.
+const op_cases = [_]struct { name: []const u8, setup: []const u8, call: []const u8 }{
+    .{ .name = "a map's key, read", .setup = "local k = rep(\"k\", N) local m = {} m[k] = 1", .call = "local x = m[k]" },
+    .{ .name = "a map's key, set", .setup = "local k = rep(\"k\", N) local m = {}", .call = "m[k] = 1" },
+    .{ .name = "`..`", .setup = "local s = rep(\"a\", N)", .call = "local x = s .. s" },
+    .{ .name = "`<` on strings", .setup = "local s = rep(\"a\", N) local t = rep(\"a\", N)", .call = "local x = s < t" },
+    .{ .name = "`==` on strings", .setup = "local s = rep(\"a\", N) local t = rep(\"a\", N)", .call = "local x = s == t" },
+};
+
+test "every operator whose work grows with a value charges at least a step a byte more" {
+    const n = 500;
+    for (op_cases) |c| {
+        const case: Case = .{ .b = .now, .grows = .scales, .setup = c.setup, .call = c.call };
+        const small = try callSteps(case, n);
+        const large = try callSteps(case, 4 * n);
+        if (large < small + 3 * n) {
+            std.debug.print("{s}: {d} steps at {d}, {d} at {d}: less than a step a unit more\n", .{ c.name, small, n, large, 4 * n });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "every builtin whose work grows charges at least a step for each byte or item more (each constant one says why)" {
     const n = 500;
     for (cases) |c| switch (c.grows) {
