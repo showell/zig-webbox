@@ -26,7 +26,6 @@
 const std = @import("std");
 const webbox = @import("webbox");
 const script = webbox.script;
-const Io = std.Io;
 
 /// angry-gopher's `admin_script.zig`: the budgets a script runs under on
 /// the live site.
@@ -80,8 +79,8 @@ const Site = struct {
             std.fmt.allocPrint(a, "chat/channels/c{d}/sessions", .{c});
     }
 
-    fn init(self: *Site, io: Io, a: std.mem.Allocator) !void {
-        const d = Io.Dir.cwd();
+    fn init(self: *Site, io: std.Io, a: std.mem.Allocator) !void {
+        const d = std.Io.Dir.cwd();
         d.deleteTree(io, self.root) catch {};
         for (0..conversations) |c| {
             const p = try std.fmt.allocPrint(a, "{s}/{s}", .{ self.root, try convDir(a, c) });
@@ -93,8 +92,8 @@ const Site = struct {
     }
 
     /// Topics added until there are `n`.
-    fn grow(self: *Site, io: Io, gpa: std.mem.Allocator, n: usize) !void {
-        const d = Io.Dir.cwd();
+    fn grow(self: *Site, io: std.Io, gpa: std.mem.Allocator, n: usize) !void {
+        const d = std.Io.Dir.cwd();
         while (self.topics < n) : (self.topics += 1) {
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
@@ -137,7 +136,7 @@ const Site = struct {
 
 const Outcome = struct { fits: bool, why: []const u8 };
 
-fn tryScript(io: Io, gpa: std.mem.Allocator, root: []const u8, s: Script, out: []u8, why_buf: []u8) Outcome {
+fn tryScript(io: std.Io, gpa: std.mem.Allocator, root: []const u8, s: Script, out: []u8, why_buf: []u8) Outcome {
     var r = script.run(io, gpa, root, s.src, site_budgets, now, out);
     defer r.deinit();
     if (r.stop) |stop| {
@@ -159,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
     const out = try gpa.alloc(u8, 1024 * 1024);
     defer gpa.free(out);
     var buf: [4096]u8 = undefined;
-    var ow = Io.File.stdout().writer(io, &buf);
+    var ow = std.Io.File.stdout().writer(io, &buf);
     const w = &ow.interface;
     try w.print("| script | messages a topic | largest site that fits | its transcripts | past it |\n|---|---|---|---|---|\n", .{});
     try w.flush();
@@ -210,7 +209,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    Io.Dir.cwd().deleteTree(io, ".zig-cache/shale-scale") catch {};
+    std.Io.Dir.cwd().deleteTree(io, ".zig-cache/shale-scale") catch {};
 }
 
 fn human(buf: []u8, n: u64) ![]const u8 {
