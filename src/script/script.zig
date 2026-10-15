@@ -48,6 +48,8 @@ pub const Result = struct {
     arena_bytes: usize = 0,
     /// The yields that collected (`interp.Run.collections`).
     collections: u64 = 0,
+    /// Whether it called a builtin that changes the store (`interp.Run`).
+    tried_change: bool = false,
     /// **THE MACHINE'S MEMORY** (metal-vmm QUEUE 211; the box's review: under
     /// its own budget): the parse's tree, apart from the values so a `yield`
     /// that trades their arena for a fresh one leaves the code's literals
@@ -108,6 +110,9 @@ pub const Engine = union(enum) {
     /// The VM in slices of this many steps, each a pause the next goes on
     /// from (`vm.Task`): the same run, cut (the tests' gate checks it).
     vm_sliced: u64,
+    /// The same, as a `background` run, which only reads: for a script
+    /// that changes nothing, the same run again (the gate checks it).
+    vm_background: u64,
 };
 
 pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
@@ -115,9 +120,13 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     // what a one-shot run is, in slices or in one.
     switch (engine) {
         .walker => {},
-        .vm, .vm_sliced => {
-            const slice: u64 = if (engine == .vm_sliced) engine.vm_sliced else std.math.maxInt(u64);
-            const p = process.Process.start(io, backing, root, source, .atomic, budgets, now, out.len) catch {
+        .vm, .vm_sliced, .vm_background => {
+            const slice: u64 = switch (engine) {
+                .vm_sliced, .vm_background => |n| n,
+                else => std.math.maxInt(u64),
+            };
+            const mode: process.Mode = if (engine == .vm_background) .background else .atomic;
+            const p = process.Process.start(io, backing, root, source, mode, budgets, now, out.len) catch {
                 return .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the host could not hold the run" }, .output = out[0..0], .effects = &.{}, .steps = 0 };
             };
             while (p.step(.{ .steps = slice }) == .paused) {}
@@ -178,6 +187,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     result.effects = r.effects.items;
     result.steps = r.steps;
     result.collections = r.collections;
+    result.tried_change = r.tried_change;
     result.work = r.work;
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
     result.arena_bytes = budgeted.held;

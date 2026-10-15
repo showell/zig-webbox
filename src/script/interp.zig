@@ -103,6 +103,9 @@ pub const Run = struct {
     /// **A BACKGROUND RUN ONLY READS** (`process.Mode`): a change is an
     /// `argument` error naming `atomic`.
     read_only: bool = false,
+    /// Whether the run called a builtin that changes the store, refused or
+    /// not (the gate cuts a run that did not as a background run).
+    tried_change: bool = false,
     /// The copy's bookkeeping, kept from yield to yield (`collect.Books`).
     collecting: @import("collect.zig").Books = .{},
     /// The walk's recursion now (`Budgets.depth`).

@@ -44,11 +44,15 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
 
     // **THE SAME RUN, CUT INTO SLICES** (QUEUE 211): a pause between any
     // two ops changes nothing, so the VM in slices of 1 to 29 steps (by the
-    // source) is the uncut VM in every respect.
+    // source) is the uncut VM in every respect. **A RUN THAT CHANGED
+    // NOTHING IS CUT AS A BACKGROUND RUN** (QUEUE 211, step 5): a background
+    // run only reads, and for a script that tries no change, it is the
+    // atomic run, slice for slice.
     const cut_out = std.testing.allocator.alloc(u8, out.len) catch @panic("the gate's output");
     defer std.testing.allocator.free(cut_out);
     const slice = 1 + std.hash.Wyhash.hash(0, source) % 29;
-    var cut = script.runOn(.{ .vm_sliced = slice }, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out);
+    const engine: script.Engine = if (!v.tried_change) .{ .vm_background = slice } else .{ .vm_sliced = slice };
+    var cut = script.runOn(engine, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out);
     defer cut.deinit();
     if (!std.mem.eql(u8, v.output, cut.output) or v.steps != cut.steps or v.work != cut.work or v.arena_bytes != cut.arena_bytes or !sameStop(v.stop, cut.stop) or !sameEffects(v.effects, cut.effects) or
         (has_root and !(sameTree(io, a, root, cut_copy) catch false)))

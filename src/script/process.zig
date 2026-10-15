@@ -218,6 +218,7 @@ pub const Process = struct {
             .effects = p.run.effects.items,
             .steps = p.run.steps,
             .collections = p.run.collections,
+            .tried_change = p.run.tried_change,
             .work = p.run.work,
             .stack_bytes = p.parse_stack,
             .arena_bytes = p.values.held,
