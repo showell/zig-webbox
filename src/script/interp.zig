@@ -28,7 +28,7 @@ pub const Budgets = struct {
     change_bytes: u64 = 16 * 1024 * 1024,
     source_bytes: usize = default_source_bytes,
     nesting: u32 = 200,
-    /// **THE WALK'S DEPTH** (README, "The Zig stack"): expressions and
+    /// **THE WALK'S DEPTH** (docs/SHALE.md, "The Zig stack"): expressions and
     /// statements the walk is inside of at once, across every call. The
     /// call depth times the nesting is 12,800 levels, and at about 1 KB of
     /// Zig stack a level in Debug that is more than a thread has; this
@@ -82,7 +82,7 @@ pub const Run = struct {
     /// The top-level `const`s, each null until its line has run.
     consts: []?Value = &.{},
     /// The lowest frame address the walk reached: the Zig stack it took,
-    /// measured (README, "The Zig stack").
+    /// measured (docs/SHALE.md, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
 
     pub fn fail(self: *Run, pos: ast.Pos, class: diag.Class, comptime fmt: []const u8, args: anytype) Error {
@@ -333,7 +333,7 @@ pub const Run = struct {
 
     // ── expressions ───────────────────────────────────────────────────────
 
-    /// **THE RECURSION'S FRAME IS KEPT SMALL** (README, "The Zig stack"):
+    /// **THE RECURSION'S FRAME IS KEPT SMALL** (docs/SHALE.md, "The Zig stack"):
     /// every case that needs locals or a message's formatting is a function
     /// of its own, out of this frame, which every nested expression pays.
     pub fn eval(self: *Run, e: *const ast.Expr) Error!Value {

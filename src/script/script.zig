@@ -1,7 +1,7 @@
 //! **SHALE, A SMALL SCRIPT LANGUAGE FOR A SITE'S OWN DATA** (metal-vmm QUEUE
 //! 199): Lua's look, a smaller language's semantics, every effect through
 //! webbox's `store`, every run inside its budgets. The language, its
-//! builtins and its budgets are zig-webbox's README, "Scripts".
+//! builtins and its budgets are zig-webbox's docs/SHALE.md.
 //!
 //! Portable as every webbox file is: the host's `Io` from `host_io`, an
 //! allocator from the caller, and nothing that names the host
@@ -34,7 +34,7 @@ pub const Result = struct {
     /// stopped: a run has no rollback, so this says what it changed.
     effects: []const Effect,
     steps: u64,
-    /// The most Zig stack the parse or the walk took, in bytes (README,
+    /// The most Zig stack the parse or the walk took, in bytes (docs/SHALE.md,
     /// "The Zig stack").
     stack_bytes: usize = 0,
     /// The arena bytes the run held at its end, never past its budget.

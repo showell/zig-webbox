@@ -44,7 +44,7 @@ fn expectStopWith(src: []const u8, class: script.diag.Class, budget: ?script.dia
     }
 }
 
-test "run: values, arithmetic and strings as the README says" {
+test "run: values, arithmetic and strings as docs/SHALE.md says" {
     try expectOutput("print(1 + 2 * 3, 7 // 2, -7 // 2, 7 % 3, -7 % 3, 7 % -3)", "7\t3\t-4\t1\t2\t-2\n");
     try expectOutput("print(\"a\" .. \"b\" .. 1 .. 2)", "ab12\n");
     try expectOutput("print(nil, true, false, \"s\", -5)", "nil\ttrue\tfalse\ts\t-5\n");
@@ -209,7 +209,7 @@ test "run: the same source and now give the same output and the same steps, byte
     try testing.expectEqual(a.steps, b.steps);
 }
 
-test "run: the Zig stack the deepest parse and the deepest walk take, measured (README, \"The Zig stack\")" {
+test "run: the Zig stack the deepest parse and the deepest walk take, measured (docs/SHALE.md, \"The Zig stack\")" {
     // The deepest parse: the nesting budget's worth of parentheses (each
     // enters an expression and its operand: two of the budget's 200).
     var src: std.ArrayList(u8) = .empty;

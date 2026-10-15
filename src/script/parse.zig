@@ -54,7 +54,7 @@ const Frame = struct {
 
 /// A call to a name not yet resolved: the whole source is read first, so
 /// a script's own function (declared anywhere) takes the name before a
-/// builtin does (README, "Names").
+/// builtin does (docs/SHALE.md, "Names").
 const PendingCall = struct {
     call: *ast.Call,
     name: []const u8,
@@ -86,7 +86,7 @@ pub const Parser = struct {
     /// The top-level `const`s declared so far: what a function declared
     /// after them sees (QUEUE 206).
     consts: std.ArrayList([]const u8) = .empty,
-    /// The lowest frame address the parse reached (README, "The Zig stack").
+    /// The lowest frame address the parse reached (docs/SHALE.md, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
 
     fn failAt(self: *Parser, pos: ast.Pos, class: diag.Class, message: []const u8) Error {
@@ -168,7 +168,7 @@ pub const Parser = struct {
         return null;
     }
 
-    /// A local in this block. **A LOCAL MAY TAKE A BUILTIN'S NAME** (README,
+    /// A local in this block. **A LOCAL MAY TAKE A BUILTIN'S NAME** (docs/SHALE.md,
     /// "Names"): a value by that name is the local; a call by it is still
     /// the builtin, since only functions are called. So a builtin added to
     /// the language never breaks a script that already used its name.
@@ -418,7 +418,7 @@ pub const Parser = struct {
         const name = name_tok.text;
         if (self.tok.tag == .dot) return self.failAt(self.here(), .refused, "functions in tables are not in this language: functions are not values");
         // A function may take a builtin's name: the script's calls by that
-        // name are then its own (README, "Names").
+        // name are then its own (docs/SHALE.md, "Names").
         if (std.mem.eql(u8, name, reserved_call)) return self.failAt(pos, .name, "`attempt` is the language's own: name the function otherwise");
         if (lua_names.get(name) != null) return self.failf(pos, .name, "`{s}` is a name of Lua's library, kept to say what to write instead: name the function otherwise", .{name});
         if (self.function_names.contains(name)) return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
@@ -694,7 +694,7 @@ pub fn parseMeasured(alloc: std.mem.Allocator, source: []const u8, max_nesting: 
     const body = try p.block();
     if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{describe(p.tok)});
     // **A CALL'S NAME, RESOLVED**: the script's own function first, then
-    // the builtin, then Lua's refusals (README, "Names").
+    // the builtin, then Lua's refusals (docs/SHALE.md, "Names").
     for (p.pending.items) |pc| {
         if (p.function_names.get(pc.name)) |i| {
             pc.call.target = if (pc.attempt) .{ .attempt = i } else .{ .function = i };

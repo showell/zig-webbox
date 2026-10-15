@@ -260,3 +260,34 @@ test "example: a phrase found in the chat, each topic's first message with it, a
     try finished(&short);
     try testing.expect(std.mem.indexOf(u8, short.output, "stopped at the read budget, after ") != null);
 }
+
+/// **THE SITE'S BUDGETS** (angry-gopher `zig-server/src/admin_script.zig`,
+/// `budgets`, at v30): what the live route gives a signed script.
+const site_budgets: script.Budgets = .{
+    .steps = 2_000_000,
+    .arena_bytes = 8 * 1024 * 1024,
+    .reads = 500,
+    .read_bytes = 16 * 1024 * 1024,
+    .changes = 100,
+};
+
+test "every read-only script of the cookbook finishes on the site-shaped store inside the site's own budgets, changing nothing" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const read_only = [_]struct { name: []const u8, src: []const u8 }{
+        .{ .name = "topics", .src = topics },
+        .{ .name = "big_files", .src = big_files },
+        .{ .name = "where_the_bytes_are", .src = where_the_bytes_are },
+        .{ .name = "chat_topics", .src = chat_topics },
+        .{ .name = "stale_caches", .src = stale_caches },
+        .{ .name = "find_message", .src = find_message },
+    };
+    for (read_only) |ex| {
+        var r = script.run(f.threaded.io(), testing.allocator, f.root, ex.src, site_budgets, 1791936000, &out_buf);
+        defer r.deinit();
+        errdefer std.debug.print("{s}\n", .{ex.name});
+        try finished(&r);
+        try testing.expectEqual(@as(usize, 0), r.effects.len);
+    }
+}

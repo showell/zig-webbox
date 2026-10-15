@@ -1,6 +1,6 @@
 //! **THE STORE'S BUILTINS**: what a script reads of the data root and what
 //! it changes there, every path confined to the root, every read counted
-//! against the read budgets and every change logged (README, "The store").
+//! against the read budgets and every change logged (docs/SHALE.md, "The store").
 //! Only through webbox's `store`, so a script does the same on Linux and on
 //! metal.
 
@@ -38,7 +38,7 @@ pub const specs = [_]bi.Spec{
 
 // ── paths ────────────────────────────────────────────────────────────────
 
-/// **A SCRIPT'S PATH, CONFINED TO THE ROOT** (README, "Paths"): every part
+/// **A SCRIPT'S PATH, CONFINED TO THE ROOT** (docs/SHALE.md, "The store"): every part
 /// a name FAT holds (so `.`, `..` and empty parts are refused, and a
 /// leading `/`), joined to the root. `""` is the root, for the calls that
 /// only look (`allow_root`); every change needs at least one part.
@@ -79,7 +79,7 @@ pub fn modifiedSeconds(mtime_ns: i96) i64 {
 // ── reading ──────────────────────────────────────────────────────────────
 
 /// **`ls(p)`**: the names in a folder, sorted. The store lists a missing
-/// folder as empty; a script's `ls` of one is an error (README, "The
+/// folder as empty; a script's `ls` of one is an error (docs/SHALE.md, "The
 /// store").
 fn ls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .ls, args[0], true);
@@ -127,7 +127,7 @@ fn isDir(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// the end, fewer where the file ends; "" from its end or past it. Only
 /// the bytes asked for are read and counted: a part of a file a
 /// hundred megabytes long costs what the part does. The read budget's rest
-/// is the read's limit (README, "Budgets").
+/// is the read's limit (docs/SHALE.md, "The budgets").
 fn read(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .read, args[0], false);
     if (args.len > 1) {
@@ -392,7 +392,7 @@ fn storeChange(run: *Run, pos: ast.Pos, c: Change, args: []const Value) Error!Va
     // which is how a host knows to rebuild what it remembers.
     run.effects.ensureUnusedCapacity(a, 1) catch return run.oom(pos);
     // The store takes removing what is not there as done; a script's
-    // removal of a missing path is an error, logged (README, "The store").
+    // removal of a missing path is an error, logged (docs/SHALE.md, "The store").
     const missing: bool = switch (c) {
         .remove, .remove_tree => (store.statOrNull(io, a, p.full) catch null) == null,
         else => false,
