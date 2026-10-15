@@ -237,9 +237,18 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
     try deep.appendSlice(testing.allocator, " end print(f(63))");
     // 64 calls of 60 levels each is past the depth budget: the walk stops
     // there, at the deepest it may go, and that is what is measured.
-    var w = runWith(deep.items, .{});
+    // The walker's: it is the engine that recurses (the VM never does,
+    // and stops at the same place, by the gate).
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var w = script.runOn(.walker, threaded.io(), testing.allocator, ".zig-cache/no-root", deep.items, .{}, 1_700_000_000, &out_buf);
     defer w.deinit();
     try testing.expectEqual(script.diag.Budget.depth, w.stop.?.budget.?);
+    // And the VM, on the same script, takes next to no Zig stack.
+    var v = runWith(deep.items, .{});
+    defer v.deinit();
+    try testing.expectEqual(script.diag.Budget.depth, v.stop.?.budget.?);
+    try testing.expect(v.stack_bytes < 512 * 1024);
     if (p.stop) |s| std.debug.print("{s}\n", .{s.message});
     // Linux's main thread has 8 MiB, metal's 16 MiB: the worst of both,
     // in Debug (the largest frames), within half the smaller.
@@ -424,8 +433,10 @@ test "run: 208's cold review: attempt needs its commas; a long chain in a loop c
 }
 
 /// The machine's memory a shape of a few locals and no calls may take
-/// beside its arena (metal-vmm QUEUE 211).
-const machine_most = 4 * 1024;
+/// beside its arena (metal-vmm QUEUE 211): the frames, the operand stack
+/// and the compiled code's arena, whatever the loop's count (68 KB
+/// measured, most of it the code arena's first pages).
+const machine_most = 128 * 1024;
 
 test "run: the arena budget bounds the memory a run takes: the backing allocator's peak stays under it, for the review's shapes (209)" {
     // At 208, std's arena held 1.7x and 2.0x what was counted: 14.1 MB

@@ -559,7 +559,9 @@ steps at a step a byte to about 0.26M.
 - Debug frames are about a kilobyte, so the call depth times the nesting
   (64 × 200) would need about 20 MB.
 - So the walk is bounded by the **depth** budget instead, and its
-  recursive frames are kept small.
+  recursive frames are kept small. The VM (below) never recurses, but
+  keeps the depth budget exactly, so a script stops at the same place on
+  either.
 - Measured by `interp_test.zig`:
 
   | | Debug | ReleaseSafe |
@@ -569,13 +571,69 @@ steps at a step a byte to about 0.26M.
 
   The test holds both under 4 MB.
 
-**The run allocates only from its arena** and the caller's `out`, and it
-assumes no threads. `src/script/portable_test.zig` reads each of the
+**The run allocates its values only from its arena** and writes only
+the caller's `out`; the machine's own memory (the frames' slots, the VM's
+operands and frames, the compiled code) comes from the caller's
+allocator beside the arena, bounded by the call-depth and depth budgets
+and freed when the run ends. It assumes no threads. `src/script/portable_test.zig` reads each of the
 module's sources and refuses anything that names the host outside its
 tests: `std.posix`, `std.os`, `std.c`, `std.process`, `std.Thread`,
 `std.time`, `Io.Dir`, `Threaded`, `page_allocator`, `std.debug.print`, and
 `std.fs` other than `std.fs.path`. The test also checks that its own list
 holds every source of the module.
+
+### The VM
+
+**A script runs on a bytecode VM** (`src/script/compile.zig`,
+`src/script/vm.zig`; metal-vmm QUEUE 211). The route and the runner use
+it. The tree-walker it replaced (`interp.zig`) stays in the tests as the
+second implementation. The VM is a stack machine over the walker's own
+semantics: every operator, index, builtin and charge is the walker's
+code, called from an op. What is the VM's own is the control flow: the
+operand stack, the frames, the loops' hidden slots, and `attempt` as a
+frame marked with its answer. It never recurses, so a run's whole state
+is data, which a later `yield` can keep.
+
+**The same run, step for step.** The walker charges a step as it enters
+each node, and checks the depth budget there. The compiler keeps those
+enters in the walker's order, each with its node's place and its depth in
+its function, and hangs each run of them on the op whose work follows.
+The VM charges a run at once when it fits the budgets, and node by node
+when it doesn't, so a stop names the same node.
+
+**The gate.** In the tests every `script.run` runs twice: the VM on the
+store it was given, and the walker on a copy made before (same path
+length, same file times). The two must agree on the output, the
+effects, the stop (class, budget, line, column, function, message), the
+steps, the work counted, the arena held, and the store each leaves.
+Every interpreter, builtin, example, cookbook, error-corpus, property,
+snippet and fuzz test is therefore a parity test. A difference panics
+with both runs, and the test it happened in is the reproduction.
+Two planted defects fire it: `<` compiled as `<=` (six tests), and a
+lost step on reading a local (55).
+
+**The machine's memory is not the arena.** The frames, the operands and
+the code come from the caller's allocator, beside the budgeted arena, so
+the two engines take the same arena and stop on it at the same place.
+
+`zig build script-bench`, ReleaseSafe, the VM's time over the walker's:
+
+| case | walker | VM |
+|---|---|---|
+| a loop's iteration | 8.5 ns a step | 6.7 (0.79x) |
+| a while loop | 7.9 | 6.4 (0.81x) |
+| a list, built and indexed | 10.8 | 10.6 (0.98x) |
+| a map's fields | 9.1 | 7.1 (0.78x) |
+| calls | 13.2 | 10.6 (0.80x) |
+| a string built by `..` | 7.2 | 4.6 (0.64x) |
+| `count_in` over 8 MiB | 13.0 | 13.5 (1.04x) |
+| `read` 8 MiB whole | 9.8 | 11.4 (1.15x) |
+| a string built by `join` | 11.9 | 9.0 (0.76x) |
+
+Where the interpreter's own work dominates, the VM takes about four
+fifths of the walker's time. Where a builtin's work dominates (a scan, a
+read), the two are within this box's noise, since the work is the same
+code. Speed is not the VM's point; the state a yield can keep is.
 
 ## The runner
 

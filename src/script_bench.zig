@@ -5,6 +5,8 @@
 //!
 //!     zig build script-bench        (ReleaseSafe)
 //!
+//! Each on the tree-walker and on the VM (metal-vmm QUEUE 211).
+//!
 //! Outside the script module: it may name the host.
 
 const std = @import("std");
@@ -78,23 +80,30 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "bench-8m", .data = big });
     defer std.Io.Dir.cwd().deleteFile(io, "bench-8m") catch {};
     for (cases) |c| {
-        var runs: u64 = 0;
-        var steps: u64 = 0;
-        var arena: usize = 0;
-        const t0 = std.Io.Clock.awake.now(io).nanoseconds;
-        while (runs < 3 or std.Io.Clock.awake.now(io).nanoseconds - t0 < std.time.ns_per_s / 2) : (runs += 1) {
-            var r = script.run(io, gpa, ".", c.src, budgets, 0, out);
-            defer r.deinit();
-            if (r.stop) |s| {
-                try w.print("{s}: stopped {d}:{d}: {s}\n", .{ c.name, s.line, s.column, s.message });
-                break;
+        // **WALKER AGAINST VM** (metal-vmm QUEUE 211): the same case on
+        // each engine; their steps are the same by the tests' gate.
+        var ns_of: [2]f64 = undefined;
+        for ([_]script.Engine{ .walker, .vm }, 0..) |engine, k| {
+            var runs: u64 = 0;
+            var steps: u64 = 0;
+            var arena: usize = 0;
+            const t0 = std.Io.Clock.awake.now(io).nanoseconds;
+            while (runs < 3 or std.Io.Clock.awake.now(io).nanoseconds - t0 < std.time.ns_per_s / 2) : (runs += 1) {
+                var r = script.runOn(engine, io, gpa, ".", c.src, budgets, 0, out);
+                defer r.deinit();
+                if (r.stop) |s| {
+                    try w.print("{s}: stopped {d}:{d}: {s}\n", .{ c.name, s.line, s.column, s.message });
+                    break;
+                }
+                steps = r.steps;
+                arena = r.arena_bytes;
             }
-            steps = r.steps;
-            arena = r.arena_bytes;
+            const ns: f64 = @floatFromInt(std.Io.Clock.awake.now(io).nanoseconds - t0);
+            const per_run = ns / @as(f64, @floatFromInt(runs));
+            ns_of[k] = per_run;
+            try w.print("{s:<28} {s:<6} {d:>9.2} ms  {d:>10} steps  {d:>6.1} ns a step  {d:>8} KiB arena\n", .{ c.name, @tagName(engine), per_run / 1e6, steps, per_run / @as(f64, @floatFromInt(@max(steps, 1))), arena / 1024 });
         }
-        const ns: f64 = @floatFromInt(std.Io.Clock.awake.now(io).nanoseconds - t0);
-        const per_run = ns / @as(f64, @floatFromInt(runs));
-        try w.print("{s:<28} {d:>9.2} ms  {d:>10} steps  {d:>6.1} ns a step  {d:>8} KiB arena\n", .{ c.name, per_run / 1e6, steps, per_run / @as(f64, @floatFromInt(@max(steps, 1))), arena / 1024 });
+        try w.print("{s:<28} the VM in {d:.2}x the walker's time\n", .{ "", ns_of[1] / ns_of[0] });
         try w.flush();
     }
 }

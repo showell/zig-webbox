@@ -15,6 +15,8 @@ pub const value = @import("value.zig");
 pub const interp = @import("interp.zig");
 pub const builtins = @import("builtins.zig");
 pub const builtins_text = @import("builtins_text.zig");
+pub const compile = @import("compile.zig");
+pub const vm = @import("vm.zig");
 
 const std = @import("std");
 const Io = @import("host_io").Io;
@@ -70,6 +72,18 @@ pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writ
 /// `out`, and the output budget is at most `out.len`. It always returns a
 /// Result: a source however hostile ends finished or stopped.
 pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+    // **IN THE TESTS, THE GATE** (metal-vmm QUEUE 211): every run is the
+    // VM's, held to the tree-walker's on a copy of the store.
+    if (@import("builtin").is_test) return @import("gate_test.zig").run(io, backing, root, source, budgets, now, out);
+    return runOn(.vm, io, backing, root, source, budgets, now, out);
+}
+
+/// What runs a script: **the VM**, which the route and the runner use, or
+/// the tree-walker, kept as its second implementation (the tests' gate
+/// holds the two to the same run).
+pub const Engine = enum { vm, walker };
+
+pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
     var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
     const budgeted = &result.arena;
     const alloc = budgeted.allocator();
@@ -100,7 +114,14 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
         .out_cap = @min(out.len, budgets.output_bytes),
     };
     defer r.deinit();
-    r.main() catch |e| switch (e) {
+    // The code in the machine's memory, never the arena (`compile.compile`).
+    var code_arena = std.heap.ArenaAllocator.init(backing);
+    defer code_arena.deinit();
+    const ran = switch (engine) {
+        .walker => r.main(),
+        .vm => if (compile.compile(code_arena.allocator(), program, builtins.most_args)) |code| vm.main(&r, &code) else |e| e,
+    };
+    ran catch |e| switch (e) {
         error.Stop => {},
         // An allocation that failed outside a builtin's own check.
         error.OutOfMemory => r.stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" },
