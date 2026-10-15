@@ -438,10 +438,9 @@ pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: W
 /// removed. A stop part-way leaves only the temporary. Something already at
 /// `path`, in any case, is `error.PathAlreadyExists` as well.
 ///
-/// **LINUX ONLY FOR NOW**: the bare-metal host's io has a rename that
-/// replaces and none that does not, so a program that calls this does not
-/// build there. Nothing the bare-metal host serves calls it (site_secret's
-/// `create`, for a new site's first secret, is its one caller).
+/// **On both hosts**: the bare-metal host's io has `renamePreserve`, a
+/// rename that refuses a name already there. Its callers: site_secret's
+/// `create` (a new site's first secret), and Dog Park's admin key.
 pub fn createNew(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: WriteOptions) !void {
     const p = try forWrite(io, alloc, path);
     defer changed();
