@@ -52,10 +52,15 @@ and its effects log says what.
 
     zig build test
 
-## Status (2026-10-13)
+Others run these too: angry-gopher's `ops/check_zig` and zig-metal-unikernel's
+tier 3 both run `zig build test` here. And `src/body.zig` is copied byte for
+byte into the kernel's `src/pinned/webbox_body.zig`, whose `zig build pinned`
+fails when the two differ.
+
+## Status (2026-10-15)
 
 | | |
 |---|---|
-| Source | moved from angry-gopher's `zig-server/src`, with its history (24 files) |
-| Serves | lynrummy.com, as part of angry-gopher v29 on metal |
+| Source | first moved from angry-gopher's `zig-server/src`, with its history |
+| Serves | lynrummy.com, in zig-metal-unikernel's v30 (zig-webbox `92ea157`); master is ahead (Shale for v31) |
 | Tests | the library's own unit tests; the request-edge harness for its number parses still runs in angry-gopher |
