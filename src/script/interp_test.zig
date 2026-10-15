@@ -58,7 +58,7 @@ test "run: values, arithmetic and strings as docs/SHALE.md says" {
 }
 
 test "run: truthiness and short-circuits return an operand" {
-    try expectOutput("print(nil or \"d\", false or nil, 0 and \"t\", \"\" and 1, nil and never())  function never() print(\"evaluated\") end", "d\tnil\tt\t1\tnil\n");
+    try expectOutput("function never() print(\"evaluated\") end print(nil or \"d\", false or nil, 0 and \"t\", \"\" and 1, nil and never())", "d\tnil\tt\t1\tnil\n");
     try expectOutput("if 0 then print(\"0 is true\") end if \"\" then print(\"empty is true\") end", "0 is true\nempty is true\n");
     try expectOutput("print(not nil, not 0)", "true\tfalse\n");
 }
@@ -77,8 +77,9 @@ test "run: control flow, loops, break, and a top-level return" {
     try expectOutput("for i = 9223372036854775806, 9223372036854775807 do print(i) end", "9223372036854775806\n9223372036854775807\n");
 }
 
-test "run: functions, recursion, forward calls, and a frame of their own" {
-    try expectOutput("print(fact(10)) function fact(n) if n <= 1 then return 1 end return n * fact(n - 1) end", "3628800\n");
+test "run: functions, recursion, and a frame of their own; a function is called only after it is declared (209)" {
+    try expectOutput("function fact(n) if n <= 1 then return 1 end return n * fact(n - 1) end print(fact(10))", "3628800\n");
+    try expectStop("print(fact(10)) function fact(n) return n end", .name, null);
     try expectOutput("function f(a, b) local c = a .. b return c end print(f(\"x\", 1), f(\"y\", 2))", "x1\ty2\n");
     try expectOutput("function none() end print(none())", "nil\n");
     try expectOutput("function f(n) local x = n if n > 0 then f(n - 1) end return x end print(f(3))", "3\n");
@@ -262,8 +263,9 @@ test "run: a top-level const is seen by the functions declared after it, and is 
     try expectStop("if true then const Y = 1 end", .refused, null);
     try expectStop("const X", .syntax, null);
     try expectStop("const X = 1 const X = 2", .name, null);
-    // A const may take a builtin's name, as a local may (208(c)).
-    try expectOutput("const print = 1 print(print)", "1\n");
+    // A const may take a builtin's name, as a local may; then a call by
+    // that name in its scope is refused (209).
+    try expectStop("const print = 1 print(print)", .refused, null);
     // A function declared before the const does not see it.
     try expectStop("function f() return A end const A = 1 print(f())", .name, null);
     // Called before the const's line has run: an error, not nil.
@@ -333,17 +335,21 @@ test "run: `for x in l` visits the first #l items, each as it is when reached, a
 
 // ── 208(c): the language, small but complete ─────────────────────────────
 
-test "run: a script's names may take a builtin's: a local is the value, a call is the script's function first, then the builtin; so a new builtin never breaks an old script" {
-    try expectOutput("local lines = 3 print(lines, #lines(\"a\\nb\"))", "3\t2\n");
+test "run: a script's names may take a builtin's; a call by a name that is a value in scope is refused; a function is called only after it is declared, and a later one never takes over an earlier call (209)" {
+    // A local is the value; calling it is refused, not the builtin.
+    try expectOutput("local lines = 3 print(lines)", "3\n");
+    try expectStop("local lines = 3 print(#lines(\"a\\nb\"))", .refused, null);
+    try expectStop("local remove = 1 remove(\"d/s.txt\")", .refused, null);
+    try expectStop("function f(read) return read(\"x\") end", .refused, null);
+    // Out of the local's scope, the builtin again.
+    try expectOutput("do local lines = 3 end print(#lines(\"a\\nb\"))", "2\n");
+    // The script's function, declared above, takes the name.
     try expectOutput("function count(t) return 99 end print(count({1}))", "99\n");
-    // Declared after the call: still the script's.
-    try expectOutput("print(walk(\"x\")) function walk(p) return p .. \"!\" end", "x!\n");
+    // Declared below: the call above it is the builtin's, unchanged.
+    try expectOutput("print(count({1, 2})) function count(t) return 99 end print(count({1}))", "2\n99\n");
     // `table` a local: `table.insert` is a field, not Lua's library.
     try expectOutput("local table = {} table.insert = 1 print(table.insert)", "1\n");
-    // Lua's library names are the one exception: kept to say what to
-    // write instead.
     try expectStop("function pairs(m) return keys(m) end", .name, null);
-    try expectStop("local s = 1 s(2)", .refused, null);
     try expectStop("local x = table.insert", .refused, null);
 }
 

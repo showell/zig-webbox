@@ -49,11 +49,11 @@ test "parse: every construct of the language" {
         \\do local inner = "x" .. n end
         \\m.a = m["b c"] // 2 % 7
         \\l[#l + 1] = 4
-        \\print(fact(5), not true and nil or "s")
         \\function fact(k)
         \\  if k <= 1 then return 1 end
         \\  return k * fact(k - 1)
         \\end
+        \\print(fact(5), not true and nil or "s")
         \\return
     );
     try testing.expectEqual(@as(usize, 1), p.functions.len);
@@ -115,7 +115,11 @@ test "parse: what is refused, and the class it is refused as" {
         .{ .src = "if true then function g() end end", .class = .refused, .says = "top-level" },
         .{ .src = "function t.f() end", .class = .refused, .says = "tables" },
         .{ .src = "local x = print", .class = .refused, .says = "not a value" },
-        .{ .src = "local s = 1 s(2)", .class = .refused, .says = "is a local" },
+        .{ .src = "local s = 1 s(2)", .class = .refused, .says = "is a value here" },
+        .{ .src = "local remove = 1 remove(\"d/s.txt\")", .class = .refused, .says = "is a value here" },
+        .{ .src = "function f(read) return read(\"x\") end", .class = .refused, .says = "is a value here" },
+        .{ .src = "print(g()) function g() return 1 end", .class = .name, .says = "above this line" },
+        .{ .src = "function f() return g() end function g() return 1 end", .class = .name, .says = "above this line" },
         .{ .src = "print \"hi\"", .class = .refused, .says = "parentheses" },
         .{ .src = "local x <const> = 1", .class = .refused, .says = "attributes" },
         // tables

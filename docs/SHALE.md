@@ -91,7 +91,9 @@ value:
 - `return [e]`, the last statement of its block. At the top level it ends
   the script.
 - `function name(a, b) ... end`, at the top level only. A function may
-  recurse, and may be called before it is declared.
+  recurse, and **is called only after it is declared**, as in Lua: a call
+  above the declaration is an error (or, for a builtin's name, the
+  builtin).
 - `const NAME = e`, at the top level only. The name is never assigned
   again, and the functions declared after it see it. A table it names can
   still change. A function that reads a const before its line has run
@@ -145,12 +147,22 @@ From the loosest to the tightest:
 - Locals are block-scoped. `local x = x` reads the outer `x`.
 - A function sees only its own parameters and locals, and the `const`s
   declared above it, never the script's `local`s.
-- **A script's names may take a builtin's.** A local or const named after
-  a builtin is that local wherever it is a value. A call by that name is
-  the script's own function first, if it declares one anywhere, and the
-  builtin otherwise. So **a builtin added to the language never breaks a
-  script.** Two exceptions, for functions and calls only (a local may
-  take either name):
+- **A call is resolved where it stands,** in this order:
+  1. a name that is a value there (a local, a parameter, a `const`) is
+     **refused**: `local remove = 1  remove("d/s.txt")` is an error, not a
+     deletion;
+  2. the script's own function, declared **above** the call (or the one
+     being declared, which may call itself);
+  3. the builtin;
+  4. Lua's library names, refused with what to write instead.
+
+  A function declared later never takes over an earlier call. So **a
+  builtin added to the language never changes what a script does**: an
+  old script's call by that name was already its own function, above it,
+  or an error.
+- **A script's names may take a builtin's,** as a local, a parameter, a
+  const or a function. Two exceptions, for functions and calls only (a
+  local may take either name):
   - Lua's library names (`pairs`, `pcall`, `string`, ...): no function
     takes one, and a call by one is refused, kept to say what to write
     instead;
