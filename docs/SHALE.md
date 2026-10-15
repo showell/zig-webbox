@@ -382,7 +382,7 @@ that hits one stops cleanly, naming it, with its line and column.
 | budget | what it counts | default | the site's (angry-gopher v30) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
-| arena | every value of the run lives in one arena; any allocation that fails, a store call's included, counts here | 16 MiB | 8 MiB |
+| arena | every value of the run lives in one arena. Every allocation counts, and a free never counts back (an arena keeps a list's outgrown buffers), so the budget bounds the arena's true size. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
 | call depth | | 64 | 64 |
 | depth | expressions and statements the walk is inside of at once, across every call (see below) | 2,000 | 2,000 |
 | output | at most `out.len` | 256 KiB | 256 KiB |
