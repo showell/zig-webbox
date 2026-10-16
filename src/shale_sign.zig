@@ -4,10 +4,11 @@
 //! one line that sends it. The private key never leaves this program, and
 //! this program never prints it.
 //!
-//!     zig build shale-sign -- keygen
-//!         makes ~/.shale_signing_key (mode 600) and prints the line for the
+//!     zig build shale-sign -- keygen [target]
+//!         makes ~/.shale_signing_key (mode 600), or a target's own key,
+//!         ~/.shale_signing_key.<target>, and prints the line for the
 //!         server's shale.conf; refuses if the key is already there
-//!     zig build shale-sign -- pubkey
+//!     zig build shale-sign -- pubkey [target]
 //!         prints that line again
 //!     zig build shale-sign -- sign <file.shale> <target> [minutes]
 //!         writes <file.shale>.<sequence>.req, the signed body, good for
@@ -24,6 +25,11 @@
 //! than the clock's seconds: a lost file or a second machine still signs
 //! a number past every one before it, as long as no two are signed for one
 //! target in the same second from two places.
+//!
+//! **ONE KEY PER SITE, WHEN IT HAS ITS OWN**: signing for a target uses
+//! ~/.shale_signing_key.<target> when that file is there (Dog Park's, say,
+//! never lynrummy's), else ~/.shale_signing_key. A server holding another
+//! key's public half refuses the signature, so the wrong key never runs.
 //!
 //! The key file holds the 32-byte seed, as hex: a key file that anyone but
 //! its owner may read is refused, not used.
@@ -55,11 +61,14 @@ pub fn main(init: std.process.Init) !u8 {
     };
     const key_path = try std.fs.path.join(arena, &.{ home, key_name });
     const seq_path = try std.fs.path.join(arena, &.{ home, sequences_name });
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "keygen")) return keygen(io, key_path, out, err);
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "pubkey")) {
-        const kp = loadKey(io, arena, key_path, err) catch return 2;
-        try printConfig(kp.public_key, out);
-        return 0;
+    if (args.len == 2 or args.len == 3) {
+        const own = if (args.len == 3) (try targetKey(arena, home, args[2], err)) orelse return 2 else key_path;
+        if (std.mem.eql(u8, args[1], "keygen")) return keygen(io, own, out, err);
+        if (std.mem.eql(u8, args[1], "pubkey")) {
+            const kp = loadKey(io, arena, own, err) catch return 2;
+            try printConfig(kp.public_key, out);
+            return 0;
+        }
     }
     const signing: ?route.Mode = if (args.len >= 2) (if (std.mem.eql(u8, args[1], "sign")) route.Mode.atomic else if (std.mem.eql(u8, args[1], "background")) route.Mode.background else if (std.mem.eql(u8, args[1], "kill")) route.Mode.kill else null) else null;
     if (signing) |mode| {
@@ -76,11 +85,28 @@ pub fn main(init: std.process.Init) !u8 {
             }
             const file = if (mode == .kill) "" else args[2];
             const target = if (mode == .kill) args[2] else args[3];
-            return sign(io, arena, key_path, seq_path, file, target, minutes, mode, out, err);
+            const own = (try targetKey(arena, home, target, err)) orelse return 2;
+            const which = if (fileExists(io, own)) own else key_path;
+            return sign(io, arena, which, seq_path, file, target, minutes, mode, out, err);
         }
     }
-    try err.writeAll("usage: shale-sign keygen | pubkey | sign <file.shale> <target> [minutes] | background <file.shale> <target> [minutes] | kill <target> [minutes]\n");
+    try err.writeAll("usage: shale-sign keygen [target] | pubkey [target] | sign <file.shale> <target> [minutes] | background <file.shale> <target> [minutes] | kill <target> [minutes]\n");
     return 2;
+}
+
+/// A target's own key file, ~/.shale_signing_key.<target>; null (said) for
+/// a target that isn't a host name.
+fn targetKey(arena: std.mem.Allocator, home: []const u8, target: []const u8, err: *std.Io.Writer) !?[]const u8 {
+    if (!route.validTarget(target)) {
+        try err.print("shale-sign: {s} is not a host name (a-z 0-9 . -)\n", .{target});
+        return null;
+    }
+    return try std.fs.path.join(arena, &.{ home, try std.fmt.allocPrint(arena, "{s}.{s}", .{ key_name, target }) });
+}
+
+fn fileExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
 }
 
 fn keygen(io: std.Io, key_path: []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
@@ -166,7 +192,7 @@ fn sign(io: std.Io, arena: std.mem.Allocator, key_path: []const u8, seq_path: []
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = seq_path, .data = try withSequence(arena, seqs, target, sequence) });
     const req_path = try std.fmt.allocPrint(arena, "{s}.{d}.req", .{ if (mode == .kill) "kill" else file_path, sequence });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = req_path, .data = body });
-    try err.print("shale-sign: {s} for {s} ({t}), sequence {d}, good until {d} ({d} minutes): {s}\n", .{ if (mode == .kill) "a kill" else file_path, target, mode, sequence, expires, minutes, req_path });
+    try err.print("shale-sign: {s} for {s} ({t}), signed with {s}, sequence {d}, good until {d} ({d} minutes): {s}\n", .{ if (mode == .kill) "a kill" else file_path, target, mode, std.fs.path.basename(key_path), sequence, expires, minutes, req_path });
     try out.print("curl -sS --fail-with-body -H \"Authorization: Bearer $SHALE_ADMIN_KEY\" --data-binary @{s} https://{s}/admin/script\n", .{ req_path, target });
     return 0;
 }
