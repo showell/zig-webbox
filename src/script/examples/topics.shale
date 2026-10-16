@@ -1,14 +1,16 @@
 -- Every topic with its message count: the direct conversations
 -- (chat/<a>_<b>/sessions/<sid>.md) and the channels
 -- (chat/channels/<name>/sessions/<sid>.md). A message is a block that
--- starts with a line "MSG_<sid>_<n>": counted by count_all, a part at a
--- time, so no transcript is held.
+-- starts with a line "MSG_<sid>_<n>", and no message's text holds "MSG_"
+-- (as find_message.shale reads them): counted without holding a
+-- transcript, in one call when it is within the call-bytes cap (1 MiB),
+-- and by the prelude's count_all, a part at a time, when it is bigger.
 
--- The messages in a transcript: each "MSG_" at a line's start.
-function messages(path)
-  local n = count_all(path, "\nMSG_")
-  if starts_with(read(path, 0, 4), "MSG_") then n = n + 1 end
-  return n
+const CAP = 1048576
+
+function messages(e)
+  if e.size <= CAP then return count_in(e.path, "MSG_") end
+  return count_all(e.path, "MSG_")
 end
 
 local total = 0
@@ -18,7 +20,7 @@ for e in walk_all("chat", {like = "*.md", kind = "file"}) do
   if parts[#parts - 1] == "sessions" then
     local label = parts[2]
     if parts[2] == "channels" then label = "#" .. parts[3] end
-    print(label, sid, messages(e.path))
+    print(label, sid, messages(e))
     total = total + 1
   end
 end

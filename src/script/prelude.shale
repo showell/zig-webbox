@@ -37,11 +37,16 @@ function count_all(path, s)
 end
 
 -- The 0-based offset of the first `s` at or after `at`, or nil: the file a
--- part at a time from `at`, as `find_in`. A stat, then a scan a part.
+-- part at a time from `at`, as `find_in`. The first part is scanned at
+-- once (a part past the file's end is cut at it); only when it finds
+-- nothing is the file stat'ed, to see whether there is more.
 function find_next(path, s, at)
+  local f = find_in(path, s, at, 1048576)
+  if f ~= nil then return f end
   local size = stat(path).size
+  at = at + 1048576
   while at < size do
-    local f = find_in(path, s, at, min(1048576, size - at))
+    f = find_in(path, s, at, min(1048576, size - at))
     if f ~= nil then return f end
     at = at + 1048576
   end
