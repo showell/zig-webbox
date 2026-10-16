@@ -36,3 +36,20 @@ test "cookbook: path joins its parts with / and \"\" is the root; basename is th
     try f.expectOutput("print(strip_suffix(\"plans.md\", \".md\"), strip_suffix(\"plans.count\", \".md\"), strip_suffix(\".md\", \".md\"), strip_suffix(\"a\", \"\"))", "plans\tplans.count\t\ta\n");
     try f.expectOutput("print(strip_suffix(basename(\"chat/s/plans.md\"), \".md\"))", "plans\n");
 }
+
+test "cookbook: read_or reads a file, or answers the default when nothing is there, for one store read; any other failure is still an error" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(read_or(\"top.txt\", \"none\"), read_or(\"missing\", \"none\"), read_or(\"chat/missing.count\", nil))", "top\tnone\tnil\n");
+    // One read either way, where exists then read was two.
+    var one = f.run("local a = read_or(\"top.txt\", \"\") local b = read_or(\"gone\", \"\") print(10 - budget().reads)", .{ .reads = 10 });
+    defer one.deinit();
+    try testing.expectEqualStrings("2\n", one.output);
+    // A folder is not a missing file: the store's error.
+    try f.expectStop("read_or(\"chat\", \"\")", .store);
+    // Its bytes are a read's: the read budget holds.
+    var over = f.run("print(read_or(\"top.txt\", \"\"))", .{ .read_bytes = 2 });
+    defer over.deinit();
+    try testing.expectEqual(script.diag.Class.budget, over.stop.?.class);
+}

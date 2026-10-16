@@ -44,6 +44,7 @@ const cases = [_]Case{
     .{ .b = .exists, .grows = .constant, .why = "one lookup, its path's bytes charged" },
     .{ .b = .is_dir, .grows = .constant, .why = "one stat, its path's bytes charged" },
     .{ .b = .read, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = read(\"big\")" },
+    .{ .b = .read_or, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = read_or(\"big\", \"\")" },
     .{ .b = .count_lines, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = count_lines(\"big\")" },
     .{ .b = .count_in, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = count_in(\"big\", \"ab\")" },
     .{ .b = .find_in, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = find_in(\"big\", \"zz\")" },

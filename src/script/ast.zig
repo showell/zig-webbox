@@ -11,6 +11,7 @@ pub const Builtin = enum {
     exists,
     is_dir,
     read,
+    read_or,
     count_lines,
     count_in,
     find_in,
