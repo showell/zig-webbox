@@ -7,13 +7,13 @@ const Io = std.Io;
 
 var out_buf: [64 * 1024]u8 = undefined;
 
-const Fixture = struct {
+pub const Fixture = struct {
     tmp: std.testing.TmpDir,
     threaded: std.Io.Threaded,
     root: []const u8,
     base: []const u8,
 
-    fn init(self: *Fixture) !void {
+    pub fn init(self: *Fixture) !void {
         self.tmp = testing.tmpDir(.{});
         self.threaded = std.Io.Threaded.init(testing.allocator, .{});
         self.base = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &self.tmp.sub_path });
@@ -29,18 +29,18 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(io, .{ .sub_path = "data/top.txt", .data = "top" });
     }
 
-    fn deinit(self: *Fixture) void {
+    pub fn deinit(self: *Fixture) void {
         testing.allocator.free(self.root);
         testing.allocator.free(self.base);
         self.threaded.deinit();
         self.tmp.cleanup();
     }
 
-    fn run(self: *Fixture, src: []const u8, budgets: script.Budgets) script.Result {
+    pub fn run(self: *Fixture, src: []const u8, budgets: script.Budgets) script.Result {
         return script.run(self.threaded.io(), testing.allocator, self.root, src, budgets, 0, &out_buf);
     }
 
-    fn expectOutput(self: *Fixture, src: []const u8, want: []const u8) !void {
+    pub fn expectOutput(self: *Fixture, src: []const u8, want: []const u8) !void {
         var r = self.run(src, .{});
         defer r.deinit();
         if (r.stop) |s| {
@@ -50,7 +50,7 @@ const Fixture = struct {
         try testing.expectEqualStrings(want, r.output);
     }
 
-    fn expectStop(self: *Fixture, src: []const u8, class: script.diag.Class) !void {
+    pub fn expectStop(self: *Fixture, src: []const u8, class: script.diag.Class) !void {
         var r = self.run(src, .{});
         defer r.deinit();
         const s = r.stop orelse {
@@ -63,7 +63,7 @@ const Fixture = struct {
         }
     }
 
-    fn file(self: *Fixture, sub: []const u8) ![]u8 {
+    pub fn file(self: *Fixture, sub: []const u8) ![]u8 {
         return self.tmp.dir.readFileAlloc(self.threaded.io(), sub, testing.allocator, .unlimited);
     }
 };

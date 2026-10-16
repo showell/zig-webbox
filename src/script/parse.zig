@@ -82,6 +82,10 @@ pub const Parser = struct {
     in_function: bool = false,
     functions: std.ArrayList(ast.Function) = .empty,
     function_names: std.StringHashMapUnmanaged(u32) = .empty,
+    /// How many of `functions` are the prelude's (prelude.shale), parsed
+    /// before the script: while it is parsed, all of them so far.
+    prelude_functions: u32 = 0,
+    in_prelude: bool = false,
     /// The top-level `const`s declared so far: what a function declared
     /// after them sees (QUEUE 206).
     consts: std.ArrayList([]const u8) = .empty,
@@ -436,8 +440,16 @@ pub const Parser = struct {
         // name are then its own (docs/SHALE.md, "Names").
         if (std.mem.eql(u8, name, reserved_call)) return self.failAt(pos, .name, "`attempt` is the language's own: name the function otherwise");
         if (lua_names.get(name) != null) return self.failf(pos, .name, "`{s}` is a name of Lua's library, kept to say what to write instead: name the function otherwise", .{name});
-        if (self.function_names.contains(name)) return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
+        // **A SCRIPT'S OWN FUNCTION OF A PRELUDE NAME IS ITS OWN** (QUEUE
+        // 220): from its line on, its calls by that name are to it, so a
+        // function added to the prelude never breaks a script that already
+        // declared one; declared twice by the script, it is refused.
+        if (self.function_names.get(name)) |i| if (self.in_prelude or i >= self.prelude_functions)
+            return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
         const index: u32 = @intCast(self.functions.items.len);
+        // An error in a prelude function names it so: its line is the
+        // prelude's, never the script's.
+        const shown = if (self.in_prelude) try std.fmt.allocPrint(self.alloc, "the prelude's {s}", .{name}) else name;
         try self.function_names.put(self.scratch, name, index);
         // Reserved now, so it may call itself.
         try self.functions.append(self.scratch, undefined);
@@ -465,10 +477,10 @@ pub const Parser = struct {
         }
         _ = try self.expect(.rparen, "`)` after the parameters");
         // Known before the body, so the body may call it.
-        self.functions.items[index] = .{ .name = name, .pos = pos, .params = params, .frame = 0, .body = &.{} };
+        self.functions.items[index] = .{ .name = shown, .pos = pos, .params = params, .frame = 0, .body = &.{} };
         const body = try self.block();
         _ = try self.expect(.kw_end, "`end` to close the function");
-        self.functions.items[index] = .{ .name = name, .pos = pos, .params = params, .frame = self.frame.slots, .body = body };
+        self.functions.items[index] = .{ .name = shown, .pos = pos, .params = params, .frame = self.frame.slots, .body = body };
     }
 
     // ── expressions ──────────────────────────────────────────────────────
@@ -718,6 +730,9 @@ pub const Parser = struct {
     }
 };
 
+/// **THE PRELUDE**: functions every script has, in Shale (prelude.shale).
+pub const prelude = @embedFile("prelude.shale");
+
 /// The whole source, parsed. On `error.Parse`, `stop` says where and why.
 pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop) Error!ast.Program {
     return parseMeasured(alloc, alloc, source, max_nesting, stop, null);
@@ -728,7 +743,7 @@ pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, sto
 /// the tree, from `alloc`, exactly its size.
 pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize) Error!ast.Program {
     const top = @frameAddress();
-    var p: Parser = .{ .alloc = alloc, .scratch = scratch, .lexer = lex.Lexer.init(alloc, source), .tok = undefined, .max_nesting = max_nesting };
+    var p: Parser = .{ .alloc = alloc, .scratch = scratch, .lexer = lex.Lexer.init(alloc, prelude), .tok = undefined, .max_nesting = max_nesting };
     defer if (stack_used) |u| {
         u.* = top -| p.stack_low;
     };
@@ -743,9 +758,20 @@ pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, sourc
         p.consts.deinit(scratch);
     }
     errdefer stop.* = p.stop;
-    try p.advance();
     p.frame.depth = 0;
+    // **THE PRELUDE FIRST** (prelude.shale, QUEUE 220): its functions, each
+    // declared as a script's would be, then the script, which may call them.
+    p.in_prelude = true;
+    try p.advance();
+    const declared = try p.block();
+    // A function's declaration is an empty `do` where it stood.
+    for (declared) |d| if (d.kind != .do or d.kind.do.len != 0) @panic("prelude.shale holds only functions");
+    if (p.tok.tag != .eof) @panic("prelude.shale holds only functions");
+    p.in_prelude = false;
+    p.prelude_functions = @intCast(p.functions.items.len);
+    p.lexer = lex.Lexer.init(alloc, source);
+    try p.advance();
     const body = try p.block();
     if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{p.describe(p.tok)});
-    return .{ .functions = try alloc.dupe(ast.Function, p.functions.items), .const_names = try alloc.dupe([]const u8, p.consts.items), .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
+    return .{ .functions = try alloc.dupe(ast.Function, p.functions.items), .prelude_functions = p.prelude_functions, .const_names = try alloc.dupe([]const u8, p.consts.items), .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
 }

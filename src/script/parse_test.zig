@@ -56,9 +56,9 @@ test "parse: every construct of the language" {
         \\print(fact(5), not true and nil or "s")
         \\return
     );
-    try testing.expectEqual(@as(usize, 1), p.functions.len);
-    try testing.expectEqualStrings("fact", p.functions[0].name);
-    try testing.expectEqual(@as(u16, 1), p.functions[0].params);
+    try testing.expectEqual(@as(usize, p.prelude_functions + 1), p.functions.len);
+    try testing.expectEqualStrings("fact", p.functions[p.prelude_functions].name);
+    try testing.expectEqual(@as(u16, 1), p.functions[p.prelude_functions].params);
     try testing.expect(p.main.frame >= 7);
 }
 

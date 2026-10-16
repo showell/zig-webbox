@@ -85,12 +85,15 @@ pub fn build(b: *std.Build) void {
     // sources in the tests, as many as asked for with -Dscript-fuzz.
     const script_options = b.addOptions();
     script_options.addOption(u32, "fuzz_runs", b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400);
+    // **ONLY THE TESTS NAMED** (-Dtest-filter=<text>): a change's own tests
+    // in seconds, before the whole suite.
+    const test_filter = b.option([]const u8, "test-filter", "run only the tests whose names contain this");
     for ([_][]const u8{ "src/store.zig", "src/counter.zig", "src/bus.zig", "src/mem_meter.zig", "src/host_facts.zig", "src/bind.zig", "src/webbox.zig", "src/webbox_linux.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,
             .optimize = optimize,
-        }) });
+        }), .filters = if (test_filter) |t| b.dupeStrings(&.{t}) else &.{} });
         // A file of the Linux host reaches the portable half as the module;
         // a file of the library, by path.
         unit.root_module.addImport("webbox", webbox);
