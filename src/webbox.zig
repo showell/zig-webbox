@@ -49,6 +49,9 @@ pub const script_route = @import("script_route.zig");
 pub const host_facts = @import("host_facts.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
 pub const log_view = @import("log_view.zig");
+/// `GET /admin/log`: that log as a page, its header and its filters, behind
+/// an application's admin gate (metal-vmm QUEUE 189.3, 221).
+pub const admin_log = @import("admin_log.zig");
 /// The requests since boot, counted where every host's pass.
 pub const traffic = @import("traffic.zig");
 /// Every file an application keeps, through one seam, under FAT's rules on
@@ -79,6 +82,7 @@ test {
     _ = mem_meter;
     _ = host_facts;
     _ = log_view;
+    _ = admin_log;
     _ = traffic;
     _ = store;
     _ = counter;
