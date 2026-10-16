@@ -88,6 +88,7 @@ const cases = [_]Case{
     .{ .b = .has_key, .grows = .scales, .setup = "local m = {a = 1} local k = rep(\"k\", N)", .call = "local x = has_key(m, k)" },
     .{ .b = .count, .grows = .constant, .why = "a length the table keeps" },
     .{ .b = .reverse, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, i) end", .call = "reverse(l)" },
+    .{ .b = .take, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, i) end", .call = "local x = take(l, N)" },
     // the host
     .{ .b = .now, .grows = .constant, .why = "an integer the host handed in" },
     .{ .b = .budget, .grows = .constant, .why = "six counters" },

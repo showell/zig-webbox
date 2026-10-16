@@ -55,6 +55,7 @@ pub const Builtin = enum {
     has_key,
     count,
     reverse,
+    take,
     // the host
     now,
     budget,
