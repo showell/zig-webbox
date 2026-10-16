@@ -17,8 +17,8 @@
 //! once, and a kept stream is served on its own task (bus.zig). **But only
 //! one handler runs at a time** (`turn`): the route table runs as it does on
 //! the bare-metal host's single loop, so the two hosts are one machine
-//! (Steve, 2026-10-07). Each connection serves ONE request then closes
-//! (keep-alive off): see handleConn.
+//! (Steve, 2026-10-07). A connection serves requests one after another
+//! until one ends it (keep-alive, metal-vmm QUEUE 213): see handleConn.
 
 const std = @import("std");
 const Io = @import("host_io").Io;
@@ -134,6 +134,13 @@ pub fn Server(comptime S: type) type {
             };
             var listener = try addr.listen(io, .{ .reuse_address = true });
             defer listener.deinit(io);
+            // **BETWEEN HANDLERS, A SLICE AT A TIME** (metal-vmm QUEUE 211):
+            // the site's background work on a thread of its own.
+            if (@hasDecl(S, "between")) {
+                _ = std.Thread.spawn(.{}, betweenLoop, .{ io, &never_stop }) catch |e| {
+                    std.debug.print("{s}: no thread for work between requests ({s}); a background run is never stepped\n", .{ options.name, @errorName(e) });
+                };
+            }
 
             std.debug.print("{s}: http://localhost:{d}, bound to {f}  {s}\n", .{ options.name, port, addr, options.routes_hint });
 
@@ -153,6 +160,25 @@ pub fn Server(comptime S: type) type {
                     std.debug.print("spawn failed ({s}); answered 503\n", .{@errorName(e)});
                     busy(io, stream);
                 };
+            }
+        }
+
+        /// **ONE SLICE A TURN, AND A WAITING HANDLER FIRST** (metal-vmm QUEUE
+        /// 211, Steve's model: "on Linux, one runner thread takes the turn
+        /// for each slice"): the site's `between` under the turn, then the
+        /// turn let go, and taken again only once no handler waits for it,
+        /// so a request arriving mid-run waits at most one slice. With
+        /// nothing to do, it sleeps `between_idle_ms`. A mutex makes no
+        /// promise of fairness, so the waiting handlers are counted.
+        fn betweenLoop(io: Io, stop: *const std.atomic.Value(bool)) void {
+            while (!stop.load(.acquire)) {
+                turn.lockUncancelable(io);
+                const more = S.between(io, nowUnix(io));
+                turn.unlock(io);
+                // A handler waiting goes first: checked every millisecond,
+                // not spun on (the box's cold review: a core burned).
+                while (turn_waiting.load(.acquire) > 0 and !stop.load(.acquire)) sleepMs(io, 1) catch return;
+                if (!more) sleepMs(io, between_idle_ms) catch return;
             }
         }
 
@@ -224,10 +250,17 @@ pub fn Server(comptime S: type) type {
             };
         }
 
-        /// handleConn serves exactly ONE request, then closes the connection
-        /// (`connection: close`). Keep-alive is OFF: the bare-metal host
-        /// serves one request per connection too, so the two hosts answer
-        /// alike.
+        /// **A CONNECTION SERVES REQUESTS UNTIL ONE ENDS IT** (metal-vmm
+        /// QUEUE 213; it served one and closed, so a page reporting four
+        /// times a second opened four connections a second, and a home
+        /// router's ~1,000 source ports wrapped every few minutes). Each
+        /// request has its own arena, body memory, slot and charge, all
+        /// given back when it is answered. The connection closes when the
+        /// client or a handler says close, a body was left unread, a
+        /// stream was kept, it has served `requests_most`, the kept-open
+        /// connections are at `kept_open_most`, or no next head comes
+        /// within `idle_ms`. Pipelined requests are answered in order. The
+        /// bare-metal host still serves one a connection.
         fn handleConn(io: std.Io, alloc: std.mem.Allocator, hub: *bus.Hub, stream: net.Stream) !void {
             defer stream.close(io);
 
@@ -237,37 +270,69 @@ pub fn Server(comptime S: type) type {
             // The socket's own writer, unbuffered, under the one every byte
             // goes through: it syncs the writes before it (linux_durable.zig).
             var socket_w = stream.writer(io, &.{});
-            var sw: linux_durable.Writer = .init(&socket_w.interface, &durable, &write_buf);
-            var server = std.http.Server.init(&sr.interface, &sw.interface);
+            // Every write to the socket under a deadline (`Sent`).
+            var sent: Sent = .{ .to = &socket_w.interface, .stream = stream, .io = io };
+            var sw: linux_durable.Writer = .init(&sent.interface, &durable, &write_buf);
+            // An answer held in memory while its handler has the turn (`Hold`).
+            var hold: Hold = .{ .to = &sw.interface, .gpa = alloc };
+            defer hold.list.deinit(alloc);
+            // And above it, what each answer's head says of the connection.
+            var said: HeadWatch = .{ .to = &hold.interface };
+            var server = std.http.Server.init(&sr.interface, &said.interface);
+            var conn: Connection = .{};
+            defer conn.letGo();
+            // A write shut at its deadline ends the connection, counted
+            // (`writes_shut`), not logged as a connection's error.
+            while (serveOne(io, alloc, hub, stream, &server, &sr.interface, &sw, &said, &conn, &hold, &sent) catch |e| {
+                if (sent.shut) return;
+                return e;
+            }) {}
+        }
 
+        /// One request on the connection, answered: whether the connection
+        /// serves another.
+        fn serveOne(io: std.Io, alloc: std.mem.Allocator, hub: *bus.Hub, stream: net.Stream, server: *std.http.Server, socket_r: *std.Io.Reader, sw: *linux_durable.Writer, said: *HeadWatch, conn: *Connection, hold: *Hold, sent: *Sent) !bool {
+            // The socket again, wherever the last request's body was read from.
+            server.reader.in = socket_r;
             var arena = std.heap.ArenaAllocator.init(alloc);
             defer arena.deinit();
 
             // **THE HEAD HAS A DEADLINE TOO** (metal-vmm QUEUE 184): a client
             // that connected and sent nothing, or a head a byte at a time,
             // held its task for ever (the body's deadline came only after).
-            // The read races `watch`, as a body's does.
+            // The read races `watch`, as a body's does. **A HEAD AFTER THE
+            // FIRST HAS THE IDLE TIMEOUT** (213): from the last answer, the
+            // whole of the next head.
+            const first = conn.served == 0;
             var head_progress: Progress = .{ .stream = stream, .io = io };
-            var head_read: HeadRead = .{ .server = &server };
+            var head_read: HeadRead = .{ .server = server };
             {
                 var buffer: [2]Raced = undefined;
                 var race: Io.Select(Raced) = .init(io, &buffer);
+                const deadline = if (first) head_for_test_ms orelse head_ms else idle_for_test_ms orelse idle_ms;
                 if (race.concurrent(.read, HeadRead.run, .{&head_read})) |_| {
-                    if (race.concurrent(.watch, watch, .{ io, &head_progress, head_for_test_ms orelse head_ms, null })) |_| {
+                    if (race.concurrent(.watch, watch, .{ io, &head_progress, deadline, null })) |_| {
                         _ = race.await() catch {};
                     } else |_| head_progress.end(.deadline);
                     race.cancelDiscard();
                 } else |_| head_read.run(); // no task for it: read here, as before
             }
             if (head_progress.ended_by.load(.acquire) == .deadline) {
+                // An idle connection, not a byte of a next head: closed, as
+                // a kept-open connection is, with no answer.
+                if (!first and socket_r.bufferedLen() == 0) {
+                    _ = idle_closed.fetchAdd(1, .acq_rel);
+                    return false;
+                }
                 edge.count(.head_too_slow);
                 sw.interface.writeAll("HTTP/1.1 408 Request Timeout\r\n" ++
                     "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
                 sw.interface.flush() catch {};
-                return;
+                return false;
             }
             var req = head_read.got.? catch |e| switch (e) {
-                error.HttpConnectionClosing => return,
+                // The client gone, between requests or partway through a head.
+                error.HttpConnectionClosing, error.HttpRequestTruncated => return false,
                 // A request head larger than read_buf. Count it (the
                 // guaranteed observable) and best-effort a 431 before
                 // closing. The reader/writer may be mid-stream after an
@@ -278,7 +343,7 @@ pub fn Server(comptime S: type) type {
                     sw.interface.writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
                         "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
                     sw.interface.flush() catch {};
-                    return;
+                    return false;
                 },
                 // **A HEAD THAT IS NOT HTTP IS A 400, COUNTED** (edge.zig's
                 // rule, metal-vmm QUEUE 172): it was closed with no answer
@@ -288,7 +353,7 @@ pub fn Server(comptime S: type) type {
                     sw.interface.writeAll("HTTP/1.1 400 Bad Request\r\n" ++
                         "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
                     sw.interface.flush() catch {};
-                    return;
+                    return false;
                 },
                 else => return e,
             };
@@ -318,21 +383,44 @@ pub fn Server(comptime S: type) type {
                 req.head.keep_alive = false;
                 req.head.expect = null;
                 req.respond("The server failed before it could answer.\n", .{ .status = .internal_server_error, .keep_alive = false }) catch {};
-                return;
+                return false;
             };
-            if (refusal) |r| return refuse(&req, r.kind, r.msg);
-            req.head.keep_alive = false; // force `connection: close` without touching each handler
+            if (refusal) |r| {
+                refuse(&req, r.kind, r.msg);
+                return false;
+            }
+            // **WHETHER THIS ANSWER KEEPS THE CONNECTION** is decided before
+            // the handler runs, so its head says it: not past the
+            // connection's most requests, nor past the kept-open most.
+            conn.served += 1;
+            if (!req.head.keep_alive or conn.served >= requests_most_for_test orelse requests_most or !conn.keepOpen()) req.head.keep_alive = false;
+            said.begin();
             var b = bus.Bus.of(hub);
             var peer_buf: [64]u8 = undefined;
             b.peer = peerText(&peer_buf, stream.socket.address);
             b.at_unix_ms = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_ms));
-            turn.lockUncancelable(io);
+            takeTurn(io);
+            // **THE TURN NEVER WAITS ON THE NETWORK** (the box's cold review
+            // of 213: a client that pipelined answers and read none blocked
+            // a write in the turn, and the whole site with it): the answer is
+            // held in memory while the handler has the turn, and goes out
+            // after, on this connection's own task. Past `held_most` it is
+            // written in the turn, each write under the turn's deadline.
+            hold.begin();
+            sent.in_turn = true;
             // The body read before the turn, handed to the handler's read
             // as it is (170.5: an upload in memory once, not twice).
             http.held_body = held_body;
             const routed = S.route(&req, io, arena.allocator(), &b);
             http.held_body = null;
+            sent.in_turn = false;
             turn.unlock(io);
+            // Out now, outside the turn: until it has gone, this connection
+            // reads no next head, so answers never pile up unread.
+            hold.release() catch {
+                if (try routed) |k| bus.drop(hub, k);
+                return false;
+            };
             // The body's charge back now, before a kept stream holds the
             // connection (metal-vmm QUEUE 176.3: ~64 open streams of 1 MiB
             // posts pinned the whole budget).
@@ -346,7 +434,12 @@ pub fn Server(comptime S: type) type {
             // with no count; a member could open them until no thread was
             // left. One more ends the oldest, as the kernel's do: a browser
             // whose stream ends reconnects and resumes.
-            if (try routed) |kept| {
+            const kept = (try routed) orelse {
+                // Served again only when the answer said so, its request
+                // read to its end and the client asked for no close.
+                return req.head.keep_alive and said.whole and !said.close and server.reader.state == .ready;
+            };
+            {
                 const held_stream = holdStream(io, stream);
                 defer letGoStream(io, held_stream);
                 // **ITS WRITES WATCHED** (198.6): a write under way and
@@ -357,7 +450,7 @@ pub fn Server(comptime S: type) type {
                 const watcher = std.Thread.spawn(.{}, WriteWatch.run, .{ &watched, io }) catch {
                     std.debug.print("{s}: a kept stream's writes could not be watched; the stream ends\n", .{host_name});
                     bus.drop(hub, kept);
-                    return;
+                    return false;
                 };
                 defer {
                     watched.done.store(true, .release);
@@ -365,6 +458,8 @@ pub fn Server(comptime S: type) type {
                 }
                 bus.serveKeptCounted(hub, kept, &sw.interface, &watched.writes);
             }
+            // A kept stream is the connection's last answer.
+            return false;
         }
     };
 }
@@ -375,6 +470,195 @@ pub fn Server(comptime S: type) type {
 /// A send taking no byte for this long fails, and the stream ends (as
 /// metal's does after `idle_timeout_ms` with nothing taken).
 pub const kept_write_deadline_ms: u64 = 30_000;
+pub var turn_write_deadline_for_test_ms: ?u64 = null;
+
+/// **AN ANSWER'S WRITES HAVE DEADLINES** (the box's cold review of 213): a
+/// write in the turn (an answer past `held_most`) that takes no byte for
+/// `turn_write_deadline_ms` has its socket shut, so the turn is held up by
+/// one stuck client for that long at most; one after the turn, for
+/// `answer_write_deadline_ms`, as a kept stream's (it holds only its own
+/// connection, but a client that never reads must not hold it for good).
+pub const turn_write_deadline_ms: u64 = 5_000;
+pub const answer_write_deadline_ms: u64 = kept_write_deadline_ms;
+pub var answer_write_deadline_for_test_ms: ?u64 = null;
+/// Writes whose socket was shut at their deadline, for tests and reports.
+pub var writes_shut: std.atomic.Value(u64) = .init(0);
+
+/// **THE MOST AN ANSWER HOLDS IN MEMORY** while its handler has the turn:
+/// every ordinary page; a larger answer is written in the turn, under the
+/// turn's write deadline.
+pub const held_most: usize = 1024 * 1024;
+
+/// An answer held while its handler has the turn, and written after.
+const Hold = struct {
+    to: *std.Io.Writer,
+    gpa: std.mem.Allocator,
+    holding: bool = false,
+    /// Past `held_most`: what was held has been written, and the rest goes
+    /// straight on.
+    spilled: bool = false,
+    list: std.ArrayList(u8) = .empty,
+    interface: std.Io.Writer = .{ .buffer = &.{}, .vtable = &vtable },
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .sendFile = sendFile, .flush = flush };
+
+    fn begin(h: *Hold) void {
+        h.holding = true;
+        h.spilled = false;
+    }
+
+    /// What was held, written and flushed; holding no more. Its memory
+    /// given back, so a kept connection holds none between requests.
+    fn release(h: *Hold) std.Io.Writer.Error!void {
+        h.holding = false;
+        defer h.list.clearAndFree(h.gpa);
+        if (h.list.items.len > 0) try h.to.writeAll(h.list.items);
+        try h.to.flush();
+    }
+
+    fn spill(h: *Hold) std.Io.Writer.Error!void {
+        h.spilled = true;
+        try h.to.writeAll(h.list.items);
+        h.list.clearAndFree(h.gpa);
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const h: *Hold = @alignCast(@fieldParentPtr("interface", w));
+        if (!h.holding or h.spilled) return h.to.writeSplat(data, splat);
+        var total: usize = 0;
+        for (data[0 .. data.len - 1]) |d| total += d.len;
+        total += data[data.len - 1].len * splat;
+        if (h.list.items.len + total > held_most) {
+            try h.spill();
+            return h.to.writeSplat(data, splat);
+        }
+        h.list.ensureUnusedCapacity(h.gpa, total) catch {
+            try h.spill();
+            return h.to.writeSplat(data, splat);
+        };
+        for (data[0 .. data.len - 1]) |d| h.list.appendSliceAssumeCapacity(d);
+        for (0..splat) |_| h.list.appendSliceAssumeCapacity(data[data.len - 1]);
+        return total;
+    }
+
+    fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+        const h: *Hold = @alignCast(@fieldParentPtr("interface", w));
+        // Held, a file is read into memory by `drain`.
+        if (h.holding and !h.spilled) return error.Unimplemented;
+        return h.to.sendFile(file_reader, limit);
+    }
+
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const h: *Hold = @alignCast(@fieldParentPtr("interface", w));
+        if (h.holding and !h.spilled) return;
+        return h.to.flush();
+    }
+};
+
+/// The socket's writes, each under its deadline (`watchWrite`).
+const Sent = struct {
+    to: *std.Io.Writer,
+    stream: net.Stream,
+    io: Io,
+    /// Whether this connection's handler has the turn: its writes then
+    /// hold up the site, and have the turn's shorter deadline.
+    in_turn: bool = false,
+    /// Whether the watchdog shut the socket at a write's deadline.
+    shut: bool = false,
+    interface: std.Io.Writer = .{ .buffer = &.{}, .vtable = &vtable },
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .sendFile = sendFile, .flush = flush };
+
+    fn deadline(s: *const Sent) u64 {
+        return if (s.in_turn) turn_write_deadline_for_test_ms orelse turn_write_deadline_ms else answer_write_deadline_for_test_ms orelse answer_write_deadline_ms;
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
+        const t = watchWrite(s.io, s.stream, s.deadline());
+        defer if (!doneWrite(s.io, t)) {
+            s.shut = true;
+        };
+        return s.to.writeSplat(data, splat);
+    }
+
+    fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+        const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
+        const t = watchWrite(s.io, s.stream, s.deadline());
+        defer if (!doneWrite(s.io, t)) {
+            s.shut = true;
+        };
+        return s.to.sendFile(file_reader, limit);
+    }
+
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
+        return s.to.flush();
+    }
+};
+
+/// **THE WRITES UNDER WAY**, each with when it began and its deadline, and
+/// the one watchdog that shuts a socket whose write is past it. A table, not
+/// a thread a connection: one thread watches them all.
+const writes_most = 256;
+var writes: [writes_most]?struct { stream: net.Stream, since_ms: i64, deadline_ms: u64, ticket: u64 } = @splat(null);
+var writes_lock: Io.Mutex = .init;
+var writes_tickets: u64 = 0;
+var watchdog_started: std.atomic.Value(bool) = .init(false);
+
+const WriteTicket = struct { slot: ?usize, ticket: u64 };
+
+fn nowMs(io: Io) i64 {
+    return @intCast(@divTrunc(Io.Clock.now(.awake, io).nanoseconds, std.time.ns_per_ms));
+}
+
+fn watchWrite(io: Io, stream: net.Stream, deadline_ms: u64) WriteTicket {
+    if (!watchdog_started.swap(true, .acq_rel)) {
+        const t = std.Thread.spawn(.{}, writeWatchdog, .{io}) catch {
+            watchdog_started.store(false, .release);
+            return .{ .slot = null, .ticket = 0 };
+        };
+        t.detach();
+    }
+    writes_lock.lockUncancelable(io);
+    defer writes_lock.unlock(io);
+    writes_tickets += 1;
+    for (&writes, 0..) |*w, i| if (w.* == null) {
+        w.* = .{ .stream = stream, .since_ms = nowMs(io), .deadline_ms = deadline_ms, .ticket = writes_tickets };
+        return .{ .slot = i, .ticket = writes_tickets };
+    };
+    // A full table: the write goes unwatched, as every write did before.
+    return .{ .slot = null, .ticket = 0 };
+}
+
+/// Whether the write ended before its deadline: false when the watchdog
+/// took it out of the table and shut its socket.
+fn doneWrite(io: Io, t: WriteTicket) bool {
+    const i = t.slot orelse return true;
+    writes_lock.lockUncancelable(io);
+    defer writes_lock.unlock(io);
+    if (writes[i]) |w| if (w.ticket == t.ticket) {
+        writes[i] = null;
+        return true;
+    };
+    return false;
+}
+
+fn writeWatchdog(io: Io) void {
+    while (true) {
+        sleepMs(io, 50) catch {};
+        const now = nowMs(io);
+        writes_lock.lockUncancelable(io);
+        for (&writes) |*slot| if (slot.*) |w| if (now - w.since_ms >= @as(i64, @intCast(w.deadline_ms))) {
+            // Its write fails, its handler or task ends, its turn (if it
+            // holds it) is let go.
+            w.stream.shutdown(io, .both) catch {};
+            _ = writes_shut.fetchAdd(1, .acq_rel);
+            slot.* = null;
+        };
+        writes_lock.unlock(io);
+    }
+}
 pub var write_deadline_for_test_ms: ?u64 = null;
 
 /// A kept stream's watcher: it samples the write count a quarter-deadline at
@@ -587,6 +871,135 @@ fn heldStreams(io: Io) usize {
 pub const head_ms: u64 = 10_000;
 pub var head_for_test_ms: ?u64 = null;
 
+/// **A KEPT-OPEN CONNECTION'S LIMITS** (metal-vmm QUEUE 213), each with a
+/// test's own. **The idle timeout**: from an answer, the whole of the next
+/// head, the same time a first head has, so a connection waiting for its
+/// next request is held no longer than one waiting for its first.
+pub const idle_ms: u64 = head_ms;
+pub var idle_for_test_ms: ?u64 = null;
+/// **The most requests one connection serves**: its last answer says close.
+pub const requests_most: u64 = 1000;
+pub var requests_most_for_test: ?u64 = null;
+/// **The most connections kept open at once**, idle or not, as many as the
+/// streams held: past it, an answer says close, as one did before 213, so a
+/// client that opens many keeps no task from anyone.
+pub const kept_open_most: usize = 64;
+pub var kept_open_most_for_test: ?usize = null;
+var kept_open: std.atomic.Value(usize) = .init(0);
+/// Idle connections closed at the timeout, for tests and the host's report.
+pub var idle_closed: std.atomic.Value(u64) = .init(0);
+
+/// One connection's account: its requests, and whether it holds one of
+/// the kept-open places.
+const Connection = struct {
+    served: u64 = 0,
+    holds_place: bool = false,
+
+    /// A kept-open place for this connection, held until it closes; false
+    /// when every place is taken.
+    fn keepOpen(self: *Connection) bool {
+        if (self.holds_place) return true;
+        const most = kept_open_most_for_test orelse kept_open_most;
+        var now = kept_open.load(.acquire);
+        while (now < most) {
+            now = kept_open.cmpxchgWeak(now, now + 1, .acq_rel, .acquire) orelse {
+                self.holds_place = true;
+                return true;
+            };
+        }
+        return false;
+    }
+
+    fn letGo(self: *Connection) void {
+        if (self.holds_place) _ = kept_open.fetchSub(1, .acq_rel);
+        self.holds_place = false;
+    }
+};
+
+/// **WHAT AN ANSWER'S HEAD SAYS OF ITS CONNECTION** (metal-vmm QUEUE 213):
+/// std's `respond` writes `connection: close` when its handler asked for
+/// one (respond's own `keep_alive = false`) or the request's body could not
+/// be discarded, and the server must then close (RFC 9112, 9.6); nothing
+/// else tells the host. Every byte of an answer passes through it,
+/// unbuffered, and the head's lines are looked at as they go.
+const HeadWatch = struct {
+    to: *std.Io.Writer,
+    interface: std.Io.Writer = .{ .buffer = &.{}, .vtable = &vtable },
+    /// Since `begin`: whether a head has been written whole, and whether it
+    /// said close.
+    whole: bool = false,
+    close: bool = false,
+    line: [32]u8 = undefined,
+    line_len: usize = 0,
+    /// The line is longer than any this looks for.
+    line_long: bool = false,
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .sendFile = sendFile, .flush = flush };
+
+    /// The next bytes are a new answer's.
+    fn begin(self: *HeadWatch) void {
+        self.whole = false;
+        self.close = false;
+        self.line_len = 0;
+        self.line_long = false;
+    }
+
+    fn see(self: *HeadWatch, bytes: []const u8) void {
+        for (bytes) |c| {
+            if (self.whole) return;
+            switch (c) {
+                '\r' => {},
+                '\n' => {
+                    const l = self.line[0..self.line_len];
+                    if (!self.line_long) {
+                        if (l.len == 0) self.whole = true;
+                        if (std.ascii.eqlIgnoreCase(l, "connection: close")) self.close = true;
+                    }
+                    self.line_len = 0;
+                    self.line_long = false;
+                },
+                else => if (self.line_len < self.line.len) {
+                    self.line[self.line_len] = c;
+                    self.line_len += 1;
+                } else {
+                    self.line_long = true;
+                },
+            }
+        }
+    }
+
+    /// On to `to`; what it took, looked at.
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *HeadWatch = @alignCast(@fieldParentPtr("interface", w));
+        const n = try self.to.writeSplat(data, splat);
+        var left = n;
+        for (data[0 .. data.len - 1]) |d| {
+            const k = @min(left, d.len);
+            self.see(d[0..k]);
+            left -= k;
+        }
+        const last = data[data.len - 1];
+        while (left > 0 and !self.whole) {
+            const k = @min(left, last.len);
+            self.see(last[0..k]);
+            left -= k;
+        }
+        return n;
+    }
+
+    fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+        const self: *HeadWatch = @alignCast(@fieldParentPtr("interface", w));
+        // A file in a head is std's to write by `drain`.
+        if (!self.whole) return error.Unimplemented;
+        return self.to.sendFile(file_reader, limit);
+    }
+
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *HeadWatch = @alignCast(@fieldParentPtr("interface", w));
+        return self.to.flush();
+    }
+};
+
 /// A request head read, beside its watchdog.
 const HeadRead = struct {
     server: *std.http.Server,
@@ -653,6 +1066,8 @@ fn neverRead(req: *std.http.Server.Request, arena: std.mem.Allocator) !void {
     empty.* = .fixed("");
     req.server.reader.in = empty;
     req.head.expect = null;
+    // Its body is still on the socket: the connection's last request.
+    req.head.keep_alive = false;
 }
 
 /// The host's upload slots (body.zig), who reads in each, and their lock:
@@ -832,6 +1247,21 @@ fn durableNow() bool {
     return durable.now();
 }
 
+/// The handlers waiting for the turn, so the work between them lets them
+/// go first (`betweenLoop`).
+var turn_waiting: std.atomic.Value(u32) = .init(0);
+
+/// The turn, for a handler: counted while it waits.
+fn takeTurn(io: Io) void {
+    _ = turn_waiting.fetchAdd(1, .acq_rel);
+    turn.lockUncancelable(io);
+    _ = turn_waiting.fetchSub(1, .acq_rel);
+}
+
+/// How long the work between requests sleeps when there is none.
+pub const between_idle_ms: u64 = 50;
+var never_stop: std.atomic.Value(bool) = .init(false);
+
 /// **ONE HANDLER AT A TIME**: held while `route` runs, so no two handlers
 /// interleave, as on the bare-metal host, where one loop runs each to its
 /// end. Reading the head and the body comes before it, and serving a kept
@@ -998,6 +1428,15 @@ const TestSite = struct {
         if (who) |w| if (std.mem.eql(u8, w, "boom")) return error.StoreUnreadable;
         return who;
     }
+    /// A background run's slices, each `between_slice_ms` under the turn.
+    var slices_left: std.atomic.Value(u32) = .init(0);
+    var slices_run: std.atomic.Value(u32) = .init(0);
+    pub fn between(io: Io, _: i64) bool {
+        if (slices_left.load(.acquire) == 0) return false;
+        sleepMs(io, between_slice_ms) catch {};
+        _ = slices_run.fetchAdd(1, .acq_rel);
+        return slices_left.fetchSub(1, .acq_rel) > 1;
+    }
     fn streamFrame(_: []const u8, _: std.mem.Allocator, blob: []const u8) error{OutOfMemory}!?[]const u8 {
         return blob;
     }
@@ -1033,6 +1472,33 @@ const TestSite = struct {
             const kept = b.kept;
             b.kept = null;
             return kept;
+        }
+        // **KEEP-ALIVE'S ROUTES** (metal-vmm QUEUE 213): answered as a
+        // handler answers by default, the connection left to the host: the
+        // target back, after the body's length if there is one.
+        // A handler that reads its body through std's reader, not the held
+        // one, then answers close: the reader is left ready, so only the
+        // answer's head says close (HeadWatch).
+        // An answer of `big_kib` KiB, kept alive: what a client that never
+        // reads makes the host write. Its size is the test's, never the
+        // request's: a test site's route parses no number.
+        if (std.mem.eql(u8, t, "/big")) {
+            const page = try alloc.alloc(u8, big_kib * 1024);
+            @memset(page, 'x');
+            try req.respond(page, .{});
+            return null;
+        }
+        if (std.mem.eql(u8, t, "/raw-close")) {
+            var buf: [256]u8 = undefined;
+            const r = try req.readerExpectContinue(&buf);
+            _ = try r.allocRemaining(alloc, .limited(1024));
+            try req.respond("read", .{ .keep_alive = false });
+            return null;
+        }
+        if (std.mem.startsWith(u8, t, "/ka")) {
+            const n = if (req.head.method == .POST) ((try http.readLimitedBody(req, alloc, 64 * 1024)) orelse return null).len else 0;
+            try req.respond(try std.fmt.allocPrint(alloc, "{s} {d}", .{ t, n }), .{});
+            return null;
         }
         if (req.head.method == .POST) {
             const cap = bodyLimit(try http.target(req, alloc));
@@ -1866,4 +2332,394 @@ test "linux_host: /admin/host's process facts come from the real getpid and /pro
     }
     try std.testing.expect(pid_seen);
     try std.testing.expect(std.mem.endsWith(u8, resident.?, "kB"));
+}
+
+// ── work between requests (metal-vmm QUEUE 211, step 5) ─────────────────
+
+const between_slice_ms: u64 = 30;
+
+test "linux_host: a request that arrives mid-run waits at most one slice of the work between requests, and the run goes on after it (metal-vmm QUEUE 211)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    // Thirty slices of 30 ms: most of a second of background work.
+    TestSite.slices_left.store(30, .release);
+    TestSite.slices_run.store(0, .release);
+    var stop: std.atomic.Value(bool) = .init(false);
+    const runner = try std.Thread.spawn(.{}, TestHost.betweenLoop, .{ io, &stop });
+    defer {
+        stop.store(true, .release);
+        runner.join();
+        TestSite.slices_left.store(0, .release);
+    }
+    sleepMs(io, 100) catch {};
+    var worst: i64 = 0;
+    for (0..5) |_| {
+        const began = Io.Clock.now(.awake, io).nanoseconds;
+        var c = try bench.client("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        try c.listen(io);
+        const answered = c.answer.within(io, 2000);
+        const took: i64 = @intCast(@divTrunc(Io.Clock.now(.awake, io).nanoseconds - began, std.time.ns_per_ms));
+        c.end(io);
+        try std.testing.expect(answered);
+        worst = @max(worst, took);
+        sleepMs(io, 45) catch {};
+    }
+    // One slice (30 ms) and the request's own time, never the run's.
+    if (worst > 3 * between_slice_ms) {
+        std.debug.print("a request waited {d} ms for the turn\n", .{worst});
+        return error.TestUnexpectedResult;
+    }
+    // And the run went on between them, not stopped by them.
+    try std.testing.expect(TestSite.slices_run.load(.acquire) >= 5);
+}
+
+// ── keep-alive (metal-vmm QUEUE 213) ────────────────────────────────────────
+
+/// Everything a client is sent on one connection, read on a task of its own
+/// until the host closes it.
+const Talk = struct {
+    bytes: [16 * 1024]u8 = undefined,
+    len: std.atomic.Value(usize) = .init(0),
+    closed: std.atomic.Value(bool) = .init(false),
+
+    fn read(self: *Talk, io: Io, stream: net.Stream) void {
+        var buf: [256]u8 = undefined;
+        var r = stream.reader(io, &buf);
+        while (true) {
+            const at = self.len.load(.acquire);
+            if (at == self.bytes.len) break;
+            var bufs: [1][]u8 = .{self.bytes[at..]};
+            const n = r.interface.readVec(&bufs) catch break;
+            self.len.store(at + n, .release);
+        }
+        self.closed.store(true, .release);
+    }
+
+    fn got(self: *const Talk) []const u8 {
+        return self.bytes[0..self.len.load(.acquire)];
+    }
+
+    /// Whether `n` answers have come whole (each with its body) within `ms`.
+    fn answers(self: *const Talk, io: Io, n: usize, ms: i64) bool {
+        var waited: i64 = 0;
+        while (waited < ms) : (waited += 10) {
+            if (countAnswers(self.got()) >= n) return true;
+            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+        }
+        return countAnswers(self.got()) >= n;
+    }
+
+    /// Whether the host closed the connection within `ms`.
+    fn closedWithin(self: *const Talk, io: Io, ms: i64) bool {
+        var waited: i64 = 0;
+        while (!self.closed.load(.acquire) and waited < ms) : (waited += 10) {
+            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+        }
+        return self.closed.load(.acquire);
+    }
+};
+
+/// The answers in `bytes` that have come whole: a head, and its body by its
+/// content-length.
+fn countAnswers(bytes: []const u8) usize {
+    var n: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, at, "\r\n\r\n")) |end| {
+        const head = bytes[at..end];
+        const length: usize = if (std.ascii.indexOfIgnoreCase(head, "content-length: ")) |i| std.fmt.parseInt(usize, std.mem.sliceTo(head[i + 16 ..], '\r'), 10) catch 0 else 0;
+        if (bytes.len < end + 4 + length) break;
+        n += 1;
+        at = end + 4 + length;
+    }
+    return n;
+}
+
+/// A client on one connection the host serves on a task of its own, its
+/// answers read as they come.
+const Conn = struct {
+    stream: net.Stream,
+    served: std.Thread,
+    talk: Talk = .{},
+    reading: std.Thread = undefined,
+
+    fn open(self: *Conn, bench: *Bench, alloc: std.mem.Allocator) !void {
+        const io = bench.threaded.io();
+        self.* = .{ .stream = try bench.listener.socket.address.connect(io, .{ .mode = .stream }), .served = undefined };
+        self.served = try std.Thread.spawn(.{}, struct {
+            fn f(i: Io, a: std.mem.Allocator, hub: *bus.Hub, s: net.Stream) void {
+                TestHost.serveConn(i, a, hub, s);
+            }
+        }.f, .{ io, alloc, &bench.hub, try bench.listener.accept(io) });
+        self.reading = try std.Thread.spawn(.{}, Talk.read, .{ &self.talk, io, self.stream });
+    }
+
+    fn send(self: *Conn, io: Io, raw: []const u8) !void {
+        var w = self.stream.writer(io, &.{});
+        try w.interface.writeAll(raw);
+    }
+
+    fn end(self: *Conn, io: Io) void {
+        self.stream.shutdown(io, .both) catch {};
+        self.served.join();
+        self.reading.join();
+        self.stream.close(io);
+    }
+};
+
+test "linux_host: two requests on one connection are both answered, and it stays open between them (metal-vmm QUEUE 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c: Conn = undefined;
+    try c.open(&bench, std.testing.allocator);
+    defer c.end(io);
+    try c.send(io, "GET /ka-one HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(c.talk.answers(io, 1, 2000));
+    try std.testing.expect(std.mem.indexOf(u8, c.talk.got(), "connection: close") == null);
+    try std.testing.expect(!c.talk.closedWithin(io, 100));
+    try c.send(io, "POST /ka-two HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+    try std.testing.expect(c.talk.answers(io, 2, 2000));
+    try std.testing.expect(std.mem.endsWith(u8, c.talk.got(), "/ka-two 5"));
+}
+
+test "linux_host: a pipelined pair is answered in order, on one connection (metal-vmm QUEUE 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c: Conn = undefined;
+    try c.open(&bench, std.testing.allocator);
+    defer c.end(io);
+    try c.send(io, "POST /ka-a HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabcGET /ka-b HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(c.talk.answers(io, 2, 2000));
+    const a = std.mem.indexOf(u8, c.talk.got(), "/ka-a 3").?;
+    const b = std.mem.indexOf(u8, c.talk.got(), "/ka-b 0").?;
+    try std.testing.expect(a < b);
+}
+
+test "linux_host: the memory a request took is given back when it is answered, not when its connection closes (metal-vmm QUEUE 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var counted: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .thread_safe = true }) = .init;
+    defer _ = counted.deinit();
+    var c: Conn = undefined;
+    try c.open(&bench, counted.allocator());
+    defer c.end(io);
+    for (0..3) |i| {
+        try c.send(io, "POST /ka-body HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+        try std.testing.expect(c.talk.answers(io, i + 1, 2000));
+        // Back to nothing held, soon after the answer.
+        var waited: i64 = 0;
+        while (counted.total_requested_bytes != 0 and waited < 2000) : (waited += 10) {
+            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+        }
+        if (counted.total_requested_bytes != 0) {
+            std.debug.print("after answer {d}, still held: {d} bytes\n", .{ i + 1, counted.total_requested_bytes });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "linux_host: an idle connection is closed at the idle timeout, with no answer (metal-vmm QUEUE 213)" {
+    idle_for_test_ms = 300;
+    defer idle_for_test_ms = null;
+    tick_for_test_ms = 20;
+    defer tick_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c: Conn = undefined;
+    try c.open(&bench, std.testing.allocator);
+    defer c.end(io);
+    try c.send(io, "GET /ka-one HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(c.talk.answers(io, 1, 2000));
+    try std.testing.expect(!c.talk.closedWithin(io, 150));
+    try std.testing.expect(c.talk.closedWithin(io, 2000));
+    try std.testing.expectEqual(@as(usize, 1), countAnswers(c.talk.got()));
+    try std.testing.expect(std.mem.indexOf(u8, c.talk.got(), "408") == null);
+}
+
+test "linux_host: a second request that stalls holds only its own connection, never the turn (metal-vmm QUEUE 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c: Conn = undefined;
+    try c.open(&bench, std.testing.allocator);
+    defer c.end(io);
+    try c.send(io, "GET /ka-one HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(c.talk.answers(io, 1, 2000));
+    // Half a second head, and then a body that never comes.
+    try c.send(io, "GET /ka-two HTTP/1.1\r\nHo");
+    var d: Conn = undefined;
+    try d.open(&bench, std.testing.allocator);
+    defer d.end(io);
+    try d.send(io, "POST /ka-three HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhal");
+    var other = try bench.client("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    try other.listen(io);
+    const prompt = other.answer.within(io, 2000);
+    other.end(io);
+    try std.testing.expect(prompt);
+    try std.testing.expect(std.mem.startsWith(u8, other.answer.got(), "HTTP/1.1 200"));
+}
+
+test "linux_host: the client's connection: close is honoured, and so is a handler's (metal-vmm QUEUE 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    for ([_][]const u8{
+        "GET /ka-one HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        // TestSite's "/" answers with respond's own keep_alive = false.
+        "GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+        // And after reading a body.
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi",
+        // And after reading it through std's reader, which leaves it ready:
+        // only the answer's head says close.
+        "POST /raw-close HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi",
+    }) |raw| {
+        var c: Conn = undefined;
+        try c.open(&bench, std.testing.allocator);
+        defer c.end(io);
+        try c.send(io, raw);
+        try std.testing.expect(c.talk.answers(io, 1, 2000));
+        try std.testing.expect(std.mem.indexOf(u8, c.talk.got(), "connection: close") != null);
+        try std.testing.expect(c.talk.closedWithin(io, 1000));
+    }
+}
+
+test "linux_host: a connection serves at most requests_most requests, the last one saying close (metal-vmm QUEUE 213)" {
+    requests_most_for_test = 2;
+    defer requests_most_for_test = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c: Conn = undefined;
+    try c.open(&bench, std.testing.allocator);
+    defer c.end(io);
+    try c.send(io, "GET /ka-1 HTTP/1.1\r\nHost: x\r\n\r\nGET /ka-2 HTTP/1.1\r\nHost: x\r\n\r\nGET /ka-3 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(c.talk.answers(io, 2, 2000));
+    try std.testing.expect(c.talk.closedWithin(io, 1000));
+    try std.testing.expectEqual(@as(usize, 2), countAnswers(c.talk.got()));
+    const second = std.mem.lastIndexOf(u8, c.talk.got(), "HTTP/1.1 200").?;
+    try std.testing.expect(std.mem.indexOf(u8, c.talk.got()[second..], "connection: close") != null);
+}
+
+test "linux_host: at most kept_open_most connections are kept open: past it, an answer says close (metal-vmm QUEUE 213)" {
+    kept_open_most_for_test = 1;
+    defer kept_open_most_for_test = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var a: Conn = undefined;
+    try a.open(&bench, std.testing.allocator);
+    try a.send(io, "GET /ka-a HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(a.talk.answers(io, 1, 2000));
+    try std.testing.expect(!a.talk.closedWithin(io, 100));
+    var b: Conn = undefined;
+    try b.open(&bench, std.testing.allocator);
+    defer b.end(io);
+    try b.send(io, "GET /ka-b HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(b.talk.answers(io, 1, 2000));
+    try std.testing.expect(std.mem.indexOf(u8, b.talk.got(), "connection: close") != null);
+    try std.testing.expect(b.talk.closedWithin(io, 1000));
+    // A closed, its place is free again.
+    a.end(io);
+    var waited: i64 = 0;
+    while (kept_open.load(.acquire) != 0 and waited < 2000) : (waited += 10) {
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 0), kept_open.load(.acquire));
+}
+
+test "linux_host: a request refused before the turn closes its connection: what was pipelined after it is never answered (metal-vmm QUEUE 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c: Conn = undefined;
+    try c.open(&bench, std.testing.allocator);
+    defer c.end(io);
+    try c.send(io, "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n0123456789GET /ka-after HTTP/1.1\r\nHost: x\r\n\r\n");
+    try std.testing.expect(c.talk.answers(io, 1, 2000));
+    try std.testing.expect(c.talk.closedWithin(io, 1000));
+    try std.testing.expect(std.mem.indexOf(u8, c.talk.got(), "/ka-after") == null);
+}
+
+// ── a client that never reads (the box's cold review of 213, finding 1) ──
+
+/// The size of TestSite's `/big` answer, in KiB.
+var big_kib: usize = 0;
+
+/// A client that pipelines `n` requests for `/big`, `kib` KiB each, with a
+/// small receive buffer, and reads none of the answers.
+fn neverReads(bench: *Bench, n: usize, kib: usize) !Client {
+    big_kib = kib;
+    const io = bench.threaded.io();
+    const stream = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
+    const small: c_int = 4096;
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&small)) catch {};
+    const served = try std.Thread.spawn(.{}, serveForTest, .{ io, &bench.hub, try bench.listener.accept(io) });
+    var w = stream.writer(io, &.{});
+    for (0..n) |_| w.interface.writeAll("GET /big HTTP/1.1\r\nHost: x\r\n\r\n") catch break;
+    return .{ .stream = stream, .served = served };
+}
+
+/// The never-reading client gone: closed with its answers unread, which
+/// resets the connection (a shutdown would leave the host's write waiting
+/// on a window that never opens), then its host task joined.
+fn endUnread(io: Io, c: *Client) void {
+    c.stream.close(io);
+    c.served.join();
+}
+
+test "linux_host: a client that pipelines answers and never reads them holds up no one else: the turn never waits on its socket (the box's cold review of 213)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    // Forty half-megabyte answers asked for, none read: far past what the
+    // sockets' buffers hold.
+    var stuck = try neverReads(&bench, 40, 512);
+    sleepMs(io, 300) catch {};
+    var other = try bench.client("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    try other.listen(io);
+    const prompt = other.answer.within(io, 2000);
+    // The stuck one let go first: the other's task may be waiting on it.
+    endUnread(io, &stuck);
+    other.end(io);
+    try std.testing.expect(prompt);
+    try std.testing.expect(std.mem.startsWith(u8, other.answer.got(), "HTTP/1.1 200"));
+}
+
+test "linux_host: an answer past what the turn holds, to a client that never reads, holds the turn no longer than the in-turn write deadline (the box's cold review of 213)" {
+    turn_write_deadline_for_test_ms = 300;
+    defer turn_write_deadline_for_test_ms = null;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    // Eight megabytes in one answer: past `held_most`, written in the turn.
+    var stuck = try neverReads(&bench, 1, 8 * 1024);
+    sleepMs(io, 100) catch {};
+    const began = Io.Clock.now(.awake, io).nanoseconds;
+    var other = try bench.client("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    try other.listen(io);
+    const prompt = other.answer.within(io, 3000);
+    const took = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began, std.time.ns_per_ms);
+    endUnread(io, &stuck);
+    other.end(io);
+    try std.testing.expect(prompt);
+    if (took > 1500) {
+        std.debug.print("the other client waited {d} ms\n", .{took});
+        return error.TestUnexpectedResult;
+    }
 }

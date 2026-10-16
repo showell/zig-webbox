@@ -111,6 +111,15 @@ pub fn Site(comptime App: type) type {
             return .{ .hub = bus.Hub.init(io, base), .app = app };
         }
 
+        /// **BETWEEN REQUESTS** (metal-vmm QUEUE 211): the application's
+        /// work a host does between handlers, under the turn, one slice at a
+        /// time (a background script's, `script_route.sliceBackground`);
+        /// whether there is more. A site with none says no.
+        pub fn between(io: Io, now: i64) bool {
+            if (!@hasDecl(App, "between")) return false;
+            return App.between(io, now);
+        }
+
         /// The route's cap on a body, from the head's target (its path; the
         /// query is no part of it): what a host plans the body's read by
         /// (body.zig's `plan`).

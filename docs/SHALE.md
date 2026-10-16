@@ -400,12 +400,12 @@ names the builtin and the argument.
 | `stat(p)` | `{size, kind, modified}`. `kind` is `"file"`, `"directory"` or `"other"`. `modified` is in seconds since 1970, as the host keeps it: metal's FAT to 2 s, and 0 where it keeps none | a read | `store` |
 | `exists(p)` | whether anything is there | a read | `store`, only for a failure other than absence |
 | `is_dir(p)` | whether a folder is there | a read | `store` |
-| `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `budget read_bytes` when the file is longer than what is left; `store` |
-| `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count; `store` for a folder or a missing file |
-| `count_lines(p)` | the lines in a file, as `#lines(read(p))` counts them | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `store` |
-| `count_in(p, s)` | how many times `s` occurs, none overlapping | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB |
-| `find_in(p, s)` | the 0-based offset of the first `s`, a `read` offset, or nil | as `count_in`, stopping at the first | as `count_in` |
-| `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **one read a folder listed**, not one an entry; a step an entry and each path's bytes | `store`; `argument` for an unknown option |
+| `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `argument` for a file over the call-bytes cap (1 MiB): read it in parts; `budget read_bytes` when the file is longer than what is left; `store` |
+| `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
+| `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
+| `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
+| `find_in(p, s[, offset[, n]])` | the 0-based offset of the first `s`, a `read` offset, or nil; of a range, the first that starts in it, so a file found in parts gives what the whole file's would | as `count_in`, stopping at the first | as `count_in` |
+| `walk(p[, opts])` | every entry under `p`, depth first, each folder's names sorted and a folder before what it holds, as `{path, size, kind, modified}`, `path` from the root. A folder's size is 0. A symlink is `"other"` (size and `modified` 0) and is never entered | **a read a folder listed and an entry stat'ed** (each a store call, a disk command on metal); a step an entry and each path's bytes. **At most `call_entries` (256) entries a call**: with more to come, the list ends with `{path, kind = "more"}`, and `walk(p, {after = that path})` goes on from it (see the cookbook's `walk_all`). A background run passes by an entry gone between its folder's listing and its stat | `store`; `argument` for an unknown option, or an `after` not under `p` |
 | `replace(p, s)` | writes the file whole: never a torn file. There is no plain `write` | a change; each byte a change byte and a step | `store`, logged |
 | `append(p, s)` | adds to the end | as `replace` | `store`, logged |
 | `mkdir(p)` | a folder, and its parents | a change | `store`, logged |
@@ -417,8 +417,18 @@ names the builtin and the argument.
 - `like`: a pattern for the entries' names (`like` below). Folders are
   walked into whether they match or not.
 - `kind`: `"file"`, `"directory"` or `"other"`.
+- `after`: where an earlier call's part ended (its `more` entry's path,
+  or "" for the start). The walk goes on after it in its own order, the
+  path there or not: each folder on it is listed again, and the walk
+  takes the first name past it. In parts, a walk gives each entry once.
 
 An entry that `like` or `kind` leaves out is never stat'ed.
+
+**One listing is one call, whatever the folder's size.** An `ls`, or a
+walk's listing of a folder, reads the whole folder in that call: on metal,
+all its directory sectors; and only a walk's stats are capped. How big a
+folder grows is the application's to bound (the box's cold review of 214,
+dropped as a cap: a site keeps its folders small).
 
 ### Text
 
@@ -496,6 +506,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 | `now()` | the integer the host handed in: the only time a script has |
 | `budget()` | what is left of `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output`, so a script can stop at a point of its own |
 | `print(...)` | scalars only. It evaluates every argument first, joins them with tabs, and ends with a newline |
+| `yield()` | nil: a collection point, where the run keeps only the values it still reaches (see "The VM"). When a run pauses is the host's to say, never the script's |
 
 ## The store
 
@@ -529,17 +540,27 @@ differ is `modified` (above).
 Each budget has a default, and the caller can override any of them. A run
 that hits one stops cleanly, naming it, with its line and column.
 
+**What metal passes** (the box's re-review, item 4): the route is the
+application's, not the kernel's, so zig-metal-unikernel sets no budgets of
+its own. The site's column is angry-gopher's `admin_script.budgets`, which
+lynrummy.com's route hands `script_route.handle` on metal; a budget it does
+not name is Shale's default, the machine's included.
+
 | budget | what it counts | default | the site's (angry-gopher v30) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
-| arena | **the memory the run holds, all of it.** Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
+| arena | **the memory the run holds, all of it.** (The tree a source parses to and the machine's own memory are beside it, under the machine budget.) Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
 | call depth | | 64 | 64 |
 | depth | expressions and statements the walk is inside of at once, across every call (see below) | 2,000 | 2,000 |
 | output | at most `out.len` | 256 KiB | 256 KiB |
-| reads | `ls`, `stat`, `exists`, `is_dir`, `read` and each scan count one; `walk` one a folder | 10,000 | 500 |
+| reads | `ls`, `stat`, `exists`, `is_dir`, `read` and each scan count one; `walk` one a folder and one an entry's stat | 10,000 | 500 |
 | read bytes | what the reads bring; `read` gets what remains as its limit | 64 MiB | 16 MiB |
 | changes | each change | 1,000 | 100 |
 | change bytes | what the changes write | 16 MiB | 16 MiB |
+| machine | the machine's own memory: the tree the source parses to, the compiled code, the frames' slots, the operands, the `..` chains' parts and a yield's copying, from one arena of its own beside the values'. With the arena, the whole of what a run can take from the host (tested: 5,500 parameters 63 calls deep stop on it, the host's peak under the two). **Every source within the source budget compiles in half of it** (tested: the worst shapes, short statements and list literals, take about 113 bytes of tree and code a byte of source, 7.4 MB for 64 KiB); the other half is for the frames and the operands | 16 MiB | 16 MiB (the route sets none; with its 8 MiB arena, a run takes at most 24 MiB of the host's memory) |
+| call bytes | **what one builtin call brings from the store** (QUEUE 211, the caps: a builtin is never cut, so its work is bounded instead). A `read` or a scan past it is an `argument` error; a bigger file is read or scanned in parts, `read(p, offset, n)` or `count_in(p, s, offset, n)`, a call each, so a host can let a request in between | 1 MiB | 1 MiB |
+| call entries | **what one `walk` call considers** (QUEUE 211, the caps): its folders' entries, each a stat if it is kept. A walk with more ends its part with a `more` entry and goes on from it | 256 | 256 |
+| kept | what a `yield` keeps: the arena it copies the reachable values into (see "The VM") | 1 MiB | 1 MiB |
 | source | | 64 KiB | 64 KiB |
 | nesting | how deep the source nests when parsed (a parenthesis costs two: an expression and its operand) | 200 | 200 |
 
@@ -559,7 +580,9 @@ steps at a step a byte to about 0.26M.
 - Debug frames are about a kilobyte, so the call depth times the nesting
   (64 × 200) would need about 20 MB.
 - So the walk is bounded by the **depth** budget instead, and its
-  recursive frames are kept small.
+  recursive frames are kept small. The VM (below) never recurses, but
+  keeps the depth budget exactly, so a script stops at the same place on
+  either.
 - Measured by `interp_test.zig`:
 
   | | Debug | ReleaseSafe |
@@ -569,13 +592,146 @@ steps at a step a byte to about 0.26M.
 
   The test holds both under 4 MB.
 
-**The run allocates only from its arena** and the caller's `out`, and it
-assumes no threads. `src/script/portable_test.zig` reads each of the
+**The run allocates its values only from its arena** and writes only
+the caller's `out`; the machine's own memory (the frames' slots, the VM's
+operands and frames, the compiled code) comes from the caller's
+allocator beside the arena, bounded by the call-depth and depth budgets
+and freed when the run ends. It assumes no threads. `src/script/portable_test.zig` reads each of the
 module's sources and refuses anything that names the host outside its
 tests: `std.posix`, `std.os`, `std.c`, `std.process`, `std.Thread`,
 `std.time`, `Io.Dir`, `Threaded`, `page_allocator`, `std.debug.print`, and
 `std.fs` other than `std.fs.path`. The test also checks that its own list
 holds every source of the module.
+
+### The VM
+
+**A script runs on a bytecode VM** (`src/script/compile.zig`,
+`src/script/vm.zig`; metal-vmm QUEUE 211). The route and the runner use
+it. The tree-walker it replaced (`interp.zig`) stays in the tests as the
+second implementation. The VM is a stack machine over the walker's own
+semantics: every operator, index, builtin and charge is the walker's
+code, called from an op. What is the VM's own is the control flow: the
+operand stack, the frames, the loops' hidden slots, and `attempt` as a
+frame marked with its answer. It never recurses, so a run's whole state
+is data, which a later `yield` can keep.
+
+**The same run, step for step.** The walker charges a step as it enters
+each node, and checks the depth budget there. The compiler keeps those
+enters in the walker's order, each with its node's place and its depth in
+its function, and hangs each run of them on the op whose work follows.
+The VM charges a run at once when it fits the budgets, and node by node
+when it doesn't, so a stop names the same node.
+
+**The gate.** In the tests every `script.run` runs twice: the VM on the
+store it was given, and the walker on a copy made before (same path
+length, same file times). The two must agree on the output, the
+effects, the stop (class, budget, line, column, function, message), the
+steps, the work counted, the arena held, and the store each leaves.
+Every interpreter, builtin, example, cookbook, error-corpus, property,
+snippet and fuzz test is therefore a parity test. A difference panics
+with both runs, and the test it happened in is the reproduction.
+Two planted defects fire it: `<` compiled as `<=` (six tests), and a
+lost step on reading a local (55).
+
+**The machine's memory is not the arena.** The frames, the operands and
+the code come from the caller's allocator, beside the budgeted arena, so
+the two engines take the same arena and stop on it at the same place.
+
+`zig build script-bench`, ReleaseSafe, the VM's time over the walker's:
+
+| case | walker | VM |
+|---|---|---|
+| a loop's iteration | 8.5 ns a step | 6.7 (0.79x) |
+| a while loop | 7.9 | 6.4 (0.81x) |
+| a list, built and indexed | 10.8 | 10.6 (0.98x) |
+| a map's fields | 9.1 | 7.1 (0.78x) |
+| calls | 13.2 | 10.6 (0.80x) |
+| a string built by `..` | 7.2 | 4.6 (0.64x) |
+| `count_in` over 8 MiB | 13.0 | 13.5 (1.04x) |
+| `read` 8 MiB whole | 9.8 | 11.4 (1.15x) |
+| a string built by `join` | 11.9 | 9.0 (0.76x) |
+
+Where the interpreter's own work dominates, the VM takes about four
+fifths of the walker's time. Where a builtin's work dominates (a scan, a
+read), the two are within this box's noise, since the work is the same
+code. Speed is not the VM's point; the state a yield can keep is.
+
+### The contract: a run as a host sees it
+
+**`src/script/process.zig` is the whole of what a host may know of a
+run** (metal-vmm QUEUE 211, Steve's model: "the kernel should treat the
+shale VM as just an opaque black box"). A host calls these, and nothing
+else of the script module's insides:
+
+| call | what it does |
+|---|---|
+| `Process.start(io, allocator, root, source, mode, budgets, now, output_most)` | parse and compile; a source that doesn't parse or fit gives a process already stopped, saying why |
+| `step(.{ .steps, .now })` | one slice: `paused`, `finished` or `stopped`. A slice ends between ops, after at most `steps` **or after any store call**, whichever comes first; `now()` is the slice's clock. An ended run says so again and runs nothing |
+| `output()` | what it has printed |
+| `status()` | its state, steps, slices, effects and its stop |
+| `kill()` | every byte it holds, given back, whatever state it is in |
+
+- **It owns all it holds,** from the allocator `start` is handed, never a
+  request's heap: the values' arena, the machine's memory and its
+  output, each under its budget. A second run later needs no host change
+  but a count.
+- **Two modes.** `atomic` is today's run, whole inside one handler, and
+  may change the store. `background` is stepped in slices between
+  handlers and **only reads**: `replace`, `append`, `mkdir`, `remove`
+  and `remove_tree` are `argument` errors naming `atomic`. A script that
+  finds and then deletes is a background run to find, then an atomic
+  one to act.
+- **A slice ends after any store call** (Steve: "let the kernel swap it
+  out on any I/O request"): a store call is synchronous, so its end is
+  where a host can let a request in, whether it returned or failed into
+  an `attempt`. Pure work is cut by `steps`; a builtin is never cut, its
+  work bounded by the caps instead (`call_bytes`, `call_entries`).
+- **The one-shot route and the runner run through it too** (slice after
+  slice, with nothing between), so every test holds the contract: the
+  gate's runs are processes.
+- Tested (`process_test.zig`): a background run's output is the atomic
+  run's in slices of 1 to 50 steps; `kill` gives back every byte, mid-run,
+  finished, stopped before it ran, or holding megabytes; a background
+  change is refused and changes nothing.
+
+### `yield`: a collection point
+
+`yield()` **collects** (metal-vmm QUEUE 211, as Steve's model of
+2026-10-15 left it): the run keeps only the values it still reaches. It
+takes nothing and schedules nothing. Where a long run pauses is the
+host's to choose (after a store call, or a number of steps), never the
+script's.
+
+- **What a yield keeps:** the values the run still reaches are copied
+  into a fresh arena: every local of every frame, the parts of an
+  expression half evaluated, a loop's list, the `const`s, `attempt`'s
+  answers being made, and the effects log. The old arena is then freed
+  whole, so whatever the script made and let go of goes with it. A run
+  that yields every minute holds what it keeps, not what it ever made.
+- **A table reached twice is still one table** after the copy. Strings
+  have no identity a script can see.
+- **The copy is charged:** a step for each value and a step for every 16
+  bytes of string. What is kept may be at most the **kept** budget (1 MiB by
+  default); past it, the run stops with `budget kept`.
+- **The code is not copied:** the tree and its literals have their own
+  arena beside the values'.
+
+```shale
+local total = 0
+for i = 1, 1000 do
+  local junk = {}
+  for j = 1, 20 do push(junk, "item " .. j) end
+  total = total + #junk
+  yield()
+end
+print(total)
+-- prints:
+-- 20000
+```
+
+The tree-walker kept as the VM's second implementation never collects,
+so the tests' gate holds a script that yields to the same output,
+effects and stop, but not to the same steps or arena.
 
 ## The runner
 
@@ -658,10 +814,10 @@ budgets, and changes nothing.
 
 | script | what it does | how it keeps to the budgets |
 |---|---|---|
-| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | `walk`: one read a folder |
+| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | `walk`, in parts (`walk_all`): a read a folder and an entry |
 | `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars |
 | `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_in`, and only for transcripts under 1 MiB; the rest are listed by size |
-| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_in`, then 2 KiB read before the match; stops at the read budget and says how far it got |
+| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_in`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget and says how far it got |
 | `topics.shale` | every topic with its message count, the old way | reads every transcript whole: small sites only |
 | `big_files.shale` | files over a size | |
 | `delete_topic.shale` | one topic deleted, as `chat_retire.zig` does: its transcript, sidecars and uploads | a change each |
@@ -678,29 +834,62 @@ transcript, its `.count`, a `.reactions.jsonl` for one in three, and an
 has `find_message`'s phrase, so it searches every transcript to the end.
 The sizes are to within a tenth.
 
-| script | messages a topic | the largest site that fits | its transcripts | what stops it past that |
-|---|---|---|---|---|
-| `topics` | 10 (~2 KiB) | 343 topics | 729 KiB | reads |
-| `topics` | 100 (~21 KiB) | 163 topics | 3.4 MiB | arena |
-| `topics` | 1000 (~215 KiB) | 17 topics | 3.6 MiB | steps |
-| `stale_caches` | 10 | 124 topics | 263 KiB | reads |
-| `stale_caches` | 100 | 124 topics | 2.6 MiB | reads |
-| `stale_caches` | 1000 | 72 topics | 15.2 MiB | steps |
-| `find_message` | 10 | 196 topics | 416 KiB | reads |
-| `find_message` | 100 | 196 topics | 4.1 MiB | reads |
-| `find_message` | 1000 | 72 topics | 15.2 MiB | read bytes: it stops itself and says how far it got |
-| `chat_topics` | any | 196 topics | 41 MiB at 1000 | reads: an `exists` and a `read` a topic |
-| `where_the_bytes_are` | any | 1175 topics (about 3,500 files) | 249 MiB at 1000 | arena: every entry held, as maps |
-| `big_files` | any | 46 topics | 9.7 MiB at 1000 | reads: an `is_dir` and a `stat` an entry |
+| mode | script | messages a topic | largest site that fits | its transcripts | past it |
+|---|---|---|---|---|---|
+| atomic | `topics` | 10 (~2 KiB each) | 343 topics | 729 KiB | budget reads |
+| atomic | `stale_caches` | 10 (~2 KiB each) | 94 topics | 199 KiB | budget reads |
+| atomic | `find_message` | 10 (~2 KiB each) | 124 topics | 263 KiB | budget reads |
+| atomic | `where_the_bytes_are` | 10 (~2 KiB each) | 94 topics | 199 KiB | budget reads |
+| atomic | `chat_topics` | 10 (~2 KiB each) | 60 topics | 127 KiB | budget reads |
+| atomic | `big_files` | 10 (~2 KiB each) | 46 topics | 97 KiB | budget reads |
+| atomic | `topics` | 100 (~21 KiB each) | 163 topics | 3.4 MiB | budget arena |
+| atomic | `stale_caches` | 100 (~21 KiB each) | 94 topics | 2.0 MiB | budget reads |
+| atomic | `find_message` | 100 (~21 KiB each) | 124 topics | 2.6 MiB | budget reads |
+| atomic | `where_the_bytes_are` | 100 (~21 KiB each) | 94 topics | 2.0 MiB | budget reads |
+| atomic | `chat_topics` | 100 (~21 KiB each) | 60 topics | 1.3 MiB | budget reads |
+| atomic | `big_files` | 100 (~21 KiB each) | 46 topics | 986 KiB | budget reads |
+| atomic | `topics` | 1000 (~215 KiB each) | 17 topics | 3.6 MiB | budget steps |
+| atomic | `stale_caches` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | budget steps |
+| atomic | `find_message` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | reads to its budget, then says how far it got |
+| atomic | `where_the_bytes_are` | 1000 (~215 KiB each) | 94 topics | 19.8 MiB | budget reads |
+| atomic | `chat_topics` | 1000 (~215 KiB each) | 60 topics | 12.6 MiB | budget reads |
+| atomic | `big_files` | 1000 (~215 KiB each) | 46 topics | 9.7 MiB | budget reads |
+| background | `topics` | 10 (~2 KiB each) | 1292 topics | 2.7 MiB | budget steps |
+| background | `stale_caches` | 10 (~2 KiB each) | 1421 topics | 3.0 MiB | budget steps |
+| background | `find_message` | 10 (~2 KiB each) | 804 topics | 1.7 MiB | budget arena |
+| background | `where_the_bytes_are` | 10 (~2 KiB each) | 1069 topics | 2.2 MiB | budget arena |
+| background | `chat_topics` | 10 (~2 KiB each) | 1292 topics | 2.7 MiB | budget arena |
+| background | `big_files` | 10 (~2 KiB each) | 1563 topics | 3.3 MiB | budget reads |
+| background | `topics` | 100 (~21 KiB each) | 163 topics | 3.4 MiB | budget arena |
+| background | `stale_caches` | 100 (~21 KiB each) | 550 topics | 11.6 MiB | budget steps |
+| background | `find_message` | 100 (~21 KiB each) | 605 topics | 12.7 MiB | budget steps |
+| background | `where_the_bytes_are` | 100 (~21 KiB each) | 1069 topics | 22.5 MiB | budget arena |
+| background | `chat_topics` | 100 (~21 KiB each) | 1292 topics | 27.2 MiB | budget arena |
+| background | `big_files` | 100 (~21 KiB each) | 1563 topics | 32.9 MiB | budget reads |
+| background | `topics` | 1000 (~215 KiB each) | 17 topics | 3.6 MiB | budget steps |
+| background | `stale_caches` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | budget steps |
+| background | `find_message` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | reads to its budget, then says how far it got |
+| background | `where_the_bytes_are` | 1000 (~217 KiB each) | 1069 topics | 226.2 MiB | budget arena |
+| background | `chat_topics` | 1000 (~217 KiB each) | 1292 topics | 273.6 MiB | budget arena |
+| background | `big_files` | 1000 (~217 KiB each) | 1563 topics | 331.2 MiB | budget reads |
+
+**Two modes, two budgets** (Steve, 2026-10-15): an **atomic** run holds up
+the site's requests, so it keeps the site's 500 reads; a **background**
+run only fills the gaps between them, so it may read 10,000 (angry-gopher
+`admin_script.background_budgets`). Since walk's stats count as reads (each
+a store call, a disk command on metal), every script that walks the chat
+fits fewer topics atomically: `where_the_bytes_are` 94 where it fit 1,175,
+`chat_topics` 60 where 196. In the background, the same scripts fit 1,069
+and 1,292, stopped by the arena, not the reads; the transcript readers by
+their steps.
 
 **The news is mostly bad.** At angry-gopher's scale (its chat is about
 190 MB), nothing that reads transcripts finishes in one run: a
 transcript-reading script answers for a few hundred topics at most, and
 for a few dozen when they are large. The read count, not the bytes,
-binds first. Even the scripts that read no transcript stop near 200
-topics (`chat_topics`, two reads a topic) and 1,200 (`where_the_bytes_are`,
-its arena). `big_files`, the old way (`ls`, `is_dir` and `stat` an entry),
-fits 46 topics; `walk` does the same work in one read a folder.
+binds first. Even the scripts that read no transcript stop near 60 to 100 topics, on
+walk's stats. `big_files`, the old way (`ls`, `is_dir` and `stat` an
+entry), fits 46 topics.
 
 ## What was decided, and what was refused
 

@@ -57,7 +57,20 @@ const Frame = struct {
 const reserved_call = "attempt";
 
 pub const Parser = struct {
+    /// The tree's: what the parse returns.
     alloc: std.mem.Allocator,
+    /// **WHAT THE PARSE BUILDS AND DROPS** (the box's re-review, FEEDBACK
+    /// 1599c8f): the lists under construction, from an allocator that gives
+    /// room back, each copied into the tree at its size when it is done. In
+    /// the tree's arena, every growth left its old copy behind and every
+    /// list its spare room: a 64 KiB source of `f()` held 7 MB of tree.
+    scratch: std.mem.Allocator,
+    /// The lists under construction, one stack a kind, shared by every
+    /// level: a list is the stack above its mark.
+    stmts: std.ArrayList(ast.Stmt) = .empty,
+    exprs: std.ArrayList(*ast.Expr) = .empty,
+    arms: std.ArrayList(ast.Arm) = .empty,
+    entries: std.ArrayList(ast.MapEntry) = .empty,
     lexer: lex.Lexer,
     tok: Token,
     ahead: ?Token = null,
@@ -181,7 +194,7 @@ pub const Parser = struct {
         if (self.frame.slots == std.math.maxInt(u16)) return self.failAt(pos, .syntax, "too many locals in one function");
         const slot = self.frame.slots;
         self.frame.slots += 1;
-        try self.frame.locals.append(self.alloc, .{ .name = name, .slot = slot, .depth = self.frame.depth });
+        try self.frame.locals.append(self.scratch, .{ .name = name, .slot = slot, .depth = self.frame.depth });
         return slot;
     }
 
@@ -222,21 +235,22 @@ pub const Parser = struct {
             self.frame.locals.shrinkRetainingCapacity(mark);
             self.frame.depth -= 1;
         }
-        var out: std.ArrayList(ast.Stmt) = .empty;
+        const at = self.stmts.items.len;
+        defer self.stmts.shrinkRetainingCapacity(at);
         while (!blockEnds(self.tok.tag)) {
             if (self.tok.tag == .semicolon) {
                 try self.advance();
                 continue;
             }
             const s = try self.statement();
-            try out.append(self.alloc, s);
+            try self.stmts.append(self.scratch, s);
             if (s.kind == .@"return") {
                 while (self.tok.tag == .semicolon) try self.advance();
                 if (!blockEnds(self.tok.tag)) return self.failAt(self.here(), .syntax, "`return` must be the last statement of its block");
                 break;
             }
         }
-        return out.items;
+        return self.alloc.dupe(ast.Stmt, self.stmts.items[at..]);
     }
 
     fn statement(self: *Parser) Error!ast.Stmt {
@@ -272,7 +286,7 @@ pub const Parser = struct {
                 self.frame.locals.items[self.frame.locals.items.len - 1].constant = true;
                 if (self.consts.items.len == std.math.maxInt(u16)) return self.failAt(pos, .syntax, "too many constants");
                 const index: u16 = @intCast(self.consts.items.len);
-                try self.consts.append(self.alloc, name);
+                try self.consts.append(self.scratch, name);
                 return .{ .pos = pos, .kind = .{ .constant = .{ .slot = slot, .index = index, .value = value } } };
             },
             .kw_if => return self.ifStatement(pos),
@@ -340,10 +354,12 @@ pub const Parser = struct {
 
     fn ifStatement(self: *Parser, pos: ast.Pos) Error!ast.Stmt {
         try self.advance();
-        var arms: std.ArrayList(ast.Arm) = .empty;
+        const at = self.arms.items.len;
+        defer self.arms.shrinkRetainingCapacity(at);
         const cond = try self.expr();
         _ = try self.expect(.kw_then, "`then` after the `if` condition");
-        try arms.append(self.alloc, .{ .cond = cond, .body = try self.block() });
+        const first = try self.block();
+        try self.arms.append(self.scratch, .{ .cond = cond, .body = first });
         var otherwise: ?[]ast.Stmt = null;
         while (true) {
             switch (self.tok.tag) {
@@ -351,7 +367,8 @@ pub const Parser = struct {
                     try self.advance();
                     const c = try self.expr();
                     _ = try self.expect(.kw_then, "`then` after the `elseif` condition");
-                    try arms.append(self.alloc, .{ .cond = c, .body = try self.block() });
+                    const body = try self.block();
+                    try self.arms.append(self.scratch, .{ .cond = c, .body = body });
                 },
                 .kw_else => {
                     try self.advance();
@@ -365,7 +382,7 @@ pub const Parser = struct {
                 },
             }
         }
-        return .{ .pos = pos, .kind = .{ .@"if" = .{ .arms = arms.items, .otherwise = otherwise } } };
+        return .{ .pos = pos, .kind = .{ .@"if" = .{ .arms = try self.alloc.dupe(ast.Arm, self.arms.items[at..]), .otherwise = otherwise } } };
     }
 
     fn forStatement(self: *Parser, pos: ast.Pos) Error!ast.Stmt {
@@ -421,14 +438,15 @@ pub const Parser = struct {
         if (lua_names.get(name) != null) return self.failf(pos, .name, "`{s}` is a name of Lua's library, kept to say what to write instead: name the function otherwise", .{name});
         if (self.function_names.contains(name)) return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
         const index: u32 = @intCast(self.functions.items.len);
-        try self.function_names.put(self.alloc, name, index);
+        try self.function_names.put(self.scratch, name, index);
         // Reserved now, so it may call itself.
-        try self.functions.append(self.alloc, undefined);
+        try self.functions.append(self.scratch, undefined);
 
         const saved = self.frame;
         self.frame = .{};
         self.in_function = true;
         defer {
+            self.frame.locals.deinit(self.scratch);
             self.frame = saved;
             self.in_function = false;
         }
@@ -637,25 +655,30 @@ pub const Parser = struct {
             } else return self.failf(pos, .name, "no function `{s}` above this line: a function is called only after it is declared", .{name});
             try self.advance(); // (
         }
-        var args: std.ArrayList(*ast.Expr) = .empty;
+        const at = self.exprs.items.len;
+        defer self.exprs.shrinkRetainingCapacity(at);
         if (self.tok.tag != .rparen) {
             while (true) {
-                try args.append(self.alloc, try self.expr());
+                const arg = try self.expr();
+                try self.exprs.append(self.scratch, arg);
                 if (self.tok.tag != .comma) break;
                 try self.advance();
             }
         }
         _ = try self.expect(.rparen, "`)` to close the call");
-        if (params) |n| if (args.items.len != n) return self.failf(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ shown, n, if (n == 1) "" else "s", args.items.len });
-        return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .call = .{ .target = target, .args = args.items } } });
+        const given = self.exprs.items.len - at;
+        if (params) |n| if (given != n) return self.failf(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ shown, n, if (n == 1) "" else "s", given });
+        return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .call = .{ .target = target, .args = try self.alloc.dupe(*ast.Expr, self.exprs.items[at..]) } } });
     }
 
     fn table(self: *Parser, pos: ast.Pos) Error!*ast.Expr {
         try self.enter();
         defer self.leave();
         try self.advance(); // {
-        var items: std.ArrayList(*ast.Expr) = .empty;
-        var entries: std.ArrayList(ast.MapEntry) = .empty;
+        const items_at = self.exprs.items.len;
+        defer self.exprs.shrinkRetainingCapacity(items_at);
+        const entries_at = self.entries.items.len;
+        defer self.entries.shrinkRetainingCapacity(entries_at);
         while (self.tok.tag != .rbrace) {
             const at = self.here();
             var key: ?[]const u8 = null;
@@ -672,43 +695,57 @@ pub const Parser = struct {
                 _ = try self.expect(.assign, "`=` after the key");
             }
             const value = try self.expr();
+            const items = self.exprs.items[items_at..];
+            const entries = self.entries.items[entries_at..];
             if (key) |k| {
-                if (items.items.len > 0) return self.failAt(at, .type, "a table literal mixes positional and keyed entries: a list or a map, not both");
-                for (entries.items) |en| if (std.mem.eql(u8, en.key, k)) return self.failf(at, .index, "the key `{s}` is given twice", .{k});
+                if (items.len > 0) return self.failAt(at, .type, "a table literal mixes positional and keyed entries: a list or a map, not both");
+                for (entries) |en| if (std.mem.eql(u8, en.key, k)) return self.failf(at, .index, "the key `{s}` is given twice", .{k});
                 if (value.kind == .nil) return self.failAt(at, .type, "a map cannot hold nil");
-                try entries.append(self.alloc, .{ .key = k, .value = value, .pos = at });
+                try self.entries.append(self.scratch, .{ .key = k, .value = value, .pos = at });
             } else {
-                if (entries.items.len > 0) return self.failAt(at, .type, "a table literal mixes positional and keyed entries: a list or a map, not both");
+                if (entries.len > 0) return self.failAt(at, .type, "a table literal mixes positional and keyed entries: a list or a map, not both");
                 if (value.kind == .nil) return self.failAt(at, .type, "a list cannot hold nil");
-                try items.append(self.alloc, value);
+                try self.exprs.append(self.scratch, value);
             }
             if (self.tok.tag == .comma or self.tok.tag == .semicolon) {
                 try self.advance();
             } else break;
         }
         _ = try self.expect(.rbrace, "`}` to close the table");
-        if (entries.items.len > 0) return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .map = entries.items } });
-        if (items.items.len > 0) return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .list = items.items } });
+        if (self.entries.items.len > entries_at) return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .map = try self.alloc.dupe(ast.MapEntry, self.entries.items[entries_at..]) } });
+        if (self.exprs.items.len > items_at) return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .list = try self.alloc.dupe(*ast.Expr, self.exprs.items[items_at..]) } });
         return self.new(ast.Expr, .{ .pos = pos, .kind = .empty_table });
     }
 };
 
 /// The whole source, parsed. On `error.Parse`, `stop` says where and why.
 pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop) Error!ast.Program {
-    return parseMeasured(alloc, source, max_nesting, stop, null);
+    return parseMeasured(alloc, alloc, source, max_nesting, stop, null);
 }
 
 /// `parse`, saying how many bytes of the Zig stack it took.
-pub fn parseMeasured(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize) Error!ast.Program {
+/// What it builds and drops comes from `scratch` and is given back to it;
+/// the tree, from `alloc`, exactly its size.
+pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize) Error!ast.Program {
     const top = @frameAddress();
-    var p: Parser = .{ .alloc = alloc, .lexer = lex.Lexer.init(alloc, source), .tok = undefined, .max_nesting = max_nesting };
+    var p: Parser = .{ .alloc = alloc, .scratch = scratch, .lexer = lex.Lexer.init(alloc, source), .tok = undefined, .max_nesting = max_nesting };
     defer if (stack_used) |u| {
         u.* = top -| p.stack_low;
     };
+    defer {
+        p.stmts.deinit(scratch);
+        p.exprs.deinit(scratch);
+        p.arms.deinit(scratch);
+        p.entries.deinit(scratch);
+        p.frame.locals.deinit(scratch);
+        p.function_names.deinit(scratch);
+        p.functions.deinit(scratch);
+        p.consts.deinit(scratch);
+    }
     errdefer stop.* = p.stop;
     try p.advance();
     p.frame.depth = 0;
     const body = try p.block();
     if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{p.describe(p.tok)});
-    return .{ .functions = p.functions.items, .const_names = p.consts.items, .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
+    return .{ .functions = try alloc.dupe(ast.Function, p.functions.items), .const_names = try alloc.dupe([]const u8, p.consts.items), .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
 }

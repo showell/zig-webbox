@@ -237,9 +237,18 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
     try deep.appendSlice(testing.allocator, " end print(f(63))");
     // 64 calls of 60 levels each is past the depth budget: the walk stops
     // there, at the deepest it may go, and that is what is measured.
-    var w = runWith(deep.items, .{});
+    // The walker's: it is the engine that recurses (the VM never does,
+    // and stops at the same place, by the gate).
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var w = script.runOn(.walker, threaded.io(), testing.allocator, ".zig-cache/no-root", deep.items, .{}, 1_700_000_000, &out_buf);
     defer w.deinit();
     try testing.expectEqual(script.diag.Budget.depth, w.stop.?.budget.?);
+    // And the VM, on the same script, takes next to no Zig stack.
+    var v = runWith(deep.items, .{});
+    defer v.deinit();
+    try testing.expectEqual(script.diag.Budget.depth, v.stop.?.budget.?);
+    try testing.expect(v.stack_bytes < 512 * 1024);
     if (p.stop) |s| std.debug.print("{s}\n", .{s.message});
     // Linux's main thread has 8 MiB, metal's 16 MiB: the worst of both,
     // in Debug (the largest frames), within half the smaller.
@@ -423,6 +432,12 @@ test "run: 208's cold review: attempt needs its commas; a long chain in a loop c
     try testing.expectEqual(@as(u32, 33), m.stop.?.column);
 }
 
+/// The machine's memory a shape of a few locals and no calls may take
+/// beside its arena (metal-vmm QUEUE 211): the frames, the operand stack
+/// and the compiled code's arena, whatever the loop's count (68 KB
+/// measured, most of it the code arena's first pages).
+const machine_most = 128 * 1024;
+
 test "run: the arena budget bounds the memory a run takes: the backing allocator's peak stays under it, for the review's shapes (209)" {
     // At 208, std's arena held 1.7x and 2.0x what was counted: 14.1 MB
     // for 200,000 tables against 8 MiB, 12.7 MB for 400,000 pushes.
@@ -440,7 +455,10 @@ test "run: the arena budget bounds the memory a run takes: the backing allocator
         var r = script.run(threaded.io(), peak.allocator(), ".zig-cache/no-root", src, .{ .arena_bytes = limit, .steps = 100_000_000 }, 0, &out_buf);
         defer r.deinit();
         errdefer std.debug.print("{s}: peak {d}\n", .{ src, peak.most });
-        try testing.expect(peak.most <= limit);
+        // The arena, and the machine's own memory beside it (211: the
+        // frames' slots and the `..` chains' parts, outside the arena),
+        // which for these shapes is a frame of a few slots.
+        try testing.expect(peak.most <= limit + machine_most);
         try testing.expect(r.arena_bytes <= limit);
     }
 }
@@ -453,5 +471,85 @@ test "run: one huge charge stops the run a step past its budget, not at the char
         defer r.deinit();
         try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
         try testing.expectEqual(@as(u64, 1001), r.steps);
+    }
+}
+
+test "run: a `..` chain's part of the wrong type stops at its own `..`, when a part is a chain, a map or a print (211's cold review of the VM)" {
+    // The VM once read the chain's positions mixed with a part's own.
+    const cases = [_]struct { src: []const u8, column: u32 }{
+        .{ .src = "local s = (\"a\" .. \"b\") .. nil", .column = 24 },
+        .{ .src = "local s = \"a\" .. (\"b\" .. \"c\") .. nil", .column = 31 },
+        .{ .src = "local s = \"x\" .. count({a = 1}) .. nil", .column = 33 },
+        .{ .src = "local s = (\"a\" .. \"b\") .. \"c\" .. {} .. \"d\"", .column = 37 },
+        .{ .src = "local t = {} local s = (\"a\" .. (\"q\" .. 1)) .. 2 .. t", .column = 49 },
+        .{ .src = "local s = \"p\" .. print(\"x\") .. 1", .column = 29 },
+    };
+    for (cases) |c| {
+        var r = runWith(c.src, .{});
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {?}\n", .{ c.src, r.stop });
+        try testing.expectEqual(script.diag.Class.type, r.stop.?.class);
+        try testing.expectEqual(c.column, r.stop.?.column);
+    }
+    // And `attempt` gives the same column as a value.
+    try expectOutput("function f() return (\"a\" .. \"b\") .. nil end local r = attempt(f) print(r.column)", "34\n");
+}
+
+test "run: the machine's memory has a budget: 5,500 parameters 63 calls deep stop on it, and the host's peak stays under both budgets (the box's review of 211)" {
+    // Off the arena, the machine's memory was off every budget: this shape
+    // finished with a 14 MB peak against an 8 MiB arena.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    const params = 5500;
+    try src.appendSlice(testing.allocator, "function f(n");
+    for (1..params) |i| try src.print(testing.allocator, ", p{d}", .{i});
+    try src.appendSlice(testing.allocator, ") if n == 0 then return 0 end return f(n - 1");
+    for (1..params) |_| try src.appendSlice(testing.allocator, ", 0");
+    try src.appendSlice(testing.allocator, ") end print(f(62");
+    for (1..params) |_| try src.appendSlice(testing.allocator, ", 0");
+    try src.appendSlice(testing.allocator, "))");
+    const budgets: script.Budgets = .{ .arena_bytes = 8 * 1024 * 1024, .machine_bytes = 4 * 1024 * 1024, .source_bytes = 1024 * 1024, .steps = 100_000_000 };
+    var peak: script.value.Peak = .{ .child = testing.allocator };
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var r = script.run(threaded.io(), peak.allocator(), ".zig-cache/no-root", src.items, budgets, 0, &out_buf);
+    defer r.deinit();
+    errdefer std.debug.print("peak {d}, stop {?}\n", .{ peak.most, r.stop });
+    try testing.expectEqual(script.diag.Budget.machine, r.stop.?.budget.?);
+    // Both budgets, and the two structs that hold them.
+    try testing.expect(peak.most <= budgets.arena_bytes + budgets.machine_bytes + 4096);
+}
+
+test "run: a 64 KiB chain the parse takes as one level, `1+1+...+1` and its kin, stops on the depth budget at the walker's place, never crashing the compiler (the box's re-review, FEEDBACK 1599c8f, item 2)" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const Shape = struct { head: []const u8, part: []const u8, tail: []const u8 };
+    for ([_]Shape{
+        .{ .head = "print(", .part = "1+", .tail = "1)" },
+        .{ .head = "print(", .part = "1<", .tail = "1)" },
+        .{ .head = "print(", .part = "true and ", .tail = "true)" },
+        .{ .head = "local x = {} print(x", .part = "[1]", .tail = ")" },
+        .{ .head = "local x = {} print(x", .part = ".a", .tail = ")" },
+        .{ .head = "print(", .part = "- ", .tail = "1)" },
+        .{ .head = "print(", .part = "not ", .tail = "true)" },
+        .{ .head = "print(", .part = "\"a\" .. ", .tail = "\"a\")" },
+    }) |shape| {
+        const room = script.Budgets.default_source_bytes - shape.head.len - shape.tail.len;
+        var src: std.ArrayList(u8) = .empty;
+        defer src.deinit(testing.allocator);
+        try src.appendSlice(testing.allocator, shape.head);
+        for (0..room / shape.part.len) |_| try src.appendSlice(testing.allocator, shape.part);
+        try src.appendSlice(testing.allocator, shape.tail);
+        // Through the gate: the VM's stop is the walker's, place and all.
+        var r = script.run(threaded.io(), testing.allocator, ".zig-cache/no-root", src.items, .{}, 0, &out_buf);
+        defer r.deinit();
+        const s = r.stop orelse {
+            std.debug.print("{s}...: finished\n", .{shape.part});
+            return error.TestUnexpectedResult;
+        };
+        if (s.class != .budget or (s.budget.? != .depth and s.budget.? != .nesting)) {
+            std.debug.print("{s}...: stopped {t} {?t}: {s}\n", .{ shape.part, s.class, s.budget, s.message });
+            return error.TestUnexpectedResult;
+        }
     }
 }

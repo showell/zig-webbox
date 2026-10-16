@@ -91,6 +91,7 @@ const cases = [_]Case{
     // the host
     .{ .b = .now, .grows = .constant, .why = "an integer the host handed in" },
     .{ .b = .budget, .grows = .constant, .why = "six counters" },
+    .{ .b = .yield, .grows = .constant, .why = "its argument checked; in the VM the copy it makes is charged a step a value and a step for 16 bytes, by collect.zig" },
     .{ .b = .print, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "print(s)" },
 };
 
@@ -253,7 +254,9 @@ test "steps bound the work: no builtin or operator does more than a fixed amount
     };
     for (op_cases) |c| try within(c.name, try callMeasure(.none, c.setup, c.call, n), &worst);
     for (hard_cases) |c| try within(c.name, try callMeasure(c.store, c.setup, c.call, n), &worst);
-    std.debug.print("the most work a step: {d:.1}\n", .{worst});
+    // Said only when a case breaks the bound (`within`), never on a pass
+    // (the box, 209): the worst today is 30.3, well inside it.
+    try testing.expect(worst <= work_per_step_most);
 }
 
 fn within(name: []const u8, m: Fixture.Measured, worst: *f64) !void {

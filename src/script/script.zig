@@ -15,6 +15,10 @@ pub const value = @import("value.zig");
 pub const interp = @import("interp.zig");
 pub const builtins = @import("builtins.zig");
 pub const builtins_text = @import("builtins_text.zig");
+pub const builtins_store = @import("builtins_store.zig");
+pub const compile = @import("compile.zig");
+pub const vm = @import("vm.zig");
+pub const process = @import("process.zig");
 
 const std = @import("std");
 const Io = @import("host_io").Io;
@@ -42,6 +46,17 @@ pub const Result = struct {
     stack_bytes: usize = 0,
     /// The arena bytes the run held at its end, never past its budget.
     arena_bytes: usize = 0,
+    /// The yields that collected (`interp.Run.collections`).
+    collections: u64 = 0,
+    /// Whether it called a builtin that changes the store (`interp.Run`).
+    tried_change: bool = false,
+    /// **THE MACHINE'S MEMORY** (metal-vmm QUEUE 211; the box's review: under
+    /// its own budget): the parse's tree, apart from the values so a `yield`
+    /// that trades their arena for a fresh one leaves the code's literals
+    /// and the functions' names where they are, and, while the run runs,
+    /// its code, frames and operands. Null only when even it could not be
+    /// made.
+    machine: ?*MachineMemory = null,
 
     pub fn finished(r: *const Result) bool {
         return r.stop == null;
@@ -49,8 +64,18 @@ pub const Result = struct {
 
     pub fn deinit(r: *Result) void {
         r.arena.deinit();
+        if (r.machine) |m| {
+            m.tree.deinit();
+            const backing = m.budget.backing;
+            m.budget.deinit();
+            backing.destroy(m);
+        }
     }
 };
+
+/// The machine's budgeted memory, and the tree's arena over it: on the
+/// heap, so the arena's pointer to the budget stays good as a Result moves.
+pub const MachineMemory = process.MachineMemory;
 
 /// **WHAT A RUN DID, IN THE ONE LAYOUT** (metal-vmm QUEUE 200): its effects,
 /// a line each, then how it ended, the stop named as `name:line:column`.
@@ -70,6 +95,44 @@ pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writ
 /// `out`, and the output budget is at most `out.len`. It always returns a
 /// Result: a source however hostile ends finished or stopped.
 pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+    // **IN THE TESTS, THE GATE** (metal-vmm QUEUE 211): every run is the
+    // VM's, held to the tree-walker's on a copy of the store.
+    if (@import("builtin").is_test) return @import("gate_test.zig").run(io, backing, root, source, budgets, now, out);
+    return runOn(.vm, io, backing, root, source, budgets, now, out);
+}
+
+/// What runs a script: **the VM**, which the route and the runner use, or
+/// the tree-walker, kept as its second implementation (the tests' gate
+/// holds the two to the same run).
+pub const Engine = union(enum) {
+    vm,
+    walker,
+    /// The VM in slices of this many steps, each a pause the next goes on
+    /// from (`vm.Task`): the same run, cut (the tests' gate checks it).
+    vm_sliced: u64,
+    /// The same, as a `background` run, which only reads: for a script
+    /// that changes nothing, the same run again (the gate checks it).
+    vm_background: u64,
+};
+
+pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+    // **THE VM THROUGH ITS CONTRACT** (`process.zig`): what a host runs is
+    // what a one-shot run is, in slices or in one.
+    switch (engine) {
+        .walker => {},
+        .vm, .vm_sliced, .vm_background => {
+            const slice: u64 = switch (engine) {
+                .vm_sliced, .vm_background => |n| n,
+                else => std.math.maxInt(u64),
+            };
+            const mode: process.Mode = if (engine == .vm_background) .background else .atomic;
+            const p = process.Process.start(io, backing, root, source, mode, budgets, now, out.len) catch {
+                return .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the host could not hold the run" }, .output = out[0..0], .effects = &.{}, .steps = 0 };
+            };
+            while (p.step(.{ .steps = slice }) == .paused) {}
+            return p.intoResult(Result, out);
+        },
+    }
     var result: Result = .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = null, .output = out[0..0], .effects = &.{}, .steps = 0 };
     const budgeted = &result.arena;
     const alloc = budgeted.allocator();
@@ -79,17 +142,30 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     }
     var stop: ?Stop = null;
     const top = @frameAddress();
-    const program = alloc.create(ast.Program) catch return arenaStop(&result);
-    program.* = parse.parseMeasured(alloc, source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
+    const machine_stop: Stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the machine's memory (the code, the frames, the operands) is past its budget" };
+    const mm = backing.create(MachineMemory) catch {
+        result.stop = machine_stop;
+        return result;
+    };
+    mm.* = .{ .budget = .{ .backing = backing, .limit = budgets.machine_bytes }, .tree = undefined };
+    mm.tree = .init(mm.budget.allocator());
+    result.machine = mm;
+    const tree = mm.tree.allocator();
+    const program = tree.create(ast.Program) catch {
+        result.stop = machine_stop;
+        return result;
+    };
+    program.* = parse.parseMeasured(tree, mm.budget.allocator(), source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
         result.stop = switch (e) {
             error.Parse => stop.?,
-            error.OutOfMemory => .{ .line = 1, .column = 1, .class = .budget, .budget = .arena, .message = "the arena budget ran out" },
+            error.OutOfMemory => machine_stop,
         };
         return result;
     };
     var r: interp.Run = .{
         .io = io,
         .alloc = alloc,
+        .machine = mm.budget.allocator(),
         .budgeted = budgeted,
         .budgets = budgets,
         .root = root,
@@ -98,6 +174,9 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
         .out = out,
         .out_cap = @min(out.len, budgets.output_bytes),
     };
+    defer r.deinit();
+    // The VM's runs went through its Process above: here, the walker's.
+    std.debug.assert(engine == .walker);
     r.main() catch |e| switch (e) {
         error.Stop => {},
         // An allocation that failed outside a builtin's own check.
@@ -107,6 +186,8 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     result.output = out[0..r.out_len];
     result.effects = r.effects.items;
     result.steps = r.steps;
+    result.collections = r.collections;
+    result.tried_change = r.tried_change;
     result.work = r.work;
     result.stack_bytes = @max(result.stack_bytes, top -| r.stack_low);
     result.arena_bytes = budgeted.held;
@@ -132,4 +213,6 @@ test {
     _ = @import("charge_test.zig");
     _ = @import("errors_test.zig");
     _ = @import("props_test.zig");
+    _ = @import("yield_test.zig");
+    _ = @import("process_test.zig");
 }

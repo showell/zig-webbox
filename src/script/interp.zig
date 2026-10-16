@@ -34,6 +34,31 @@ pub const Budgets = struct {
     /// Zig stack a level in Debug that is more than a thread has; this
     /// bounds the walk to what the stack holds, whatever the script.
     depth: u32 = 2_000,
+    /// **WHAT A YIELD KEEPS** (metal-vmm QUEUE 211, M1): the bytes the
+    /// values the VM still reaches take, copied into a fresh arena at each
+    /// `yield`; past it, the run stops.
+    kept_bytes: usize = 1024 * 1024,
+    /// **THE MACHINE'S MEMORY** (the box's review of 211: off the arena, it
+    /// was off every budget, and 5,500 parameters 63 calls deep took 14 MB
+    /// past an 8 MiB arena): the parse's tree, the compiled code, the
+    /// frames' slots, the operand stack, the `..` chains' parts and a
+    /// yield's copying, all from one arena of this size beside the values'.
+    /// **EVERY SOURCE WITHIN THE SOURCE BUDGET COMPILES IN HALF OF IT** (the
+    /// box's re-review, FEEDBACK 1599c8f): the worst shapes, short
+    /// statements and list literals, take about 113 bytes of tree and code
+    /// a byte of source, 7.4 MB for 64 KiB; the other half is for the
+    /// frames and the operands (`process_test.zig` holds both).
+    machine_bytes: usize = 16 * 1024 * 1024,
+    /// **WHAT ONE CALL BRINGS FROM THE STORE** (metal-vmm QUEUE 211, the
+    /// caps: builtins stay atomic, so each one's work is capped): the most
+    /// bytes one `read` (or one scan) takes from the store in one call. A
+    /// bigger file is read in parts, `read(p, offset, n)`, each a call.
+    call_bytes: u64 = 1024 * 1024,
+    /// **WHAT ONE `walk` CONSIDERS** (QUEUE 211, the caps): the entries one
+    /// call takes from its folders' listings, each a stat if it is kept. A
+    /// walk with more ends its list with a `more` entry, and goes on from
+    /// it with `walk(p, {after = its path})`.
+    call_entries: u64 = 256,
 };
 
 /// One store change the script attempted, in order, root-relative.
@@ -49,6 +74,13 @@ pub const Error = error{ Stop, OutOfMemory };
 pub const Run = struct {
     io: Io,
     alloc: std.mem.Allocator,
+    /// **THE MACHINE'S OWN MEMORY** (metal-vmm QUEUE 211): the frames' slots,
+    /// the `..` chains' parts, the arguments of a long call, the VM's
+    /// operands and frames, outside the values' arena, so a tree-walker and
+    /// a VM, whose machinery differs, take the same arena and stop on it at
+    /// the same place. **Its own budget bounds it** (`Budgets.machine_bytes`,
+    /// with the tree and the code): no value points into it.
+    machine: std.mem.Allocator,
     budgeted: *value.Budgeted,
     budgets: Budgets,
     /// The data root the script's paths are confined to.
@@ -65,6 +97,17 @@ pub const Run = struct {
     /// to a multiple of the steps: an uncharged loop shows.
     work: u64 = 0,
     depth: u32 = 0,
+    /// The yields that collected (`collect.zig`): a run's steps and arena
+    /// differ from a walker's by them, and by nothing else.
+    collections: u64 = 0,
+    /// **A BACKGROUND RUN ONLY READS** (`process.Mode`): a change is an
+    /// `argument` error naming `atomic`.
+    read_only: bool = false,
+    /// Whether the run called a builtin that changes the store, refused or
+    /// not (the gate cuts a run that did not as a background run).
+    tried_change: bool = false,
+    /// The copy's bookkeeping, kept from yield to yield (`collect.Books`).
+    collecting: @import("collect.zig").Books = .{},
     /// The walk's recursion now (`Budgets.depth`).
     walk: u32 = 0,
     reads: u64 = 0,
@@ -98,6 +141,14 @@ pub const Run = struct {
     /// measured (docs/SHALE.md, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
 
+    /// The machine's memory, given back (the arena is the Result's).
+    pub fn deinit(self: *Run) void {
+        self.stack.deinit(self.machine);
+        self.chain_parts.deinit(self.machine);
+        self.chain_ops.deinit(self.machine);
+        self.collecting.deinit(self.machine);
+    }
+
     pub fn fail(self: *Run, pos: ast.Pos, class: diag.Class, comptime fmt: []const u8, args: anytype) Error {
         const message = std.fmt.allocPrint(self.alloc, fmt, args) catch fmt;
         self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message, .function = self.function };
@@ -117,17 +168,19 @@ pub const Run = struct {
             .source => "the source is larger than the source budget",
             .nesting => "the source nests deeper than the nesting budget",
             .depth => "calls and the expressions inside them nest deeper than the depth budget",
+            .machine => std.fmt.allocPrint(self.alloc, "the machine's memory (the code, the frames, the operands) is past its budget ({d} bytes)", .{self.budgets.machine_bytes}) catch "the machine's memory is past its budget",
+            .kept => std.fmt.allocPrint(self.alloc, "what the run keeps at a `yield` is past the kept budget ({d} bytes)", .{self.budgets.kept_bytes}) catch "what the run keeps at a `yield` is past the kept budget",
         } };
         return error.Stop;
     }
 
-    /// Steps, charged; `n` for a builtin's work in proportion to what it
-    /// touches.
     /// Work done (see `work`): nothing outside tests.
     pub inline fn tally(self: *Run, n: u64) void {
         if (@import("builtin").is_test) self.work +|= n;
     }
 
+    /// Steps, charged; `n` for a builtin's work in proportion to what it
+    /// touches.
     pub fn charge(self: *Run, pos: ast.Pos, n: u64) Error!void {
         // **A CHARGE PAST WHAT IS LEFT STOPS A STEP PAST THE BUDGET**, as a
         // step does: the run never did that work, so its count is not the
@@ -151,6 +204,11 @@ pub const Run = struct {
     /// An allocation's failure, read as the arena budget.
     pub fn oom(self: *Run, pos: ast.Pos) Error {
         return self.budgetStop(pos, .arena);
+    }
+
+    /// A failure of the machine's own memory, read as its budget.
+    pub fn machineOom(self: *Run, pos: ast.Pos) Error {
+        return self.budgetStop(pos, .machine);
     }
 
     // ── statements ────────────────────────────────────────────────────────
@@ -267,15 +325,7 @@ pub const Run = struct {
     /// the loop reaches it. In place: a loop copies nothing, so a loop over
     /// a list inside another costs no arena (metal-vmm QUEUE 208(a)).
     noinline fn listFor(self: *Run, pos: ast.Pos, f: *const ListFor) Error!Flow {
-        const l = try self.eval(f.list);
-        const t = switch (l) {
-            .table => |t| switch (t.kind) {
-                .empty => return .normal,
-                .list => t,
-                .map => return self.fail(f.list.pos, .type, "`for x in` a map: walk `keys(m)` instead", .{}),
-            },
-            else => return self.fail(f.list.pos, .type, "`for x in` takes a list, given {s}", .{l.typeName()}),
-        };
+        const t = try self.listToWalk(f.list.pos, try self.eval(f.list)) orelse return .normal;
         const n = t.list.items.len;
         try self.charge(pos, n);
         for (0..n) |i| {
@@ -291,11 +341,28 @@ pub const Run = struct {
         return .normal;
     }
 
+    /// **`for x in`'s list**, `pos` its expression's: null for a table
+    /// still empty (the loop runs no turn and charges nothing).
+    pub fn listToWalk(self: *Run, pos: ast.Pos, l: Value) Error!?*Table {
+        return switch (l) {
+            .table => |t| switch (t.kind) {
+                .empty => null,
+                .list => t,
+                .map => self.fail(pos, .type, "`for x in` a map: walk `keys(m)` instead", .{}),
+            },
+            else => self.fail(pos, .type, "`for x in` takes a list, given {s}", .{l.typeName()}),
+        };
+    }
+
     fn int(self: *Run, e: *const ast.Expr, what: []const u8) Error!i64 {
-        const v = try self.eval(e);
+        return self.intOf(e.pos, try self.eval(e), what);
+    }
+
+    /// A numeric `for`'s start, end or step (`what`), `pos` its expression's.
+    pub fn intOf(self: *Run, pos: ast.Pos, v: Value, what: []const u8) Error!i64 {
         return switch (v) {
             .int => |i| i,
-            else => self.fail(e.pos, .type, "{s} must be an integer, not {s}", .{ what, v.typeName() }),
+            else => self.fail(pos, .type, "{s} must be an integer, not {s}", .{ what, v.typeName() }),
         };
     }
 
@@ -307,7 +374,7 @@ pub const Run = struct {
         return t;
     }
 
-    fn setIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value, v: Value) Error!void {
+    pub fn setIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value, v: Value) Error!void {
         const t = switch (obj) {
             .table => |t| t,
             else => return self.fail(pos, .type, "only a list or a map can be indexed, not {s}", .{obj.typeName()}),
@@ -340,7 +407,7 @@ pub const Run = struct {
         }
     }
 
-    fn getIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value) Error!Value {
+    pub fn getIndex(self: *Run, pos: ast.Pos, obj: Value, key: Value) Error!Value {
         const t = switch (obj) {
             .table => |t| t,
             else => return self.fail(pos, .type, "only a list or a map can be indexed, not {s}", .{obj.typeName()}),
@@ -387,7 +454,7 @@ pub const Run = struct {
         }
     }
 
-    noinline fn constUnset(self: *Run, pos: ast.Pos, i: u16) Error {
+    pub noinline fn constUnset(self: *Run, pos: ast.Pos, i: u16) Error {
         return self.fail(pos, .name, "the `const` {s} is read before its line has run", .{self.program.const_names[i]});
     }
 
@@ -401,7 +468,7 @@ pub const Run = struct {
         return self.unaryOp(e.pos, e.kind.unary.op, try self.eval(e.kind.unary.operand));
     }
 
-    noinline fn unaryOp(self: *Run, pos: ast.Pos, op: ast.UnOp, v: Value) Error!Value {
+    pub noinline fn unaryOp(self: *Run, pos: ast.Pos, op: ast.UnOp, v: Value) Error!Value {
         switch (op) {
             .not => return .{ .boolean = !v.truthy() },
             .neg => switch (v) {
@@ -469,7 +536,7 @@ pub const Run = struct {
         return if (v == .string) " (`tonumber(s)` reads one from a string)" else "";
     }
 
-    noinline fn arith(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
+    pub noinline fn arith(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const a = switch (l) {
             .int => |i| i,
             else => return self.fail(pos, .type, "`{s}` takes integers, and its left is {s}{s}", .{ opText(op), l.typeName(), toNumberHint(l) }),
@@ -513,8 +580,8 @@ pub const Run = struct {
         // On the run's stack of parts: a part's own chain stacks above, and
         // the stack can move as it grows, so the parts are reached by index.
         const base = self.chain_parts.items.len;
-        self.chain_parts.appendNTimes(self.alloc, .nil, n) catch return self.oom(pos);
-        self.chain_ops.appendNTimes(self.alloc, pos, n) catch return self.oom(pos);
+        self.chain_parts.appendNTimes(self.machine, .nil, n) catch return self.machineOom(pos);
+        self.chain_ops.appendNTimes(self.machine, pos, n) catch return self.machineOom(pos);
         defer {
             self.chain_parts.shrinkRetainingCapacity(base);
             self.chain_ops.shrinkRetainingCapacity(base);
@@ -540,6 +607,13 @@ pub const Run = struct {
         const parts = self.chain_parts.items[base..][0..n];
         const ops = self.chain_ops.items[base..][0..n];
         ops[n - 1] = ops[n - 2];
+        return self.joinChain(pos, parts, ops);
+    }
+
+    /// A `..` chain's parts, evaluated, joined (`concatChain`): `ops[k]` is
+    /// the `..` part k is checked at.
+    pub fn joinChain(self: *Run, pos: ast.Pos, parts: []const Value, ops: []const ast.Pos) Error!Value {
+        const n = parts.len;
         // Checked as the nested joins would have: the innermost pair, then
         // outward, each at its own `..`.
         var total: usize = 0;
@@ -594,7 +668,7 @@ pub const Run = struct {
         };
     }
 
-    noinline fn compare(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
+    pub noinline fn compare(self: *Run, pos: ast.Pos, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const order: std.math.Order = switch (l) {
             .int => |a| switch (r) {
                 .int => |b| std.math.order(a, b),
@@ -653,11 +727,10 @@ pub const Run = struct {
     /// stays done: its output, and its changes in the effects log.
     noinline fn attempt(self: *Run, pos: ast.Pos, index: u32, arg_exprs: []const *ast.Expr) Error!Value {
         var small: [8]Value = undefined;
-        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.alloc.alloc(Value, arg_exprs.len) catch return self.oom(pos);
+        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.machineOom(pos);
+        defer if (arg_exprs.len > small.len) self.machine.free(vals);
         for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
-        const out = try self.newTable(pos);
-        out.kind = .map;
-        const a = self.alloc;
+        const out = try self.attemptTable(pos);
         const got = self.invoke(pos, index, vals) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Stop => {
@@ -665,15 +738,32 @@ pub const Run = struct {
                 if (s.class == .budget) return error.Stop;
                 self.stop = null;
                 self.ret = .nil;
-                out.map.put(a, "ok", .{ .boolean = false }) catch return self.oom(pos);
-                out.map.put(a, "error", .{ .string = s.message }) catch return self.oom(pos);
-                out.map.put(a, "class", .{ .string = @tagName(s.class) }) catch return self.oom(pos);
-                out.map.put(a, "line", .{ .int = s.line }) catch return self.oom(pos);
-                out.map.put(a, "column", .{ .int = s.column }) catch return self.oom(pos);
-                out.map.put(a, "in_function", .{ .string = s.function }) catch return self.oom(pos);
-                return .{ .table = out };
+                return self.attemptFailed(pos, out, s);
             },
         };
+        return self.attemptReturned(pos, out, got);
+    }
+
+    /// `attempt`'s answer, made before the call (so its arena comes first).
+    pub fn attemptTable(self: *Run, pos: ast.Pos) Error!*Table {
+        const out = try self.newTable(pos);
+        out.kind = .map;
+        return out;
+    }
+
+    pub fn attemptFailed(self: *Run, pos: ast.Pos, out: *Table, s: diag.Stop) Error!Value {
+        const a = self.alloc;
+        out.map.put(a, "ok", .{ .boolean = false }) catch return self.oom(pos);
+        out.map.put(a, "error", .{ .string = s.message }) catch return self.oom(pos);
+        out.map.put(a, "class", .{ .string = @tagName(s.class) }) catch return self.oom(pos);
+        out.map.put(a, "line", .{ .int = s.line }) catch return self.oom(pos);
+        out.map.put(a, "column", .{ .int = s.column }) catch return self.oom(pos);
+        out.map.put(a, "in_function", .{ .string = s.function }) catch return self.oom(pos);
+        return .{ .table = out };
+    }
+
+    pub fn attemptReturned(self: *Run, pos: ast.Pos, out: *Table, got: Value) Error!Value {
+        const a = self.alloc;
         out.map.put(a, "ok", .{ .boolean = true }) catch return self.oom(pos);
         if (got != .nil) out.map.put(a, "value", got) catch return self.oom(pos);
         return .{ .table = out };
@@ -692,7 +782,8 @@ pub const Run = struct {
     /// tabs, and a newline.
     fn print(self: *Run, pos: ast.Pos, arg_exprs: []const *ast.Expr) Error!Value {
         var small: [8]Value = undefined;
-        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.alloc.alloc(Value, arg_exprs.len) catch return self.oom(pos);
+        const vals = if (arg_exprs.len <= small.len) small[0..arg_exprs.len] else self.machine.alloc(Value, arg_exprs.len) catch return self.machineOom(pos);
+        defer if (arg_exprs.len > small.len) self.machine.free(vals);
         for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
         for (vals, arg_exprs, 0..) |v, a, i| {
             if (i > 0) try self.write(pos, "\t");
@@ -707,7 +798,7 @@ pub const Run = struct {
         const f = &self.program.functions[index];
         if (self.depth >= self.budgets.call_depth) return self.budgetStop(pos, .call_depth);
         const new_base = self.stack.items.len;
-        self.stack.appendNTimes(self.alloc, .nil, f.frame) catch return self.oom(pos);
+        self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.machineOom(pos);
         for (arg_exprs, 0..) |a, i| {
             const v = try self.eval(a);
             self.stack.items[new_base + i] = v;
@@ -720,7 +811,7 @@ pub const Run = struct {
         const f = &self.program.functions[index];
         if (self.depth >= self.budgets.call_depth) return self.budgetStop(pos, .call_depth);
         const new_base = self.stack.items.len;
-        self.stack.appendNTimes(self.alloc, .nil, f.frame) catch return self.oom(pos);
+        self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.machineOom(pos);
         @memcpy(self.stack.items[new_base..][0..args.len], args);
         return self.enterFunction(f, new_base);
     }
@@ -750,7 +841,7 @@ pub const Run = struct {
     pub fn main(self: *Run) Error!void {
         self.consts = self.alloc.alloc(?Value, self.program.const_names.len) catch return self.oom(self.program.main.pos);
         @memset(self.consts, null);
-        self.stack.appendNTimes(self.alloc, .nil, self.program.main.frame) catch return self.oom(self.program.main.pos);
+        self.stack.appendNTimes(self.machine, .nil, self.program.main.frame) catch return self.machineOom(self.program.main.pos);
         self.base = 0;
         _ = try self.block(self.program.main.body);
     }
@@ -770,7 +861,7 @@ pub const Run = struct {
     }
 };
 
-fn opText(op: ast.BinOp) []const u8 {
+pub fn opText(op: ast.BinOp) []const u8 {
     return switch (op) {
         .add => "+",
         .sub => "-",

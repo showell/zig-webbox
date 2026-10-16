@@ -50,6 +50,19 @@ const topics = .{
 /// evaluates them into a buffer this long.
 pub const most_args = 4;
 
+/// **THE BUILTINS THAT CALL THE STORE** (metal-vmm QUEUE 211, Steve's
+/// model): a slice ends after each, so a host can let a request in between
+/// a run's I/O (`vm.zig`'s `.builtin`).
+pub const touches_store: std.EnumSet(B) = blk: {
+    @setEvalBranchQuota(10_000);
+    var set: std.EnumSet(B) = .initEmpty();
+    for (@import("builtins_store.zig").specs) |s| set.insert(s.name);
+    break :blk set;
+};
+
+/// The builtins that change the store: what a background run refuses.
+pub const changes_store: std.EnumSet(B) = .initMany(&.{ .replace, .append, .mkdir, .remove, .remove_tree });
+
 /// Every builtin's `Spec`, by name.
 pub const specs: std.EnumArray(B, Spec) = blk: {
     @setEvalBranchQuota(10_000);
@@ -83,6 +96,12 @@ pub fn tooMany(run: *Run, pos: ast.Pos, b: B) Error {
 /// builtin.
 pub fn call(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!Value {
     const s = specs.get(b);
+    if (changes_store.contains(b)) {
+        run.tried_change = true;
+        // **A BACKGROUND RUN ONLY READS** (metal-vmm QUEUE 211, Steve's
+        // model), refused before its arguments or its path are looked at.
+        if (run.read_only) return run.fail(pos, .argument, "`{s}` changes the store, and a background run only reads: send it as an `atomic` run", .{@tagName(b)});
+    }
     if (args.len < s.at_least or args.len > s.at_most) {
         if (s.at_least == s.at_most) return run.fail(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ @tagName(b), s.at_least, plural(s.at_least), args.len });
         return run.fail(pos, .argument, "`{s}` takes {d} to {d} arguments, given {d}", .{ @tagName(b), s.at_least, s.at_most, args.len });

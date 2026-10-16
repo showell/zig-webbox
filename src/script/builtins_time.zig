@@ -16,12 +16,22 @@ const spec = bi.spec;
 pub const specs = [_]bi.Spec{
     spec(.now, 0, 0, now),
     spec(.budget, 0, 0, budget),
+    spec(.yield, 0, 0, yield),
     spec(.date, 1, 1, date),
     spec(.seconds, 1, 1, seconds),
 };
 
 fn now(run: *Run, _: ast.Pos, _: []const Value) Error!Value {
     return .{ .int = run.now };
+}
+
+/// **`yield()`** (metal-vmm QUEUE 211, M1, as Steve's model of 2026-10-15
+/// left it): a collection point only. The VM keeps the values the run
+/// still reaches, copied into a fresh arena (its own op, `collect`); a
+/// slice's end is the host's to choose, never the script's. The walker
+/// keeps everything, so here it is nothing.
+fn yield(_: *Run, _: ast.Pos, _: []const Value) Error!Value {
+    return .nil;
 }
 
 /// **`budget()`** (QUEUE 206): what is left of each budget a script spends

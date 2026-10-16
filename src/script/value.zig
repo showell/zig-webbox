@@ -98,7 +98,12 @@ pub const Budgeted = struct {
             while (c) |x| {
                 c = x.next;
                 const base: [*]u8 = @ptrCast(x);
-                self.backing.rawFree(base[0..x.total], chunk_align, @returnAddress());
+                // **IN THE TESTS, FREED IS OVERWRITTEN**, so a value still
+                // read after its arena went (a root a `yield` missed)
+                // reads as garbage, not as what it was.
+                const whole = base[0..x.total];
+                if (@import("builtin").is_test) @memset(whole, 0xaa);
+                self.backing.rawFree(whole, chunk_align, @returnAddress());
             }
         }
         self.* = .{ .backing = self.backing, .limit = self.limit };

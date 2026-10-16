@@ -259,21 +259,21 @@ test "builtins: a change on the disk is in the effects log, however little arena
 
 // ── v31's builtins (metal-vmm QUEUE 206) ──────────────────────────────────
 
-test "builtins: walk lists every entry under a folder, depth first and sorted, for one read a folder" {
+test "builtins: walk lists every entry under a folder, depth first and sorted, for one read a folder and one an entry's stat" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
     try f.expectOutput("for e in walk(\"\") do print(e.path, e.size, e.kind) end", "chat\t0\tdirectory\nchat/a.md\t5\tfile\nchat/b.md\t6\tfile\ntop.txt\t3\tfile\n");
     try f.expectOutput("for e in walk(\"chat\") do print(e.path) end", "chat/a.md\nchat/b.md\n");
     try f.expectOutput("local w = walk(\"\") print(w[2].modified > 1000000000)", "true\n");
-    // Two folders, two reads: the root and chat.
+    // Two folders and four entries, six reads.
     {
-        var r = f.run("print(#walk(\"\"))", .{ .reads = 2 });
+        var r = f.run("print(#walk(\"\"))", .{ .reads = 6 });
         defer r.deinit();
         try testing.expect(r.finished());
     }
     {
-        var r = f.run("print(#walk(\"\"))", .{ .reads = 1 });
+        var r = f.run("print(#walk(\"\"))", .{ .reads = 5 });
         defer r.deinit();
         try testing.expectEqual(script.diag.Budget.reads, r.stop.?.budget.?);
     }
@@ -494,13 +494,14 @@ test "builtins: walk's options: depth stops it and reads fewer folders, like and
     try f.expectOutput("for e in walk(\"\", {depth = 1}) do print(e.path, e.kind, e.size) end", "chat\tdirectory\t0\ntop.txt\tfile\t3\n");
     try f.expectOutput("for e in walk(\"chat\", {like = \"*.md\"}) do print(e.path) end", "chat/a.md\nchat/b.md\nchat/deep/deeper/c.md\n");
     try f.expectOutput("for e in walk(\"\", {kind = \"directory\", depth = 2}) do print(e.path) end", "chat\nchat/deep\n");
-    // depth 1 is one folder read; the whole walk is four.
+    // depth 1 is one folder read and its two entries' stats; the whole
+    // walk is four folders and seven stats.
     var shallow = f.run("local w = walk(\"\", {depth = 1}) print(10 - budget().reads)", .{ .reads = 10 });
     defer shallow.deinit();
-    try testing.expectEqualStrings("1\n", shallow.output);
-    var whole = f.run("local w = walk(\"\") print(10 - budget().reads)", .{ .reads = 10 });
+    try testing.expectEqualStrings("3\n", shallow.output);
+    var whole = f.run("local w = walk(\"\") print(20 - budget().reads)", .{ .reads = 20 });
     defer whole.deinit();
-    try testing.expectEqualStrings("4\n", whole.output);
+    try testing.expectEqualStrings("11\n", whole.output);
     try f.expectStop("local w = walk(\"\", {deep = 1})", .argument);
     try f.expectStop("local w = walk(\"\", {depth = 0})", .argument);
     try f.expectStop("local w = walk(\"\", {kind = \"link\"})", .argument);
@@ -630,4 +631,153 @@ test "builtins: a store error is never read as missing: a remove that can't look
     var m = f.run("remove(\"chat/none.md\")", .{});
     defer m.deinit();
     try testing.expectEqualStrings("FileNotFound", m.effects[0].outcome);
+}
+
+test "builtins: one read brings at most its cap, whole or in part; a bigger file is read in parts (metal-vmm QUEUE 211, the caps)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    const big = try testing.allocator.alloc(u8, 3000);
+    defer testing.allocator.free(big);
+    @memset(big, 'x');
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/big.txt", .data = big });
+    const capped: script.Budgets = .{ .call_bytes = 1000 };
+    for ([_][]const u8{ "read(\"big.txt\")", "read(\"big.txt\", 100)", "read(\"big.txt\", 0, 1001)" }) |src| {
+        var r = f.run(src, capped);
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {?}\n", .{ src, r.stop });
+        try testing.expectEqual(script.diag.Class.argument, r.stop.?.class);
+        try testing.expect(std.mem.indexOf(u8, r.stop.?.message, "read(p, offset, n)") != null);
+    }
+    // In parts, under the cap: the whole of it.
+    var r = f.run("local n = 0 local at = 0 while true do local part = read(\"big.txt\", at, 1000) if part == \"\" then break end n = n + #part at = at + #part end print(n)", capped);
+    defer r.deinit();
+    try testing.expect(r.finished());
+    try testing.expectEqualStrings("3000\n", r.output);
+}
+
+test "builtins: a scan takes at most its cap too; in parts, by its range, it counts and finds as the whole file does (metal-vmm QUEUE 211, the caps)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const data = try plantedFile(&f, "data/big.txt", 5000, 3);
+    defer testing.allocator.free(data);
+    const capped: script.Budgets = .{ .call_bytes = 700 };
+    // The whole file, or a range past the cap, is refused, naming the range.
+    for ([_][]const u8{ "count_lines(\"big.txt\")", "count_in(\"big.txt\", \"ab\")", "find_in(\"big.txt\", \"ab\")", "count_lines(\"big.txt\", 0, 701)", "find_in(\"big.txt\", \"ab\", 100)" }) |call| {
+        var src: [128]u8 = undefined;
+        var r = f.run(try std.fmt.bufPrint(&src, "print({s})", .{call}), capped);
+        defer r.deinit();
+        const s = r.stop orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(script.diag.Class.argument, s.class);
+        try testing.expect(std.mem.indexOf(u8, s.message, "offset, n)") != null);
+    }
+    // In parts of 700: the counts add up to the whole's, and the first
+    // match is found in the part it starts in, read past the part's end.
+    var r = f.run(
+        \\local size = stat("big.txt").size
+        \\local lines = 0
+        \\local abs = 0
+        \\local first = nil
+        \\local at = 0
+        \\while at < size do
+        \\  lines = lines + count_lines("big.txt", at, 700)
+        \\  abs = abs + count_in("big.txt", "ab", at, 700)
+        \\  if first == nil then first = find_in("big.txt", "b\na\nb", at, 700) end
+        \\  at = at + 700
+        \\end
+        \\print(lines, abs, first)
+    , capped);
+    defer r.deinit();
+    if (r.stop) |s| std.debug.print("stopped: {s}\n", .{s.message});
+    try testing.expect(r.finished());
+    var want: [64]u8 = undefined;
+    const nl = std.mem.count(u8, data, "\n") + @intFromBool(data[data.len - 1] != '\n');
+    const first = std.mem.indexOf(u8, data, "b\na\nb").?;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{d}\t{d}\t{d}\n", .{ nl, std.mem.count(u8, data, "ab"), first }), r.output);
+    // A match across a part's end belongs to the part it starts in.
+    var seam: [1400]u8 = undefined;
+    @memset(&seam, 'x');
+    @memcpy(seam[699..701], "ab");
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/seam.txt", .data = &seam });
+    var s = f.run("print(find_in(\"seam.txt\", \"ab\", 0, 700), find_in(\"seam.txt\", \"ab\", 700, 700), count_in(\"seam.txt\", \"ab\", 0, 700), count_in(\"seam.txt\", \"ab\", 700, 700), count_lines(\"seam.txt\", 0, 700), count_lines(\"seam.txt\", 700, 700), find_in(\"seam.txt\", \"ab\", 5000, 10))", capped);
+    defer s.deinit();
+    try testing.expectEqualStrings("699\tnil\t1\t0\t0\t1\tnil\n", s.output);
+}
+
+/// What the walk-vanish test removes between a listing and its stat.
+var vanish_path: ?[]const u8 = null;
+var vanish_io: std.Io = undefined;
+
+fn vanishOnce() void {
+    const p = vanish_path orelse return;
+    vanish_path = null;
+    std.Io.Dir.cwd().deleteFile(vanish_io, p) catch {};
+}
+
+test "builtins: walk's stats count as reads, a call considers at most call_entries, and a walk in parts by `after` gives the whole walk's entries (metal-vmm QUEUE 211, the caps)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    try f.tmp.dir.createDirPath(io, "data/chat/deep/deeper");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/deep/deeper/c.md", .data = "x" });
+    // Four folders listed and seven entries stat'ed.
+    var reads = f.run("local w = walk(\"\") print(20 - budget().reads)", .{ .reads = 20 });
+    defer reads.deinit();
+    try testing.expectEqualStrings("11\n", reads.output);
+    // In parts of at most two entries, every option the same: the whole.
+    const parts =
+        \\function all(opts_kind)
+        \\  local got = {}
+        \\  local after = ""
+        \\  while true do
+        \\    local part = nil
+        \\    if opts_kind == "" then part = walk("", {after = after}) else part = walk("", {after = after, kind = opts_kind}) end
+        \\    local more = nil
+        \\    for e in part do
+        \\      if e.kind == "more" then more = e.path else push(got, e.path) end
+        \\    end
+        \\    if more == nil then return join(got, ",") end
+        \\    after = more
+        \\  end
+        \\end
+        \\print(all(""))
+        \\print(all("file"))
+    ;
+    var whole = f.run(parts, .{});
+    defer whole.deinit();
+    try testing.expectEqualStrings("chat,chat/a.md,chat/b.md,chat/deep,chat/deep/deeper,chat/deep/deeper/c.md,top.txt\nchat/a.md,chat/b.md,chat/deep/deeper/c.md,top.txt\n", whole.output);
+    var cut = f.run(parts, .{ .call_entries = 2 });
+    defer cut.deinit();
+    if (cut.stop) |s| std.debug.print("{s}\n", .{s.message});
+    try testing.expectEqualStrings(whole.output, cut.output);
+    // A part is the cap's entries and where to go on from.
+    var part = f.run("local w = walk(\"\") print(#w, w[#w].kind, w[#w].path)", .{ .call_entries = 2 });
+    defer part.deinit();
+    try testing.expectEqualStrings("3\tmore\tchat/a.md\n", part.output);
+    // `after` is a place in the walk's order, there or not.
+    try f.expectOutput("for e in walk(\"\", {after = \"chat/aa.md\"}) do print(e.path) end", "chat/b.md\nchat/deep\nchat/deep/deeper\nchat/deep/deeper/c.md\ntop.txt\n");
+    try f.expectOutput("for e in walk(\"chat\", {after = \"chat/deep\"}) do print(e.path) end", "chat/deep/deeper\nchat/deep/deeper/c.md\n");
+    try f.expectStop("walk(\"chat\", {after = \"top.txt\"})", .argument);
+    // An entry gone between its folder's listing and its stat: a background
+    // run, which only reads while others write, goes on without it; an
+    // atomic one, which holds the turn, says so.
+    const b_md = try std.fs.path.join(testing.allocator, &.{ f.root, "chat", "b.md" });
+    defer testing.allocator.free(b_md);
+    script.builtins_store.between_list_and_stat_for_test = vanishOnce;
+    defer script.builtins_store.between_list_and_stat_for_test = null;
+    vanish_io = io;
+    for ([_]script.process.Mode{ .background, .atomic }) |mode| {
+        try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/b.md", .data = "world!" });
+        vanish_path = b_md;
+        const p = try script.process.Process.start(io, testing.allocator, f.root, "for e in walk(\"chat\", {depth = 1}) do print(e.path) end", mode, .{}, 0, 4096);
+        defer p.kill();
+        while (p.step(.{}) == .paused) {}
+        switch (mode) {
+            .background => try testing.expectEqualStrings("chat/a.md\nchat/deep\n", p.output()),
+            .atomic => try testing.expectEqual(script.diag.Class.store, p.status().stop.?.class),
+        }
+    }
 }
