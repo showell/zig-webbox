@@ -781,3 +781,12 @@ test "builtins: walk's stats count as reads, a call considers at most call_entri
         }
     }
 }
+
+test "builtins: an empty needle is found where the search starts, never a crash: find and contains, as Lua's find (220's cold read found the panic)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(find(\"abc\", \"\"), contains(\"abc\", \"\"), find(\"\", \"\"), contains(\"\", \"\"))", "1\ttrue\t1\ttrue\n");
+    try f.expectStop("split(\"abc\", \"\")", .argument);
+    try f.expectStop("substitute(\"abc\", \"\", \"x\")", .argument);
+}

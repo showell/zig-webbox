@@ -149,6 +149,9 @@ pub const Finder = struct {
     /// Where the needle first is in `hay` at or after `from`.
     pub fn find(f: *const Finder, hay: []const u8, from: usize) Error!?usize {
         const n = f.needle;
+        // "" is found where the search starts, as Lua's `find` answers 1
+        // (it read `n[0]` and panicked: 220's cold read).
+        if (n.len == 0) return if (from <= hay.len) from else null;
         var at = from;
         var stops: u64 = 0;
         var compared: u64 = 0;
