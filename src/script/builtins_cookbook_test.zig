@@ -23,3 +23,16 @@ test "cookbook: sort by a key, descending, keeps equal keys in their order; take
     // A new list: the old one is as it was.
     try f.expectOutput("local l = {1, 2} local t = take(l, 1) push(t, 9) print(#l, #t)", "2\t2\n");
 }
+
+test "cookbook: path joins its parts with / and \"\" is the root; basename is the last part; strip_suffix takes a suffix off, if it is there" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(path(\"chat\", \"a.md\"), path(\"\", \"top.txt\"), path(\"a\", \"\", \"b\", \"c\"), path(\"x\"), path(\"\"))", "chat/a.md\ttop.txt\ta/b/c\tx\t\n");
+    // What it makes is a path the store takes.
+    try f.expectOutput("print(read(path(\"chat\", \"a.md\")), #ls(path(\"\", \"chat\")))", "hello\t2\n");
+    try f.expectStop("path(\"a\", 1)", .type);
+    try f.expectOutput("print(basename(\"chat/channels/x.md\"), basename(\"top.txt\"), basename(\"\"))", "x.md\ttop.txt\t\n");
+    try f.expectOutput("print(strip_suffix(\"plans.md\", \".md\"), strip_suffix(\"plans.count\", \".md\"), strip_suffix(\".md\", \".md\"), strip_suffix(\"a\", \"\"))", "plans\tplans.count\t\ta\n");
+    try f.expectOutput("print(strip_suffix(basename(\"chat/s/plans.md\"), \".md\"))", "plans\n");
+}

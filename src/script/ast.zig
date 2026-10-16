@@ -38,6 +38,9 @@ pub const Builtin = enum {
     like,
     rep,
     substitute,
+    path,
+    basename,
+    strip_suffix,
     // numbers
     min,
     max,

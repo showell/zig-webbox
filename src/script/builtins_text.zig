@@ -33,7 +33,56 @@ pub const specs = [_]bi.Spec{
     spec(.tonumber, 1, 1, tonumber),
     spec(.rep, 2, 2, rep),
     spec(.substitute, 3, 3, substitute),
+    spec(.path, 1, bi.most_args, path),
+    spec(.basename, 1, 1, basename),
+    spec(.strip_suffix, 2, 2, stripSuffix),
 };
+
+/// **`path(a, b, ...)`**: the parts joined with `/`, each "" left out, so
+/// "" is the root (QUEUE 220: `dir .. "/" .. name`, with the root's case
+/// written by hand). A step a byte it makes.
+fn path(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    var total: u64 = 0;
+    for (args, 0..) |a, i| {
+        const part = switch (a) {
+            .string => |x| x,
+            else => return run.fail(pos, .type, "`path`'s part {d} is {s}, not a string", .{ i + 1, a.typeName() }),
+        };
+        if (part.len > 0) total += part.len + 1;
+    }
+    if (total > 0) total -= 1;
+    try run.charge(pos, total);
+    const out = run.alloc.alloc(u8, @intCast(total)) catch return run.oom(pos);
+    var at: usize = 0;
+    for (args) |a| {
+        if (a.string.len == 0) continue;
+        if (at > 0) {
+            out[at] = '/';
+            at += 1;
+        }
+        @memcpy(out[at..][0..a.string.len], a.string);
+        at += a.string.len;
+    }
+    run.tally(total);
+    return .{ .string = out };
+}
+
+/// **`basename(p)`**: what follows the last `/`, or all of `p`.
+fn basename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const p = try bi.stringArg(run, pos, .basename, args[0], "its path");
+    try run.charge(pos, p.len);
+    run.tally(p.len);
+    return .{ .string = if (std.mem.lastIndexOfScalar(u8, p, '/')) |i| p[i + 1 ..] else p };
+}
+
+/// **`strip_suffix(s, t)`**: `s` without `t` at its end, or `s` as it is.
+fn stripSuffix(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const str = try bi.stringArg(run, pos, .strip_suffix, args[0], "its first argument");
+    const t = try bi.stringArg(run, pos, .strip_suffix, args[1], "its suffix");
+    try run.charge(pos, t.len);
+    run.tally(t.len);
+    return .{ .string = if (std.mem.endsWith(u8, str, t)) str[0 .. str.len - t.len] else str };
+}
 
 /// **`rep(s, n)`**: `s` `n` times over. Charged a step a byte before the
 /// string is made.
