@@ -828,28 +828,54 @@ transcript, its `.count`, a `.reactions.jsonl` for one in three, and an
 has `find_message`'s phrase, so it searches every transcript to the end.
 The sizes are to within a tenth.
 
-| script | messages a topic | the largest site that fits | its transcripts | what stops it past that |
-|---|---|---|---|---|
-| `topics` | 10 (~2 KiB) | 343 topics | 729 KiB | reads |
-| `topics` | 100 (~21 KiB) | 163 topics | 3.4 MiB | arena |
-| `topics` | 1000 (~215 KiB) | 17 topics | 3.6 MiB | steps |
-| `stale_caches` | 10 | 94 topics | 199 KiB | reads |
-| `stale_caches` | 100 | 94 topics | 2.0 MiB | reads |
-| `stale_caches` | 1000 | 72 topics | 15.2 MiB | steps |
-| `find_message` | 10 | 124 topics | 263 KiB | reads |
-| `find_message` | 100 | 124 topics | 2.6 MiB | reads |
-| `find_message` | 1000 | 72 topics | 15.2 MiB | read bytes: it stops itself and says how far it got |
-| `chat_topics` | any | 60 topics | 12.6 MiB at 1000 | reads: walk's stats, an `exists` and a `read` a topic |
-| `where_the_bytes_are` | any | 94 topics (about 280 files) | 19.8 MiB at 1000 | reads: walk's stats |
-| `big_files` | any | 46 topics | 9.7 MiB at 1000 | reads: an `is_dir` and a `stat` an entry |
+| mode | script | messages a topic | largest site that fits | its transcripts | past it |
+|---|---|---|---|---|---|
+| atomic | `topics` | 10 (~2 KiB each) | 343 topics | 729 KiB | budget reads |
+| atomic | `stale_caches` | 10 (~2 KiB each) | 94 topics | 199 KiB | budget reads |
+| atomic | `find_message` | 10 (~2 KiB each) | 124 topics | 263 KiB | budget reads |
+| atomic | `where_the_bytes_are` | 10 (~2 KiB each) | 94 topics | 199 KiB | budget reads |
+| atomic | `chat_topics` | 10 (~2 KiB each) | 60 topics | 127 KiB | budget reads |
+| atomic | `big_files` | 10 (~2 KiB each) | 46 topics | 97 KiB | budget reads |
+| atomic | `topics` | 100 (~21 KiB each) | 163 topics | 3.4 MiB | budget arena |
+| atomic | `stale_caches` | 100 (~21 KiB each) | 94 topics | 2.0 MiB | budget reads |
+| atomic | `find_message` | 100 (~21 KiB each) | 124 topics | 2.6 MiB | budget reads |
+| atomic | `where_the_bytes_are` | 100 (~21 KiB each) | 94 topics | 2.0 MiB | budget reads |
+| atomic | `chat_topics` | 100 (~21 KiB each) | 60 topics | 1.3 MiB | budget reads |
+| atomic | `big_files` | 100 (~21 KiB each) | 46 topics | 986 KiB | budget reads |
+| atomic | `topics` | 1000 (~215 KiB each) | 17 topics | 3.6 MiB | budget steps |
+| atomic | `stale_caches` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | budget steps |
+| atomic | `find_message` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | reads to its budget, then says how far it got |
+| atomic | `where_the_bytes_are` | 1000 (~215 KiB each) | 94 topics | 19.8 MiB | budget reads |
+| atomic | `chat_topics` | 1000 (~215 KiB each) | 60 topics | 12.6 MiB | budget reads |
+| atomic | `big_files` | 1000 (~215 KiB each) | 46 topics | 9.7 MiB | budget reads |
+| background | `topics` | 10 (~2 KiB each) | 1292 topics | 2.7 MiB | budget steps |
+| background | `stale_caches` | 10 (~2 KiB each) | 1421 topics | 3.0 MiB | budget steps |
+| background | `find_message` | 10 (~2 KiB each) | 804 topics | 1.7 MiB | budget arena |
+| background | `where_the_bytes_are` | 10 (~2 KiB each) | 1069 topics | 2.2 MiB | budget arena |
+| background | `chat_topics` | 10 (~2 KiB each) | 1292 topics | 2.7 MiB | budget arena |
+| background | `big_files` | 10 (~2 KiB each) | 1563 topics | 3.3 MiB | budget reads |
+| background | `topics` | 100 (~21 KiB each) | 163 topics | 3.4 MiB | budget arena |
+| background | `stale_caches` | 100 (~21 KiB each) | 550 topics | 11.6 MiB | budget steps |
+| background | `find_message` | 100 (~21 KiB each) | 605 topics | 12.7 MiB | budget steps |
+| background | `where_the_bytes_are` | 100 (~21 KiB each) | 1069 topics | 22.5 MiB | budget arena |
+| background | `chat_topics` | 100 (~21 KiB each) | 1292 topics | 27.2 MiB | budget arena |
+| background | `big_files` | 100 (~21 KiB each) | 1563 topics | 32.9 MiB | budget reads |
+| background | `topics` | 1000 (~215 KiB each) | 17 topics | 3.6 MiB | budget steps |
+| background | `stale_caches` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | budget steps |
+| background | `find_message` | 1000 (~215 KiB each) | 72 topics | 15.2 MiB | reads to its budget, then says how far it got |
+| background | `where_the_bytes_are` | 1000 (~217 KiB each) | 1069 topics | 226.2 MiB | budget arena |
+| background | `chat_topics` | 1000 (~217 KiB each) | 1292 topics | 273.6 MiB | budget arena |
+| background | `big_files` | 1000 (~217 KiB each) | 1563 topics | 331.2 MiB | budget reads |
 
-**Since walk's stats count as reads** (QUEUE 211, the caps: each is a
-store call, a disk command on metal), every script that walks the chat
-fits fewer topics at the site's 500 reads: `where_the_bytes_are` 94 where
-it fit 1,175, `chat_topics` 60 where it fit 196, `find_message` 124 where
-196, `stale_caches` 94 where 124. The reads budget now bounds what it was
-set to bound, the disk commands a run makes; whether the site's 500 should
-grow with it is the box's and Steve's to say.
+**Two modes, two budgets** (Steve, 2026-10-15): an **atomic** run holds up
+the site's requests, so it keeps the site's 500 reads; a **background**
+run only fills the gaps between them, so it may read 10,000 (angry-gopher
+`admin_script.background_budgets`). Since walk's stats count as reads (each
+a store call, a disk command on metal), every script that walks the chat
+fits fewer topics atomically: `where_the_bytes_are` 94 where it fit 1,175,
+`chat_topics` 60 where 196. In the background, the same scripts fit 1,069
+and 1,292, stopped by the arena, not the reads; the transcript readers by
+their steps.
 
 **The news is mostly bad.** At angry-gopher's scale (its chat is about
 190 MB), nothing that reads transcripts finishes in one run: a
