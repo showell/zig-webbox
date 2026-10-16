@@ -4,23 +4,7 @@
 
 const LARGEST = 15
 
--- Every entry `walk` gives, a part at a time: one call considers at most
--- the call-entries cap (256) and ends its part with where to go on from.
-function walk_all(path, opts)
-  local got = {}
-  opts.after = ""
-  while true do
-    local more = nil
-    for e in walk(path, opts) do
-      if e.kind == "more" then more = e.path else push(got, e) end
-    end
-    if more == nil then return got end
-    opts.after = more
-  end
-end
-
 local folders = {}
-local order = {}
 local files = {}
 for e in walk_all("", {}) do
   if e.kind == "file" then
@@ -29,7 +13,6 @@ for e in walk_all("", {}) do
     if #parts > 1 then top = parts[1] end
     if not has_key(folders, top) then
       folders[top] = {folder = top, files = 0, bytes = 0, empty = 0}
-      push(order, top)
     end
     local f = folders[top]
     f.files = f.files + 1
@@ -41,23 +24,21 @@ end
 
 local rows = {}
 local all = {folder = "all", files = 0, bytes = 0, empty = 0}
-for top in order do
+for top in keys(folders) do
   local f = folders[top]
   push(rows, {folder = f.folder, files = f.files, bytes = f.bytes, size = human(f.bytes), empty = f.empty})
   all.files = all.files + f.files
   all.bytes = all.bytes + f.bytes
   all.empty = all.empty + f.empty
 end
-sort(rows, "bytes")
-reverse(rows)
+sort(rows, "bytes", "desc")
 push(rows, {folder = all.folder, files = all.files, bytes = all.bytes, size = human(all.bytes), empty = all.empty})
 print(table(rows, {"folder", "files", "bytes", "size", "empty"}))
 
-sort(files, "bytes")
-reverse(files)
+sort(files, "bytes", "desc")
 local largest = {}
-for f in files do
-  if #largest < LARGEST then push(largest, {bytes = f.bytes, size = human(f.bytes), path = f.path}) end
+for f in take(files, LARGEST) do
+  push(largest, {bytes = f.bytes, size = human(f.bytes), path = f.path})
 end
 print("")
 print("the largest files:")

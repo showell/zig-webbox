@@ -1,41 +1,23 @@
 -- Check each topic's count cache (its `.count` sidecar, "<count> <size>")
 -- against the transcript itself: the messages counted from the separators
--- between them, without holding the transcript (count_in reads it 64 KiB
--- at a time). Only transcripts under CHECK_BYTES are counted, so a chat of
--- any size fits the read budget; the rest are listed by size alone.
+-- between them, without holding the transcript (count_all scans it a part
+-- at a time, 64 KiB held). A transcript the read budget has no room left
+-- for is listed by size alone.
 
-const CHECK_BYTES = 1048576
 const SEP = "\n\n-------------\n"
-
--- Every entry `walk` gives, a part at a time: one call considers at most
--- the call-entries cap (256) and ends its part with where to go on from.
-function walk_all(path, opts)
-  local got = {}
-  opts.after = ""
-  while true do
-    local more = nil
-    for e in walk(path, opts) do
-      if e.kind == "more" then more = e.path else push(got, e) end
-    end
-    if more == nil then return got end
-    opts.after = more
-  end
-end
 
 -- A topic's label: "#channel sid" or "conversation sid".
 function label(path)
   local parts = split(path, "/")
-  local sid = sub(parts[#parts], 1, -4)
+  local sid = strip_suffix(parts[#parts], ".md")
   if parts[2] == "channels" then return "#" .. parts[3] .. " " .. sid end
   return parts[2] .. " " .. sid
 end
 
 -- The cache's count, or -1 for no cache (or one torn: no newline).
 function cached(md)
-  local path = sub(md, 1, -4) .. ".count"
-  if not exists(path) then return -1 end
-  local text = read(path)
-  if not ends_with(text, "\n") then return -1 end
+  local text = read_or(strip_suffix(md, ".md") .. ".count", nil)
+  if text == nil or not ends_with(text, "\n") then return -1 end
   return tonumber(words(lines(text)[1])[1])
 end
 
@@ -43,11 +25,11 @@ local rows = {}
 local unchecked = {}
 for e in walk_all("chat", {like = "*.md", kind = "file"}) do
   local cache = cached(e.path)
-  if e.size > CHECK_BYTES then
+  if budget().read_bytes < e.size then
     push(unchecked, {topic = label(e.path), bytes = e.size})
   else
     local counted = 0
-    if e.size > 0 then counted = count_in(e.path, SEP) + 1 end
+    if e.size > 0 then counted = count_all(e.path, SEP) + 1 end
     local verdict = "ok"
     if cache == -1 then
       verdict = "no cache"
@@ -66,6 +48,6 @@ print("topics checked", #rows, "stale or missing", bad)
 print(table(rows, {"topic", "cache", "counted", "verdict"}))
 if #unchecked > 0 then
   print("")
-  print("too large to count here (over " .. human(CHECK_BYTES) .. "):")
+  print("not counted: past what the read budget had left:")
   print(table(unchecked, {"topic", "bytes"}))
 end

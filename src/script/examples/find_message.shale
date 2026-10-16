@@ -1,18 +1,15 @@
 -- Find a phrase in the chat: the first message in each topic that has it,
--- with who sent it and when. find_in scans a transcript without holding
--- it; only the 2 KiB before a match is read, to find its message's start.
+-- with who sent it and when. find_next scans a transcript without
+-- holding it; only the 2 KiB before a match is read, to find its message's start.
 -- When the read budget runs low it stops, and says how far it got.
 
 const PHRASE = "line of it"
 const WINDOW = 2048
--- One scan brings at most a megabyte (the call-bytes cap): a bigger
--- transcript is scanned in parts.
-const PART = 1048576
 
 -- A topic's label: "#channel sid" or "conversation sid".
 function label(path)
   local parts = split(path, "/")
-  local sid = sub(parts[#parts], 1, -4)
+  local sid = strip_suffix(parts[#parts], ".md")
   if parts[2] == "channels" then return "#" .. parts[3] .. " " .. sid end
   return parts[2] .. " " .. sid
 end
@@ -27,32 +24,6 @@ function message(path, at)
   return {id = "MSG_" .. head[1], from = sub(head[2], 7), date = sub(head[3], 7)}
 end
 
--- The first offset of the phrase in a file, a part at a time.
-function find_part(path, size)
-  local at = 0
-  while at < size do
-    local found = find_in(path, PHRASE, at, PART)
-    if found ~= nil then return found end
-    at = at + PART
-  end
-  return nil
-end
-
--- Every entry `walk` gives, a part at a time: one call considers at most
--- the call-entries cap (256) and ends its part with where to go on from.
-function walk_all(path, opts)
-  local got = {}
-  opts.after = ""
-  while true do
-    local more = nil
-    for e in walk(path, opts) do
-      if e.kind == "more" then more = e.path else push(got, e) end
-    end
-    if more == nil then return got end
-    opts.after = more
-  end
-end
-
 local topics = walk_all("chat", {like = "*.md", kind = "file"})
 local found = {}
 local looked = 0
@@ -62,7 +33,9 @@ for e in topics do
     break
   end
   looked = looked + 1
-  local at = find_part(e.path, e.size)
+  -- A transcript of any size: the prelude's find_next scans it a part
+  -- (the call-bytes cap) at a time.
+  local at = find_next(e.path, PHRASE, 0)
   if at ~= nil then
     local m = message(e.path, at)
     push(found, {topic = label(e.path), message = m.id, from = m.from, date = m.date, offset = at})

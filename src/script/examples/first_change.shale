@@ -21,9 +21,10 @@ for name in ls("chat") do
   end
 end
 
-if exists(PATH) then
+local last = read_or(PATH, nil)
+if last ~= nil then
   print("the last run wrote:")
-  print(read(PATH))
+  print(last)
 else
   print("no " .. PATH .. " yet")
 end

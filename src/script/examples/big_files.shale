@@ -1,23 +1,12 @@
 -- Every file over a size, with its size, walking the whole data root.
 
-local over = 1000
+const OVER = 1000
 
-function walk_dir(dir, over)
-  local found = 0
-  for name in ls(dir) do
-    local path = name
-    if dir ~= "" then path = dir .. "/" .. name end
-    if is_dir(path) then
-      found = found + walk_dir(path, over)
-    else
-      local size = stat(path).size
-      if size > over then
-        print(size, path)
-        found = found + 1
-      end
-    end
+local found = 0
+for e in walk_all("", {kind = "file"}) do
+  if e.size > OVER then
+    print(e.size, e.path)
+    found = found + 1
   end
-  return found
 end
-
-print("files over " .. over .. " bytes:", walk_dir("", over))
+print("files over " .. OVER .. " bytes:", found)
