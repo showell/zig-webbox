@@ -1479,11 +1479,11 @@ const TestSite = struct {
         // A handler that reads its body through std's reader, not the held
         // one, then answers close: the reader is left ready, so only the
         // answer's head says close (HeadWatch).
-        // An answer of `/big-N` KiB, kept alive: what a client that never
-        // reads makes the host write.
-        if (std.mem.startsWith(u8, t, "/big-")) {
-            const kib = try std.fmt.parseInt(usize, t["/big-".len..], 10);
-            const page = try alloc.alloc(u8, kib * 1024);
+        // An answer of `big_kib` KiB, kept alive: what a client that never
+        // reads makes the host write. Its size is the test's, never the
+        // request's: a test site's route parses no number.
+        if (std.mem.eql(u8, t, "/big")) {
+            const page = try alloc.alloc(u8, big_kib * 1024);
             @memset(page, 'x');
             try req.respond(page, .{});
             return null;
@@ -2656,17 +2656,20 @@ test "linux_host: a request refused before the turn closes its connection: what 
 
 // ── a client that never reads (the box's cold review of 213, finding 1) ──
 
-/// A client that pipelines `n` requests for `/big-<kib>`, with a small
-/// receive buffer, and reads none of the answers.
+/// The size of TestSite's `/big` answer, in KiB.
+var big_kib: usize = 0;
+
+/// A client that pipelines `n` requests for `/big`, `kib` KiB each, with a
+/// small receive buffer, and reads none of the answers.
 fn neverReads(bench: *Bench, n: usize, kib: usize) !Client {
+    big_kib = kib;
     const io = bench.threaded.io();
     const stream = try bench.listener.socket.address.connect(io, .{ .mode = .stream });
     const small: c_int = 4096;
     std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&small)) catch {};
     const served = try std.Thread.spawn(.{}, serveForTest, .{ io, &bench.hub, try bench.listener.accept(io) });
     var w = stream.writer(io, &.{});
-    var buf: [64]u8 = undefined;
-    for (0..n) |_| w.interface.writeAll(try std.fmt.bufPrint(&buf, "GET /big-{d} HTTP/1.1\r\nHost: x\r\n\r\n", .{kib})) catch break;
+    for (0..n) |_| w.interface.writeAll("GET /big HTTP/1.1\r\nHost: x\r\n\r\n") catch break;
     return .{ .stream = stream, .served = served };
 }
 
