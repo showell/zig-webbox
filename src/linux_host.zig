@@ -136,11 +136,7 @@ pub fn Server(comptime S: type) type {
             defer listener.deinit(io);
             // **BETWEEN HANDLERS, A SLICE AT A TIME** (metal-vmm QUEUE 211):
             // the site's background work on a thread of its own.
-            if (@hasDecl(S, "between")) {
-                _ = std.Thread.spawn(.{}, betweenLoop, .{ io, &never_stop }) catch |e| {
-                    std.debug.print("{s}: no thread for work between requests ({s}); a background run is never stepped\n", .{ options.name, @errorName(e) });
-                };
-            }
+            startBetween(io, &never_stop);
 
             std.debug.print("{s}: http://localhost:{d}, bound to {f}  {s}\n", .{ options.name, port, addr, options.routes_hint });
 
@@ -161,6 +157,23 @@ pub fn Server(comptime S: type) type {
                     busy(io, stream);
                 };
             }
+        }
+
+        /// **STEPPED BEFORE THE FIRST REQUEST** (metal-vmm QUEUE 222): one
+        /// call of the site's `between` on the starting thread, before any
+        /// connection is accepted, then the thread that goes on calling it.
+        /// A site that learns from its first `between` that its host steps
+        /// background runs (angry-gopher's and Dog Park's script routes) so
+        /// knows it before the first request, not only once the thread has
+        /// first run, which a request right after start could beat.
+        fn startBetween(io: Io, stop: *const std.atomic.Value(bool)) void {
+            if (!@hasDecl(S, "between")) return;
+            turn.lockUncancelable(io);
+            _ = S.between(io, nowUnix(io));
+            turn.unlock(io);
+            _ = std.Thread.spawn(.{}, betweenLoop, .{ io, stop }) catch |e| {
+                std.debug.print("{s}: no thread for work between requests ({s}); a background run is never stepped\n", .{ host_name, @errorName(e) });
+            };
         }
 
         /// **ONE SLICE A TURN, AND A WAITING HANDLER FIRST** (metal-vmm QUEUE
@@ -1431,7 +1444,10 @@ const TestSite = struct {
     /// A background run's slices, each `between_slice_ms` under the turn.
     var slices_left: std.atomic.Value(u32) = .init(0);
     var slices_run: std.atomic.Value(u32) = .init(0);
+    /// The thread of the first `between` call since it was last zeroed.
+    var first_between_thread: std.atomic.Value(std.Thread.Id) = .init(0);
     pub fn between(io: Io, _: i64) bool {
+        _ = first_between_thread.cmpxchgStrong(0, std.Thread.getCurrentId(), .acq_rel, .acquire);
         if (slices_left.load(.acquire) == 0) return false;
         sleepMs(io, between_slice_ms) catch {};
         _ = slices_run.fetchAdd(1, .acq_rel);
@@ -2373,6 +2389,29 @@ test "linux_host: a request that arrives mid-run waits at most one slice of the 
     }
     // And the run went on between them, not stopped by them.
     try std.testing.expect(TestSite.slices_run.load(.acquire) >= 5);
+}
+
+test "linux_host: the work between requests is first stepped on the starting thread, before any request, and then goes on on its own thread (metal-vmm QUEUE 222)" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    TestSite.first_between_thread.store(0, .release);
+    TestSite.slices_left.store(3, .release);
+    TestSite.slices_run.store(0, .release);
+    var stop: std.atomic.Value(bool) = .init(false);
+    TestHost.startBetween(io, &stop);
+    defer {
+        stop.store(true, .release);
+        // The thread sleeps at most `between_idle_ms` before it sees the stop.
+        sleepMs(io, 2 * between_idle_ms) catch {};
+        TestSite.slices_left.store(0, .release);
+    }
+    try std.testing.expectEqual(std.Thread.getCurrentId(), TestSite.first_between_thread.load(.acquire));
+    try std.testing.expect(TestSite.slices_run.load(.acquire) >= 1);
+    // And the rest of the run is stepped on the thread.
+    var waited: u32 = 0;
+    while (TestSite.slices_run.load(.acquire) < 3 and waited < 100) : (waited += 1) sleepMs(io, 10) catch {};
+    try std.testing.expectEqual(@as(u32, 3), TestSite.slices_run.load(.acquire));
 }
 
 // ── keep-alive (metal-vmm QUEUE 213) ────────────────────────────────────────
