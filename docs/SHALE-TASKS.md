@@ -57,10 +57,10 @@ contiguous run of clusters one request of up to 1 MiB):
   is a directory lookup, a command when its sectors are not cached:
   up to ~256 ms cold.
 
-**Not capped yet:** one `ls` (or a walk's listing) of a folder with
-thousands of entries is one call. Its cost is the folder's directory
-sectors, read whole. A cap there would need `ls` in parts too; it is the
-box's to weigh.
+**Not capped, by the box's call:** one `ls` (or a walk's listing) of a
+folder with thousands of entries is one call. Its cost is the folder's
+directory sectors, read whole. Folder sizes are the application's to bound
+(SHALE.md, "The store").
 
 ## 3. The background run on Linux
 

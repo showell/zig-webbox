@@ -424,6 +424,12 @@ names the builtin and the argument.
 
 An entry that `like` or `kind` leaves out is never stat'ed.
 
+**One listing is one call, whatever the folder's size.** An `ls`, or a
+walk's listing of a folder, reads the whole folder in that call: on metal,
+all its directory sectors; and only a walk's stats are capped. How big a
+folder grows is the application's to bound (the box's cold review of 214,
+dropped as a cap: a site keeps its folders small).
+
 ### Text
 
 Plain text everywhere: **not Lua's patterns.** Positions in strings are
