@@ -9,8 +9,10 @@ host runs it.
   Linux process. [zig-metal-unikernel](https://github.com/showell/zig-metal-unikernel)
   runs the same sources on a machine with no operating system, handing them
   its own `host_io`.
-- **Two applications use it:** [angry-gopher](https://github.com/showell/angry-gopher)
-  (lynrummy.com) and [dog-park](https://github.com/showell/dog-park).
+- **The applications on it:** [angry-gopher](https://github.com/showell/angry-gopher)
+  (lynrummy.com), [dog-park](https://github.com/showell/dog-park) and the
+  Observatory (`observatory/`). Each names `.webbox` in its
+  `build.zig.zon`; a grep of the sibling checkouts finds them all.
 
 ## The modules
 
@@ -23,6 +25,35 @@ host runs it.
 An application depends on this repo by path (a sibling checkout) and takes
 all three from `b.dependency("webbox", ...)`. It imports the library by
 module name, never a file by path.
+
+Every public module, with one line on what it is, is in the two index files:
+`src/webbox.zig` and `src/webbox_linux.zig`.
+
+## For a host
+
+A host runs a `site.Site(App)`. **The authority is `src/site.zig`'s header
+and its `Host`, and `src/wake.zig`;** this is the map.
+
+- **Three calls, in order:** `mem_meter.init(base)` before anything else;
+  `start(io, Host)` once, before the first request; then per request
+  `route`, and serve or drop the stream it answers (`bus.serveKept`,
+  `bus.nextFrame`, `bus.drop`).
+- **`Host`**, everything a host supplies, once: `roots` (the data and
+  secrets directories), `free_space`, `trusted_proxy`, and the optional
+  `facts`, `log`, `logs`, `say` and `fetch`.
+- **`between(io, Now) Wake`**, the application's work between requests,
+  one slice at a time. `Wake` says when it next needs a turn: `more` (now),
+  `at` (a time on the awake clock) or `idle` (until a request or its
+  fetch ends). `Now` carries both clocks; `periodAfter` schedules a period
+  from when it was due.
+- **The fetch** (`host_fetch`): one GET at a time, which the application
+  starts from `between` and reads on a later call. A host offers it as a
+  `Fetcher`; the outcomes are `Outcome`. On Linux it is `linux_fetch`, on a
+  thread of its own.
+- **The Linux host** (`webbox_linux.linux_host`): `Env` and `Options`
+  configure it. It steps `between` on a thread of its own, under the turn,
+  and sleeps on a doorbell that every handler's end rings, until the site's
+  `Wake.at` or a ring.
 
 ## Scripts: Shale
 
@@ -52,15 +83,32 @@ and its effects log says what.
 
     zig build test
 
-Others run these too: angry-gopher's `ops/check_zig` and zig-metal-unikernel's
-tier 3 both run `zig build test` here. And `src/body.zig` is copied byte for
-byte into the kernel's `src/pinned/webbox_body.zig`, whose `zig build pinned`
-fails when the two differ.
+`-Dtest-filter=TEXT` runs only the tests whose names contain it;
+`-Dscript-fuzz=N` sets how many sources the script fuzzer runs. Two more
+steps measure and are run by hand, by no tier: `zig build script-bench`
+(Shale's hot paths) and `zig build shale-scale` (the largest site each
+cookbook script fits). `zig build --help` lists every step and option.
 
-## Status (2026-10-15)
+Others run these too: angry-gopher's `ops/check_zig` and zig-metal-unikernel's
+tier 3 both run `zig build test` here. And every file under the kernel's
+`src/pinned/` is a byte-for-byte copy of one here (`src/body.zig` as
+`webbox_body.zig`, `src/wake.zig` as `webbox_wake.zig`); its
+`zig build pinned` fails when a copy differs.
+
+## Docs
+
+- [docs/SHALE.md](docs/SHALE.md): Shale's reference (above).
+- [docs/SHALE-AGENTS.md](docs/SHALE-AGENTS.md): Shale as an agent's tool on
+  Linux.
+- [docs/SHALE-WANTS.md](docs/SHALE-WANTS.md): the ledger of what Claude
+  reached past Shale for.
+- [docs/designs/DESIGN-shale-dogfood.md](docs/designs/DESIGN-shale-dogfood.md):
+  the design for Claude working in Shale instead of bash and Python.
+
+## Status
 
 | | |
 |---|---|
 | Source | first moved from angry-gopher's `zig-server/src`, with its history |
-| Serves | lynrummy.com, in zig-metal-unikernel's v30 (zig-webbox `92ea157`); master is ahead (Shale for v31) |
+| Serves | lynrummy.com, on zig-metal-unikernel: its newest release tag's message names the zig-webbox commit (`git -C ../zig-metal-unikernel tag -n1 --sort=-creatordate`, the first line). dogpark.lynrummy.com, on the same kernel, through dog-park's own image. master may be ahead of both |
 | Tests | the library's own unit tests; the request-edge harness for its number parses still runs in angry-gopher |
