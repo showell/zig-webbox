@@ -83,18 +83,27 @@ test "zig_rename: a qualified `to` in a declaration's place stops, naming the li
         .{ "const a = 1;\nvar from: u8 = 0;\n", "line 2" },
         .{ "fn from() void {}\n", "line 1" },
         .{ "fn g(from: u8) void {\n    _ = from;\n}\n", "line 1" },
-        .{ "const S = struct {\n    from: u8,\n};\n", "line 2" },
         .{ "fn g(o: ?u8) void {\n    if (o) |from| _ = from;\n}\n", "line 2" },
         .{ "fn g(o: []u8) void {\n    for (o) |*from| _ = from;\n}\n", "line 2" },
         .{ "fn g(o: []u8) void {\n    for (o, 0..) |x, from| _ = .{ x, from };\n}\n", "line 2" },
-        .{ "const E = enum {\n    a,\n    from,\n};\n", "line 3" },
-        .{ "const E = error{ a, from };\n", "line 1" },
     };
     for (cases) |c| {
         try t.put("d.zig", c[0]);
         try t.expectStop("zig_rename(\"d.zig\", \"from\", \"m.from\")", .atomic, .argument, c[1]);
         try testing.expectEqualStrings(c[0], try t.file("d.zig"));
     }
+    // A field or a member that shares the name is another thing: never
+    // renamed, never a stop (log_view.zig's `kept: usize` beside `fn kept`).
+    try t.put("f.zig", "fn from() u8 {\n    return 1;\n}\nconst S = struct {\n    from: u8,\n    b: u8 = from(),\n};\nconst E = enum { a, from };\nconst R = error{ a, from };\nconst U = union(enum) { from, b: u8 };\n");
+    try testing.expectEqualStrings("2\t0", try lastLine(&t, "local r = zig_rename(\"f.zig\", \"from\", \"go\") print(r.renamed, r.left_in_comments)", .atomic));
+    try testing.expectEqualStrings("fn go() u8 {\n    return 1;\n}\nconst S = struct {\n    from: u8,\n    b: u8 = go(),\n};\nconst E = enum { a, from };\nconst R = error{ a, from };\nconst U = union(enum) { from, b: u8 };\n", try t.file("f.zig"));
+    // A nested container's own declaration of that name is its member.
+    try t.put("n.zig", "const kept = 1;\nconst S = struct {\n    pub const kept = &outer;\n    const x = kept;\n};\nconst y = kept;\n");
+    try testing.expectEqualStrings("3\t0", try lastLine(&t, "local r = zig_rename(\"n.zig\", \"kept\", \"held\") print(r.renamed, r.left_in_comments)", .atomic));
+    try testing.expectEqualStrings("const held = 1;\nconst S = struct {\n    pub const kept = &outer;\n    const x = held;\n};\nconst y = held;\n", try t.file("n.zig"));
+    // A tuple struct's members are types: uses.
+    try t.put("tp.zig", "const P = u8;\nconst Q = struct { P, P };\n");
+    try testing.expectEqualStrings("3\t0", try lastLine(&t, "local r = zig_rename(\"tp.zig\", \"P\", \"Pt\") print(r.renamed, r.left_in_comments)", .atomic));
     // Its uses alone: a qualified name is what they become.
     try t.put("u.zig", "const m = @import(\"m.zig\");\nconst x = from + 1;\nfn g() u8 {\n    return from;\n}\n");
     try testing.expectEqualStrings("2\t0", try lastLine(&t, "local r = zig_rename(\"u.zig\", \"from\", \"m.from\") print(r.renamed, r.left_in_comments)", .atomic));

@@ -90,6 +90,18 @@ has none of it):
   analysis is Zig's parser and its tokens, not types**: what it cannot
   see (a method reached through a value), the compiler judges after
   (`same_tests.shale`).
+  `zig_move(from, to, names, {comment, after}?)` moves top-level
+  declarations (a name, or `{kind, name}` when one name is two) from one
+  Zig file to another (made if missing; written first, then `from` cut),
+  and says what the move broke: `{moved, needs_pub, needs_import,
+  needs_from_from, uses_left}`, each `{name, line}` (`needs_import` with
+  its `target`, the value `from` gives it). `uses_left` is the code's uses
+  only: mentions in comments are yours. Not reported: a method called
+  through a value (`hold.begin()`), a name through an `@This()` alias.
+  `zig_rename` and `zig_move` read identifiers one way
+  (`shale_zig_ast.identifiers`): a field, an enum's member or a nested
+  container's own declaration of the name is another thing, and
+  `[]const X` is a use of `X`.
 
 **Git, in the git prelude** (`src/shale_prelude_git.shale`). Every call
 runs git under `run`. A `repo` is a Shale path, `""`

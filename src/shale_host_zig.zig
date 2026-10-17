@@ -18,7 +18,6 @@ const ast = script.ast;
 const Run = script.interp.Run;
 const Value = script.value.Value;
 const Error = script.interp.Error;
-const Tag = std.zig.Token.Tag;
 
 pub const Span = script.builtins_change.Span;
 
@@ -34,92 +33,47 @@ pub const Plan = struct { now: []const u8, spans: []const Span, renamed: usize, 
 /// where `from` is declared; `invalid`, a token Zig's tokenizer refuses.
 pub const Outcome = union(enum) { done: Plan, declaration: usize, invalid: usize };
 
-const Tok = struct { tag: Tag, start: usize, end: usize };
+const za = @import("shale_zig_ast.zig");
 
-/// **THE RENAME, PLANNED**: pure, over `src`'s tokens.
+/// **THE RENAME, PLANNED**: pure, over `src`'s tokens and the one reading
+/// of identifiers (`za.identifiers`, which `zig_move` reads with too).
 pub fn plan(a: std.mem.Allocator, src: [:0]const u8, from: []const u8, to: []const u8, lines: ?Lines) error{OutOfMemory}!Outcome {
-    var toks: std.ArrayList(Tok) = .empty;
-    var tz = std.zig.Tokenizer.init(src);
-    var at_line: LineCursor = .{ .src = src };
-    while (true) {
-        const t = tz.next();
-        if (t.tag == .eof) break;
-        if (t.tag == .invalid) return .{ .invalid = at_line.lineOf(t.loc.start) };
-        try toks.append(a, .{ .tag = t.tag, .start = t.loc.start, .end = t.loc.end });
-    }
+    const ts = switch (try za.tokens(a, src)) {
+        .ok => |ok| ok,
+        .invalid => |n| return .{ .invalid = n },
+    };
     const qualified = std.mem.indexOfScalar(u8, to, '.') != null;
-    var out: std.ArrayList(u8) = .empty;
-    var spans: std.ArrayList(Span) = .empty;
+    const starts = try za.lineStarts(a, src);
+    // The comments: the gaps between tokens, and the doc comments.
     var line: LineCursor = .{ .src = src };
-    var copied: usize = 0;
-    var gap: usize = 0;
-    var renamed: usize = 0;
     var left: usize = 0;
-    // Which braces hold an enum's, a union's or an error set's members.
-    var braces: std.ArrayList(bool) = .empty;
-    var members_next = false;
-    var in_capture = false;
-    const ts = toks.items;
-    for (ts, 0..) |t, i| {
-        const prev: ?Tag = if (i > 0) ts[i - 1].tag else null;
-        const next: ?Tag = if (i + 1 < ts.len) ts[i + 1].tag else null;
-        // The comments between the last token and this one.
+    var gap: usize = 0;
+    for (ts) |t| {
         left += try wordsIn(&line, src[gap..t.start], gap, from, lines);
         gap = t.end;
-        switch (t.tag) {
-            .doc_comment, .container_doc_comment => left += try wordsIn(&line, src[t.start..t.end], t.start, from, lines),
-            .keyword_enum, .keyword_union, .keyword_error => members_next = true,
-            .l_paren, .r_paren => {},
-            .l_brace => {
-                try braces.append(a, members_next);
-                members_next = false;
-            },
-            .r_brace => {
-                _ = braces.pop();
-                members_next = false;
-            },
-            .pipe => {
-                if (in_capture) {
-                    in_capture = false;
-                } else if (prev != null and (prev.? == .r_paren or prev.? == .keyword_else or prev.? == .keyword_catch) and isCapture(ts[i + 1 ..])) {
-                    in_capture = true;
-                }
-                members_next = false;
-            },
-            .identifier => if (prev != .period and std.mem.eql(u8, src[t.start..t.end], from)) {
-                const n = line.lineOf(t.start);
-                if (lines == null or (n >= lines.?.first and n <= lines.?.last)) {
-                    const members = braces.items.len > 0 and braces.items[braces.items.len - 1];
-                    const declared = prev == .keyword_const or prev == .keyword_var or prev == .keyword_fn or next == .colon or in_capture or
-                        (members and (prev == .l_brace or prev == .comma) and (next == .comma or next == .r_brace or next == .equal or next == .colon));
-                    if (qualified and declared) return .{ .declaration = n };
-                    try out.appendSlice(a, src[copied..t.start]);
-                    const c0 = out.items.len;
-                    try out.appendSlice(a, to);
-                    try spans.append(a, .{ .o0 = t.start, .o1 = t.end, .c0 = c0, .c1 = out.items.len });
-                    copied = t.end;
-                    renamed += 1;
-                }
-            },
-            else => members_next = false,
-        }
+        if (t.tag == .doc_comment or t.tag == .container_doc_comment) left += try wordsIn(&line, src[t.start..t.end], t.start, from, lines);
     }
     left += try wordsIn(&line, src[gap..], gap, from, lines);
+    var out: std.ArrayList(u8) = .empty;
+    var spans: std.ArrayList(Span) = .empty;
+    var copied: usize = 0;
+    var renamed: usize = 0;
+    for (try za.identifiers(a, ts)) |id| {
+        if (!std.mem.eql(u8, src[id.start..id.end], from)) continue;
+        const n = za.lineOf(starts, id.start);
+        if (lines != null and (n < lines.?.first or n > lines.?.last)) continue;
+        // A field of that name is another thing: never renamed.
+        if (id.role == .field) continue;
+        if (qualified and id.role == .declaration) return .{ .declaration = n };
+        try out.appendSlice(a, src[copied..id.start]);
+        const c0 = out.items.len;
+        try out.appendSlice(a, to);
+        try spans.append(a, .{ .o0 = id.start, .o1 = id.end, .c0 = c0, .c1 = out.items.len });
+        copied = id.end;
+        renamed += 1;
+    }
     try out.appendSlice(a, src[copied..]);
     return .{ .done = .{ .now = out.items, .spans = spans.items, .renamed = renamed, .left_in_comments = left, .tokens = ts.len } };
-}
-
-/// Whether the tokens after a `|` are a capture's: `[*]name(, [*]name)*|`.
-fn isCapture(ts: []const Tok) bool {
-    var i: usize = 0;
-    while (true) {
-        if (i < ts.len and ts[i].tag == .asterisk) i += 1;
-        if (i >= ts.len or ts[i].tag != .identifier) return false;
-        i += 1;
-        if (i < ts.len and ts[i].tag == .pipe) return true;
-        if (i >= ts.len or ts[i].tag != .comma) return false;
-        i += 1;
-    }
 }
 
 /// Lines counted forward, for offsets that only grow.
@@ -202,7 +156,6 @@ pub fn rename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// stops, naming its first line.
 pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (args.len != 1) return run.fail(pos, .argument, "`zig_decls` takes a path, given {d} arguments", .{args.len});
-    const za = @import("shale_zig_ast.zig");
     const hub = script.builtins_store;
     const rd = script.builtins_read;
     const p = try hub.pathArg(run, pos, .host, args[0], false);
@@ -222,11 +175,6 @@ pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     for (got.decls) |d| {
         const m = try run.newTable(pos);
         m.kind = .map;
-        const put = struct {
-            fn f(r: *Run, ps: ast.Pos, t: *script.value.Table, k: []const u8, v: Value) Error!void {
-                t.map.put(r.alloc, k, v) catch return r.oom(ps);
-            }
-        }.f;
         try put(run, pos, m, "kind", .{ .string = @tagName(d.kind) });
         try put(run, pos, m, "name", .{ .string = d.name });
         try put(run, pos, m, "name_form", .{ .string = @tagName(d.name_form) });
@@ -246,6 +194,128 @@ pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         list.list.append(a, .{ .table = m }) catch return run.oom(pos);
     }
     return .{ .table = list };
+}
+
+/// A Zig file read whole and NUL-ended for the parser, the read and the
+/// copy charged; null for one that is not there, when that is allowed.
+fn readZig(run: *Run, pos: ast.Pos, p: script.builtins_store.Path, missing_ok: bool) Error!?[:0]const u8 {
+    const hub = script.builtins_store;
+    try hub.countRead(run, pos);
+    if (missing_ok) {
+        const st = webbox.store.statOrNull(run.io, run.alloc, p.full) catch |e| return hub.storeFailed(run, pos, .host, p.rel, e);
+        if (st == null) return null;
+    }
+    const size = try script.builtins_read.fileSize(run, pos, .host, p);
+    const was = (try script.builtins_read.readSized(run, pos, .host, p, size, 0, null)).string;
+    const src = run.alloc.dupeZ(u8, was) catch return run.oom(pos);
+    try script.builtins.chargeBytes(run, pos, src.len);
+    return src;
+}
+
+fn put(run: *Run, pos: ast.Pos, t: *script.value.Table, k: []const u8, v: Value) Error!void {
+    t.map.put(run.alloc, k, v) catch return run.oom(pos);
+}
+
+/// `{name, line}` maps, a list (`{name, target, line}` with a target).
+fn nameLines(run: *Run, pos: ast.Pos, items: anytype) Error!Value {
+    const list = try run.newTable(pos);
+    list.kind = .list;
+    for (items) |x| {
+        const m = try run.newTable(pos);
+        m.kind = .map;
+        try put(run, pos, m, "name", .{ .string = x.name });
+        if (@hasField(@TypeOf(x), "target")) try put(run, pos, m, "target", .{ .string = x.target });
+        try put(run, pos, m, "line", .{ .int = @intCast(x.line) });
+        list.list.append(run.alloc, .{ .table = m }) catch return run.oom(pos);
+    }
+    return .{ .table = list };
+}
+
+/// **`host("zig_move", from, to, {names, opts})`**: top-level declarations
+/// moved from one Zig file to another (shale_zig_move.zig), and what the
+/// move broke. `to` may be missing: it is made. `to` is written first and
+/// `from` after, each through core's `rewrite`, so a stop between them
+/// leaves the declarations in both, never in neither. Charged: the reads,
+/// the copies, a step a token and a node of both files.
+pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const zm = @import("shale_zig_move.zig");
+    if (args.len != 3) return run.fail(pos, .argument, "`zig_move` takes `from`, `to` and `{{names, opts}}`, given {d}", .{args.len});
+    const hub = script.builtins_store;
+    const a = run.alloc;
+    const p = try hub.pathArg(run, pos, .host, args[0], false);
+    const q = try hub.pathArg(run, pos, .host, args[1], false);
+    if (std.mem.eql(u8, p.full, q.full)) return run.fail(pos, .argument, "`zig_move`: `from` and `to` are one file", .{});
+    const packed_args = switch (args[2]) {
+        .table => |t| if (t.kind == .map) t else return run.fail(pos, .type, "`zig_move`'s names are a list", .{}),
+        else => return run.fail(pos, .type, "`zig_move`'s names are a list", .{}),
+    };
+    const names = switch (packed_args.map.get("names") orelse Value.nil) {
+        .table => |t| if (t.kind == .list) t else return run.fail(pos, .type, "`zig_move`'s names are a list of names, or `{{kind = ..., name = ...}}`", .{}),
+        else => return run.fail(pos, .type, "`zig_move`'s names are a list of names, or `{{kind = ..., name = ...}}`", .{}),
+    };
+    var wants: std.ArrayList(zm.Want) = .empty;
+    for (names.list.items) |v| switch (v) {
+        .string => |s| wants.append(a, .{ .name = s }) catch return run.oom(pos),
+        .table => |t| {
+            if (t.kind != .map) return run.fail(pos, .type, "`zig_move`: a name is a string, or `{{kind = ..., name = ...}}`", .{});
+            var w: zm.Want = .{ .name = "" };
+            for (t.map.keys(), t.map.values()) |k, x| {
+                const s = switch (x) {
+                    .string => |s| s,
+                    else => return run.fail(pos, .type, "`zig_move`: a name's `{s}` is a string", .{k}),
+                };
+                if (std.mem.eql(u8, k, "name")) {
+                    w.name = s;
+                } else if (std.mem.eql(u8, k, "kind")) {
+                    w.kind = std.meta.stringToEnum(za.Kind, s) orelse return run.fail(pos, .argument, "`zig_move`: no kind `{s}`: fn, const, var, test, comptime or field", .{s});
+                } else return run.fail(pos, .argument, "`zig_move`: a name takes `kind` and `name`, not `{s}`", .{k});
+            }
+            wants.append(a, w) catch return run.oom(pos);
+        },
+        else => return run.fail(pos, .type, "`zig_move`: a name is a string, or `{{kind = ..., name = ...}}`", .{}),
+    };
+    if (wants.items.len == 0) return run.fail(pos, .argument, "`zig_move`: no names: nothing to move", .{});
+    var mode: zm.CommentMode = .doc;
+    var after: ?[]const u8 = null;
+    switch (packed_args.map.get("opts") orelse Value.nil) {
+        .nil => {},
+        .table => |t| for (t.map.keys(), t.map.values()) |k, x| {
+            const s = switch (x) {
+                .string => |s| s,
+                else => return run.fail(pos, .type, "`zig_move`'s `{s}` is a string", .{k}),
+            };
+            if (std.mem.eql(u8, k, "comment")) {
+                mode = std.meta.stringToEnum(zm.CommentMode, s) orelse return run.fail(pos, .argument, "`zig_move`'s `comment` is \"doc\" or \"doc_and_plain\", not \"{s}\"", .{s});
+            } else if (std.mem.eql(u8, k, "after")) {
+                after = s;
+            } else return run.fail(pos, .argument, "`zig_move` takes `comment` and `after`, not `{s}`", .{k});
+        },
+        else => |v| return run.fail(pos, .type, "`zig_move`'s options are a map, not {s}", .{v.typeName()}),
+    }
+    const from_src = (try readZig(run, pos, p, false)).?;
+    const to_src = (try readZig(run, pos, q, true)) orelse "";
+    const done = switch (zm.move(a, from_src, to_src, wants.items, mode, after) catch return run.oom(pos)) {
+        .done => |d| d,
+        .refused => |why| return run.fail(pos, .argument, "`zig_move` {s} to {s}: {s}", .{ p.rel, q.rel, why }),
+    };
+    try run.charge(pos, done.work);
+    const spans = struct {
+        fn of(r: *Run, ps: ast.Pos, xs: []const zm.Span) Error![]const Span {
+            const out = r.alloc.alloc(Span, xs.len) catch return r.oom(ps);
+            for (xs, out) |x, *o| o.* = .{ .o0 = x.o0, .o1 = x.o1, .c0 = x.c0, .c1 = x.c1 };
+            return out;
+        }
+    }.of;
+    try script.builtins_change.rewrite(run, pos, q, to_src, done.to_now, try spans(run, pos, done.to_spans));
+    try script.builtins_change.rewrite(run, pos, p, from_src, done.from_now, try spans(run, pos, done.from_spans));
+    const t = try run.newTable(pos);
+    t.kind = .map;
+    try put(run, pos, t, "moved", .{ .int = @intCast(done.moved) });
+    try put(run, pos, t, "needs_pub", try nameLines(run, pos, done.needs_pub));
+    try put(run, pos, t, "needs_import", try nameLines(run, pos, done.needs_import));
+    try put(run, pos, t, "needs_from_from", try nameLines(run, pos, done.needs_from_from));
+    try put(run, pos, t, "uses_left", try nameLines(run, pos, done.uses_left));
+    return .{ .table = t };
 }
 
 fn linesOpt(run: *Run, pos: ast.Pos, v: Value) Error!?Lines {

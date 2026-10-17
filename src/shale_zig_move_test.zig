@@ -1,0 +1,401 @@
+//! **DECLARATIONS MOVED, AND WHAT THE MOVE BROKE, TESTED** (metal-vmm
+//! QUEUE 235, 2): `zig_move` through the gate on fixtures and on the two
+//! files the linux_host split began from; the pure mover
+//! (`shale_zig_move.move`) over the repo's own files, there and back; and
+//! `zig_rename` and `uses_left` held to one answer.
+
+const std = @import("std");
+const testing = std.testing;
+const T = @import("shale_test_host.zig").T;
+const host_linux = @import("shale_host_linux.zig");
+const zm = @import("shale_zig_move.zig");
+const za = @import("shale_zig_ast.zig");
+const zig = @import("shale_host_zig.zig");
+
+fn init(t: *T) !void {
+    try t.init();
+    t.preludes = &.{host_linux.linux_prelude};
+    // The CLI's: a change is one line.
+    t.diffs = .summary;
+}
+
+/// A move's report, a row each: `list name line`.
+const report =
+    \\function report(r)
+    \\  print("moved", r.moved)
+    \\  for k in {"needs_pub", "needs_import", "needs_from_from", "uses_left"} do
+    \\    for x in r[k] do print(k, x.name, x.line, get(x, "target", "")) end
+    \\  end
+    \\end
+    \\
+;
+
+const fixture =
+    \\const std = @import("std");
+    \\const Mem = std.mem;
+    \\
+    \\const a = 1;
+    \\
+    \\/// doc of X
+    \\const X = struct {
+    \\    y: u8,
+    \\    fn hidden() void {}
+    \\    pub fn shown() void {}
+    \\};
+    \\
+    \\fn helper() void {}
+    \\
+    \\// plain, above w
+    \\pub fn w() void {
+    \\    _ = std.mem;
+    \\    _ = Mem;
+    \\    helper();
+    \\    _ = a;
+    \\}
+    \\
+    \\const b = X.hidden;
+    \\const c = X.shown;
+    \\test "x" {
+    \\    _ = X{ .y = 1 };
+    \\}
+    \\
+;
+
+test "zig_move: cut and put, its doc comment with it, and what it broke: pub, imports, from's own, uses left" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("from.zig", fixture);
+    try t.expectOutput(
+        report ++ "report(zig_move(\"from.zig\", \"to.zig\", {\"X\", \"w\"}))",
+        "edit to.zig: 1 hunk, -1 +14 lines\n" ++
+            "edit from.zig: 2 hunks, -16 +2 lines\n" ++
+            "moved\t2\n" ++
+            "needs_pub\tX\t7\t\n" ++
+            "needs_pub\tX.hidden\t23\t\n" ++
+            "needs_import\tstd\t17\t@import(\"std\")\n" ++
+            "needs_import\tMem\t18\tstd.mem\n" ++
+            "needs_from_from\thelper\t19\t\n" ++
+            "needs_from_from\ta\t20\t\n" ++
+            "uses_left\tX\t23\t\n" ++
+            "uses_left\tX\t24\t\n" ++
+            "uses_left\tX\t26\t\n",
+    );
+    try testing.expectEqualStrings(
+        \\const std = @import("std");
+        \\const Mem = std.mem;
+        \\
+        \\const a = 1;
+        \\
+        \\fn helper() void {}
+        \\
+        \\// plain, above w
+        \\const b = X.hidden;
+        \\const c = X.shown;
+        \\test "x" {
+        \\    _ = X{ .y = 1 };
+        \\}
+        \\
+    , try t.file("from.zig"));
+    try testing.expectEqualStrings(
+        \\/// doc of X
+        \\const X = struct {
+        \\    y: u8,
+        \\    fn hidden() void {}
+        \\    pub fn shown() void {}
+        \\};
+        \\
+        \\pub fn w() void {
+        \\    _ = std.mem;
+        \\    _ = Mem;
+        \\    helper();
+        \\    _ = a;
+        \\}
+        \\
+    , try t.file("to.zig"));
+}
+
+test "zig_move: doc_and_plain takes the comment above; after puts it after a declaration; the last one leaves one newline" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("from.zig", fixture);
+    try t.put("to.zig", "const one = 1;\n\nconst two = 2;\n");
+    try t.expectOutput("local r = zig_move(\"from.zig\", \"to.zig\", {\"w\"}, {comment = \"doc_and_plain\", after = \"one\"}) print(r.moved)", "edit to.zig: 1 hunk, -1 +9 lines\nedit from.zig: 1 hunk, -9 +1 lines\n1\n");
+    try testing.expectEqualStrings("const one = 1;\n\n// plain, above w\npub fn w() void {\n    _ = std.mem;\n    _ = Mem;\n    helper();\n    _ = a;\n}\n\nconst two = 2;\n", try t.file("to.zig"));
+    try testing.expect(std.mem.indexOf(u8, try t.file("from.zig"), "plain, above w") == null);
+    // The file's last declaration: one newline at its end, after what is left.
+    try t.put("end.zig", "const p = 1;\n\nconst q = 2;\n");
+    try t.expectOutput("local r = zig_move(\"end.zig\", \"q.zig\", {\"q\"}) print(r.moved)", "edit q.zig: 1 hunk, -1 +2 lines\nedit end.zig: 1 hunk, -3 +1 lines\n1\n");
+    try testing.expectEqualStrings("const p = 1;\n", try t.file("end.zig"));
+    try testing.expectEqualStrings("const q = 2;\n", try t.file("q.zig"));
+}
+
+test "zig_move: what stops it, with nothing written: a name not there, a name that is two, a name twice, an unnamed one, an `after` not there" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const two = "const foo = 1;\n\ntest foo {}\n\ntest {}\n";
+    try t.put("f.zig", two);
+    try t.put("g.zig", "const g = 1;\n");
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "{\"nope\"}", "`nope` is not a top-level declaration of `from`" },
+        .{ "{\"foo\"}", "`foo` names 2 declarations of `from`: say which" },
+        .{ "{{kind = \"const\", name = \"foo\"}, {kind = \"const\", name = \"foo\"}}", "`foo` is named twice" },
+        .{ "{\"\"}", "cannot be named, so it cannot be moved" },
+        .{ "{{kind = \"fn\", name = \"foo\"}}", "`foo` of that kind is not" },
+    };
+    for (cases) |c| {
+        try t.expectStop(try std.fmt.allocPrint(t.arena.allocator(), "zig_move(\"f.zig\", \"g.zig\", {s})", .{c[0]}), .atomic, .argument, c[1]);
+        try testing.expectEqualStrings(two, try t.file("f.zig"));
+        try testing.expectEqualStrings("const g = 1;\n", try t.file("g.zig"));
+    }
+    try t.expectStop("zig_move(\"f.zig\", \"g.zig\", {{kind = \"const\", name = \"foo\"}}, {after = \"h\"})", .atomic, .argument, "`after`: `h` is not");
+    try t.expectStop("zig_move(\"f.zig\", \"f.zig\", {\"foo\"})", .atomic, .argument, "one file");
+    try t.put("bad.zig", "const = ;\n");
+    try t.expectStop("zig_move(\"bad.zig\", \"g.zig\", {\"x\"})", .atomic, .argument, "does not parse as Zig: line 1");
+    // By kind, a name that is two moves the one named.
+    try t.expectOutput("print(zig_move(\"f.zig\", \"g.zig\", {{kind = \"test\", name = \"foo\"}}).moved)", "edit g.zig: 1 hunk, -1 +3 lines\nedit f.zig: 1 hunk, -3 +1 lines\n1\n");
+    try testing.expectEqualStrings("const foo = 1;\n\ntest {}\n", try t.file("f.zig"));
+}
+
+test "zig_move: a use without a call counts; the known limits, pinned: a method through a value, a name through an @This() alias" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    // angry-gopher router.zig's shape: a function given, not called.
+    try t.put("u.zig",
+        \\const store = @import("store.zig");
+        \\
+        \\fn scriptDurable() bool {
+        \\    return true;
+        \\}
+        \\
+        \\test "durable" {
+        \\    store.durable_now = scriptDurable;
+        \\}
+        \\
+    );
+    try t.expectOutput(report ++ "report(zig_move(\"u.zig\", \"h.zig\", {\"scriptDurable\"}))", "edit h.zig: 1 hunk, -1 +4 lines\nedit u.zig: 1 hunk, -5 +1 lines\nmoved\t1\nneeds_pub\tscriptDurable\t3\t\nuses_left\tscriptDurable\t8\t\n");
+    // Known limits: `p.end()` through a value names no `P.end`, and
+    // `self_file.P` through an alias is no use of `P`: the compiler says.
+    try t.put("l.zig",
+        \\const self_file = @This();
+        \\
+        \\const P = struct {
+        \\    fn end(p: P) void {
+        \\        _ = p;
+        \\    }
+        \\};
+        \\
+        \\fn f() void {
+        \\    var p: P = .{};
+        \\    p.end();
+        \\    _ = self_file.P;
+        \\}
+        \\
+    );
+    try t.expectOutput(report ++ "report(zig_move(\"l.zig\", \"p.zig\", {\"P\"}))", "edit p.zig: 1 hunk, -1 +6 lines\nedit l.zig: 1 hunk, -7 +1 lines\nmoved\t1\nneeds_pub\tP\t3\t\nuses_left\tP\t10\t\n");
+}
+
+test "zig_move and zig_rename: `const` that qualifies a pointer declares nothing: `[]const X` is a use of `X`" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const src = "const X = u8;\n\nfn f(a: []const X, b: *const X, c: *align(1) const X) void {\n    _ = .{ a, b, c };\n}\n";
+    try t.put("k.zig", src);
+    try t.expectOutput(report ++ "report(zig_move(\"k.zig\", \"x.zig\", {\"X\"}))", "edit x.zig: 1 hunk, -1 +2 lines\nedit k.zig: 1 hunk, -3 +1 lines\nmoved\t1\nneeds_pub\tX\t1\t\nuses_left\tX\t3\t\n");
+    // And a qualified rename of those uses does not stop as at a declaration.
+    try t.put("k.zig", "fn f(a: []const X, b: *const X, c: *align(1) const X) void {\n    _ = .{ a, b, c };\n}\n");
+    try t.expectOutput("print(zig_rename(\"k.zig\", \"X\", \"m.X\").renamed)", "edit k.zig: 1 hunk, -1 +1 lines\n3\n");
+}
+
+/// The linux_host split, replayed: `commit`'s parent's linux_host.zig, the
+/// declarations its new file took from it (in the new file, in the parent,
+/// gone from linux_host.zig after), moved by `zig_move`; its report a row
+/// a list, `name:line` each.
+const replay =
+    \\function show(rev, p) return must(run({"git", "show", rev .. ":src/" .. p}, {timeout_ms = 30000, whole = 2097152})).out end
+    \\function replay(commit, newfile)
+    \\  create("lh.zig", show(commit .. "^", "linux_host.zig"))
+    \\  create("new_hand.zig", show(commit, newfile))
+    \\  create("lh_hand.zig", show(commit, "linux_host.zig"))
+    \\  local before = {}
+    \\  for d in zig_decls("lh.zig") do before[d.name] = true end
+    \\  local after = {}
+    \\  for d in zig_decls("lh_hand.zig") do after[d.name] = true end
+    \\  local names = {}
+    \\  for d in zig_decls("new_hand.zig") do
+    \\    if has_key(before, d.name) and not has_key(after, d.name) then push(names, {kind = d.kind, name = d.name}) end
+    \\  end
+    \\  local r = zig_move("lh.zig", "new.zig", names)
+    \\  local rows = {moved = r.moved}
+    \\  for k in {"needs_pub", "needs_import", "needs_from_from", "uses_left"} do
+    \\    local row = {}
+    \\    for x in r[k] do push(row, x.name .. ":" .. x.line) end
+    \\    rows[k] = " " .. join(row, " ") .. " "
+    \\  end
+    \\  return rows
+    \\end
+    \\
+;
+
+test "zig_move replays 589837e (linux_writes.zig): Hold, Sent and WriteWatch need pub; kept_write_deadline_ms's uses are left at 483 and 1427; std and Io are imports" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.expectOutput(replay ++
+        \\local r = replay("589837e", "linux_writes.zig")
+        \\print(r.moved)
+        \\for want in {"Hold:527", "Sent:593", "WriteWatch:703"} do print(contains(r.needs_pub, " " .. want .. " ")) end
+        \\for want in {"kept_write_deadline_ms:483", "kept_write_deadline_ms:1427"} do print(contains(r.uses_left, " " .. want .. " ")) end
+        \\for name in {"std", "Io"} do print(contains(r.needs_import, " " .. name .. ":"), contains(r.needs_from_from, " " .. name .. ":")) end
+    , "edit new.zig: 1 hunk, -1 +250 lines\nedit lh.zig: 1 hunk, -241 +1 lines\n22\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\tfalse\ntrue\tfalse\n");
+}
+
+test "zig_move replays 35317cf (linux_reads.zig): Progress.Ended, a member, needs pub; sleepMs is from's own" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.expectOutput(replay ++
+        \\local r = replay("35317cf", "linux_reads.zig")
+        \\print(r.moved, contains(r.needs_pub, " Progress.Ended:1716 "), contains(r.needs_from_from, " sleepMs:"))
+    , "edit new.zig: 1 hunk, -1 +334 lines\nedit lh.zig: 4 hunks, -330 +4 lines\n28\ttrue\ttrue\n");
+}
+
+test "zig_move: a step a token and a node of both files, more for a file four times the size" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const a = t.arena.allocator();
+    var steps: [2]u64 = undefined;
+    for ([_]usize{ 200, 800 }, 0..) |n, k| {
+        var src: std.ArrayList(u8) = .empty;
+        try src.appendSlice(a, "const moved = 1;\n\n");
+        for (0..n) |i| try src.print(a, "const v{d} = x;\n", .{i});
+        try t.put("n.zig", src.items);
+        try t.put("m.zig", "");
+        var r = t.run("local r = zig_move(\"n.zig\", \"m.zig\", {\"moved\"})", .atomic);
+        defer r.deinit();
+        try testing.expect(r.stop == null);
+        steps[k] = r.steps;
+    }
+    if (steps[1] < steps[0] + 7 * 600) {
+        std.debug.print("{d} steps at 200 lines, {d} at 800: less than a step a token and a node more\n", .{ steps[0], steps[1] });
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// The repo's own src/**/*.zig, each read NUL-ended, by path.
+fn eachSource(a: std.mem.Allocator, io: std.Io) ![]const struct { path: []const u8, src: [:0]const u8 } {
+    const Item = struct { path: []const u8, src: [:0]const u8 };
+    var out: std.ArrayList(Item) = .empty;
+    var dir = try std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(a);
+    while (try walker.next(io)) |e| {
+        if (e.kind != .file or !std.mem.endsWith(u8, e.basename, ".zig")) continue;
+        try out.append(a, .{ .path = try a.dupe(u8, e.path), .src = try dir.readFileAllocOptions(io, e.path, a, .limited(16 << 20), .of(u8), 0) });
+    }
+    return @ptrCast(out.items);
+}
+
+test "zig_move's mover over the repo's own src/**/*.zig: two declarations moved to an empty file and back give the file it began with" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var tried: usize = 0;
+    for (try eachSource(a, threaded.io())) |f| {
+        const ds = switch (try za.decls(a, f.src)) {
+            .ok => |ok| ok.decls,
+            else => continue,
+        };
+        // The first run of two, neither first nor last, single blank lines
+        // around, every name once in the file.
+        var i: usize = 1;
+        while (i + 2 < ds.len) : (i += 1) {
+            if (!(blankApart(f.src, ds[i - 1], ds[i]) and blankApart(f.src, ds[i], ds[i + 1]) and blankApart(f.src, ds[i + 1], ds[i + 2]))) continue;
+            if (!(once(ds, ds[i - 1]) and once(ds, ds[i]) and once(ds, ds[i + 1]))) continue;
+            break;
+        } else continue;
+        const wants = [_]zm.Want{ .{ .name = ds[i].name, .kind = ds[i].kind }, .{ .name = ds[i + 1].name, .kind = ds[i + 1].kind } };
+        const there = switch (try zm.move(a, f.src, "", &wants, .doc, null)) {
+            .done => |d| d,
+            .refused => |why| {
+                std.debug.print("src/{s}: {s}\n", .{ f.path, why });
+                return error.TestUnexpectedResult;
+            },
+        };
+        const back = switch (try zm.move(a, try a.dupeZ(u8, there.to_now), try a.dupeZ(u8, there.from_now), &wants, .doc, ds[i - 1].name)) {
+            .done => |d| d,
+            .refused => |why| {
+                std.debug.print("src/{s}, back: {s}\n", .{ f.path, why });
+                return error.TestUnexpectedResult;
+            },
+        };
+        if (!std.mem.eql(u8, back.to_now, f.src)) {
+            std.debug.print("src/{s}: `{s}` and `{s}` there and back is not the file\n", .{ f.path, ds[i].name, ds[i + 1].name });
+            return error.TestUnexpectedResult;
+        }
+        try testing.expectEqualStrings("", back.from_now);
+        tried += 1;
+    }
+    try testing.expect(tried > 30);
+}
+
+fn blankApart(src: []const u8, x: za.Decl, y: za.Decl) bool {
+    return y.start == x.stop + 2 and std.mem.eql(u8, src[x.stop..y.start], "\n\n") and y.comment_above == null;
+}
+
+fn once(ds: []const za.Decl, d: za.Decl) bool {
+    if (d.name_form == .none) return false;
+    var n: usize = 0;
+    for (ds) |e| n += @intFromBool(std.mem.eql(u8, e.name, d.name));
+    return n == 1;
+}
+
+test "zig_rename and zig_move read identifiers alike: a declaration's uses outside it are the lines a rename changes there" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    var compared: usize = 0;
+    for (try eachSource(a, threaded.io())) |f| {
+        const ds = switch (try za.decls(a, f.src)) {
+            .ok => |ok| ok.decls,
+            else => continue,
+        };
+        const starts = try za.lineStarts(a, f.src);
+        for (ds) |d| {
+            if (d.name_form != .identifier or d.kind == .@"test" or !once(ds, d)) continue;
+            const moved = switch (try zm.move(a, f.src, "", &.{.{ .name = d.name, .kind = d.kind }}, .doc, null)) {
+                .done => |m| m,
+                .refused => continue,
+            };
+            const renamed = switch (try zig.plan(a, f.src, d.name, "zz_one_reading", null)) {
+                .done => |p| p,
+                else => return error.TestUnexpectedResult,
+            };
+            // The rename's lines outside the declaration, each once: what
+            // it renames there is uses (a declaration of the name is the
+            // one, inside it).
+            var want: std.ArrayList(usize) = .empty;
+            for (renamed.spans) |s| {
+                if (s.o0 >= d.start and s.o0 < d.stop) continue;
+                const l = za.lineOf(starts, s.o0);
+                if (want.items.len == 0 or want.items[want.items.len - 1] != l) try want.append(a, l);
+            }
+            var got: std.ArrayList(usize) = .empty;
+            for (moved.uses_left) |u| try got.append(a, u.line);
+            if (!std.mem.eql(usize, want.items, got.items)) {
+                std.debug.print("src/{s}: `{s}`: zig_rename changes lines {any}, uses_left says {any}\n", .{ f.path, d.name, want.items, got.items });
+                return error.TestUnexpectedResult;
+            }
+            compared += 1;
+        }
+    }
+    try testing.expect(compared > 1000);
+}

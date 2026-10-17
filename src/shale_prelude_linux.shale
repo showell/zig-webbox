@@ -191,6 +191,19 @@ function zig_decls(path)
   return host("zig_decls", path)
 end
 
+-- **TOP-LEVEL DECLARATIONS MOVED BETWEEN ZIG FILES** (metal-vmm QUEUE 235,
+-- 2): `names` (a name, or `{kind, name}`) cut from `from` and put in `to`
+-- (made if missing), at its end or `opts.after` a declaration;
+-- `opts.comment` is "doc" or "doc_and_plain". What the move broke:
+-- `{moved, needs_pub, needs_import, needs_from_from, uses_left}`.
+function zig_move(from, to, names, opts?)
+  -- `host` takes three arguments past its name.
+  -- A map holds no nil: `opts` only when given.
+  local packed = {names = names}
+  if opts ~= nil then packed.opts = opts end
+  return host("zig_move", from, to, packed)
+end
+
 -- A new file: refused if one is there already.
 function create(p, text)
   if exists(p) then fail("`create`: " .. p .. " is there already: `edit` or `replace` it") end

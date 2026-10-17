@@ -269,6 +269,7 @@ fn call(ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []cons
     if (std.mem.startsWith(u8, name, "job_")) return @import("shale_host_jobs.zig").call(h, run, pos, name, args);
     if (std.mem.eql(u8, name, "zig_rename")) return @import("shale_host_zig.zig").rename(run, pos, args);
     if (std.mem.eql(u8, name, "zig_decls")) return @import("shale_host_zig.zig").decls(run, pos, args);
+    if (std.mem.eql(u8, name, "zig_move")) return @import("shale_host_zig.zig").move(run, pos, args);
     return run.fail(pos, .host, "`{s}`: not on this host", .{name});
 }
 
