@@ -521,7 +521,7 @@ common pitfall for Claude is that numbering gets out of whack."
    per-session scratch mount.
 
 **The tests the design names:** the keep against the prelude's
-`take(re_lines(...), ±n)` as an oracle (empty, no final newline, CRLF, NUL,
+`take` and `last` over `re_lines(...)` as an oracle (empty, no final newline, CRLF, NUL,
 long lines, fewer lines than `head + tail`); the dry run (edit then run: no
 file changed, no call, `budget runs`, not caught by `attempt`); secrets never
 in `out`, `log`, effects or a stop, against a child that echoes them and `curl
