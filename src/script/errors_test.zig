@@ -121,7 +121,7 @@ const cases = [_]Case{
     .{ .src = "local x = read(\"none.txt\")", .line = 1, .column = 11, .class = .store, .message = "`read(\"none.txt\")`: not found (FileNotFound): `exists(p)` asks first" },
     .{ .src = "remove(\"none.txt\")", .line = 1, .column = 1, .class = .store, .message = "`remove(\"none.txt\")`: not found (FileNotFound): `exists(p)` asks first" },
     .{ .src = "local x = read(\"x\", -1)", .line = 1, .column = 11, .class = .argument, .message = "`read`: offset -1 is before the file's start" },
-    .{ .src = "local x = walk(\"\", {deep = 1})", .line = 1, .column = 11, .class = .argument, .message = "`walk` takes `depth`, `like`, `kind`, `after` and `keep_reads`, not `deep`" },
+    .{ .src = "local x = walk(\"\", {deep = 1})", .line = 1, .column = 11, .class = .argument, .message = "`walk` takes `depth`, `like`, `kind`, `skip`, `after` and `keep_reads`, not `deep`" },
     .{ .src = "local x = walk(\"\", {keep_reads = -1})", .line = 1, .column = 11, .class = .argument, .message = "`walk`: `keep_reads` of -1: it is a count of reads" },
     .{ .src = "local x = walk(\"\", {depth = 0})", .line = 1, .column = 11, .class = .argument, .message = "`walk`: a depth of 0: 1 is the folder's own entries" },
     .{ .src = "local x = count_in(\"x\", \"\")", .line = 1, .column = 11, .class = .argument, .message = "`count_in` of \"\" is an error: there is nothing to look for" },

@@ -29,6 +29,7 @@ pub const specs = [_]bi.Spec{
     spec(.upper, 1, 1, cased(.upper)),
     spec(.lower, 1, 1, cased(.lower)),
     spec(.like, 2, 2, like),
+    spec(.match_path, 2, 2, matchPath),
     spec(.tostring, 1, 1, tostring),
     spec(.tonumber, 1, 1, tonumber),
     spec(.parse_int, 1, 1, parseInt),
@@ -348,6 +349,53 @@ fn parseInt(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     run.tally(str.len);
     const n = bi.parseInteger(std.mem.trim(u8, str, " \t\r\n")) orelse return .nil;
     return .{ .int = n };
+}
+
+/// **`match_path(path, pattern)`** (QUEUE 229, chunk 4): whether a path
+/// matches a glob, part by part on `/`: `**` is any number of parts (none
+/// included), and in any other part `*` is any run of bytes and `?` one
+/// byte, as `like`'s, never across a `/`. So `src/**/*.zig` is every
+/// `.zig` file under `src`, `src/tcp*.zig` only those directly in it.
+fn matchPath(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const subject = try bi.stringArg(run, pos, .match_path, args[0], "its path");
+    const pattern = try bi.stringArg(run, pos, .match_path, args[1], "its pattern");
+    var ps: [path_parts_most][]const u8 = undefined;
+    var qs: [path_parts_most][]const u8 = undefined;
+    const p = splitParts(subject, &ps) orelse return run.fail(pos, .argument, "`match_path`: a path of more than {d} parts", .{path_parts_most});
+    const q = splitParts(pattern, &qs) orelse return run.fail(pos, .argument, "`match_path`: a pattern of more than {d} parts", .{path_parts_most});
+    try run.charge(pos, subject.len + pattern.len);
+    // `can[j]`: whether the pattern's first i parts match the path's first
+    // j, row by row over i.
+    var can: [path_parts_most + 1]bool = @splat(false);
+    can[0] = true;
+    for (q) |part| {
+        var next: [path_parts_most + 1]bool = @splat(false);
+        if (std.mem.eql(u8, part, "**")) {
+            var any = false;
+            for (0..p.len + 1) |j| {
+                any = any or can[j];
+                next[j] = any;
+            }
+        } else for (1..p.len + 1) |j| {
+            if (can[j - 1]) next[j] = try likeCharged(run, pos, p[j - 1], part);
+        }
+        can = next;
+    }
+    return .{ .boolean = can[p.len] };
+}
+
+/// The most parts a path or a pattern `match_path` takes has.
+const path_parts_most = 64;
+
+fn splitParts(s: []const u8, out: *[path_parts_most][]const u8) ?[]const []const u8 {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, s, '/');
+    while (it.next()) |part| {
+        if (n == out.len) return null;
+        out[n] = part;
+        n += 1;
+    }
+    return out[0..n];
 }
 
 /// **`like(s, pattern)`**: whether the whole of `s` matches `pattern`, where

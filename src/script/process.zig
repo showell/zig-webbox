@@ -37,7 +37,16 @@ const vm = @import("vm.zig");
 pub const Budgets = interp.Budgets;
 pub const Stop = diag.Stop;
 
-pub const Mode = enum { atomic, background };
+/// `dry_run` (QUEUE 229, chunk 4): an atomic run whose changes are logged
+/// and not made, as the Linux tool runs a script unless told `--write`.
+pub const Mode = enum { atomic, background, dry_run };
+
+/// **WHAT A RUN IS GIVEN BESIDE ITS SOURCE**: its mode, and its values by
+/// name (`arg`), which the caller keeps alive as long as the run.
+pub const Options = struct {
+    mode: Mode = .atomic,
+    args: []const interp.Arg = &.{},
+};
 
 pub const State = enum { running, finished, stopped };
 
@@ -88,6 +97,12 @@ pub const Process = struct {
     /// doesn't fit is a process already stopped, saying why. Fails only
     /// when the host can't hold the process at all.
     pub fn start(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, mode: Mode, budgets: Budgets, now: i64, output_most: usize) error{OutOfMemory}!*Process {
+        return startWith(io, backing, root, source, .{ .mode = mode }, budgets, now, output_most);
+    }
+
+    /// `start`, with the run's options.
+    pub fn startWith(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, options: Options, budgets: Budgets, now: i64, output_most: usize) error{OutOfMemory}!*Process {
+        const mode = options.mode;
         const mm = try backing.create(MachineMemory);
         errdefer backing.destroy(mm);
         const out = try backing.alloc(u8, @min(output_most, budgets.output_bytes));
@@ -115,6 +130,8 @@ pub const Process = struct {
             .out = out,
             .out_cap = out.len,
             .read_only = mode == .background,
+            .dry_run = mode == .dry_run,
+            .args = options.args,
         };
         p.ready(source) catch {};
         return p;

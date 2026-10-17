@@ -14,6 +14,7 @@ pub const Builtin = enum {
     read_or,
     read_lines,
     line_at,
+    grep,
     count_lines,
     count_in,
     find_in,
@@ -23,6 +24,7 @@ pub const Builtin = enum {
     remove,
     remove_tree,
     walk,
+    edit,
     // strings
     split,
     join,
@@ -43,6 +45,7 @@ pub const Builtin = enum {
     rep,
     substitute,
     path,
+    match_path,
     basename,
     strip_suffix,
     // numbers
@@ -66,6 +69,7 @@ pub const Builtin = enum {
     take,
     // the host
     now,
+    arg,
     budget,
     yield,
     print,

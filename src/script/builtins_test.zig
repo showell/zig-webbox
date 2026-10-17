@@ -778,6 +778,7 @@ test "builtins: walk's stats count as reads, a call considers at most call_entri
         switch (mode) {
             .background => try testing.expectEqualStrings("chat/a.md\nchat/deep\n", p.output()),
             .atomic => try testing.expectEqual(script.diag.Class.store, p.status().stop.?.class),
+            .dry_run => unreachable,
         }
     }
 }

@@ -322,9 +322,9 @@ fn complain(comptime fmt: []const u8, args: anytype) void {
     if (!quiet) std.debug.print(fmt, args);
 }
 
-const Snippet = struct { line: usize, source: []const u8, prints: ?[]const u8, stops: ?[]const u8 };
+pub const Snippet = struct { line: usize, source: []const u8, prints: ?[]const u8, stops: ?[]const u8 };
 
-fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
+pub fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
     var out: std.ArrayList(Snippet) = .empty;
     var lines = std.mem.splitScalar(u8, doc, '\n');
     var n: usize = 0;

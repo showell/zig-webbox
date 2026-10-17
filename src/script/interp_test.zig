@@ -241,7 +241,7 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
     // and stops at the same place, by the gate).
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
-    var w = script.runOn(.walker, threaded.io(), testing.allocator, ".zig-cache/no-root", deep.items, .{}, 1_700_000_000, &out_buf);
+    var w = script.runOn(.walker, threaded.io(), testing.allocator, ".zig-cache/no-root", deep.items, .{}, 1_700_000_000, &out_buf, .{});
     defer w.deinit();
     try testing.expectEqual(script.diag.Budget.depth, w.stop.?.budget.?);
     // And the VM, on the same script, takes next to no Zig stack.

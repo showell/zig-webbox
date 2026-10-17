@@ -24,6 +24,7 @@ const sources = .{
     .{ "vm.zig", @embedFile("vm.zig") },
     .{ "collect.zig", @embedFile("collect.zig") },
     .{ "process.zig", @embedFile("process.zig") },
+    .{ "cli.zig", @embedFile("cli.zig") },
 };
 
 /// What a portable file may not name: the file system but its path

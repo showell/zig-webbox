@@ -61,6 +61,10 @@ pub const Budgets = struct {
     call_entries: u64 = 256,
 };
 
+/// **ONE VALUE GIVEN TO THE RUN BY NAME** (metal-vmm QUEUE 229, chunk 4):
+/// `shale script.shale name=value`, read with `arg(name, default)`.
+pub const Arg = struct { name: []const u8, value: []const u8 };
+
 /// One store change the script attempted, in order, root-relative.
 pub const Effect = struct {
     op: []const u8,
@@ -103,6 +107,12 @@ pub const Run = struct {
     /// **A BACKGROUND RUN ONLY READS** (`process.Mode`): a change is an
     /// `argument` error naming `atomic`.
     read_only: bool = false,
+    /// **A DRY RUN CHANGES NOTHING** (`process.Mode.dry_run`, QUEUE 229): a
+    /// change is checked and counted as if made, logged with the outcome
+    /// "dry run", and not made. What the Linux tool runs unless `--write`.
+    dry_run: bool = false,
+    /// The values the run was given by name (`arg`).
+    args: []const Arg = &.{},
     /// Whether the run called a builtin that changes the store, refused or
     /// not (the gate cuts a run that did not as a background run).
     tried_change: bool = false,

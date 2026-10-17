@@ -61,7 +61,7 @@ pub const touches_store: std.EnumSet(B) = blk: {
 };
 
 /// The builtins that change the store: what a background run refuses.
-pub const changes_store: std.EnumSet(B) = .initMany(&.{ .replace, .append, .mkdir, .remove, .remove_tree });
+pub const changes_store: std.EnumSet(B) = .initMany(&.{ .replace, .append, .mkdir, .remove, .remove_tree, .edit });
 
 /// Every builtin's `Spec`, by name.
 pub const specs: std.EnumArray(B, Spec) = blk: {

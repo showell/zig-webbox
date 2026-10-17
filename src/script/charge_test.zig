@@ -46,6 +46,7 @@ const cases = [_]Case{
     .{ .b = .read, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = read(\"big\")" },
     .{ .b = .read_or, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = read_or(\"big\", \"\")" },
     .{ .b = .read_lines, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = read_lines(\"big\", 0, N)" },
+    .{ .b = .grep, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = grep(\"big\", \"zz\")" },
     .{ .b = .line_at, .grows = .constant, .why = "the one line holding the offset, at most the call-bytes cap, its bytes a read's and charged as one" },
     .{ .b = .count_lines, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = count_lines(\"big\")" },
     .{ .b = .count_in, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = count_in(\"big\", \"ab\")" },
@@ -55,6 +56,7 @@ const cases = [_]Case{
     .{ .b = .mkdir, .grows = .constant, .why = "one folder, its path's bytes charged" },
     .{ .b = .remove, .grows = .constant, .why = "one file, its path's bytes charged" },
     .{ .b = .remove_tree, .grows = .constant, .why = "the tree's size is the store's to bound (max_depth, the volume); a script may call it at most `changes` times" },
+    .{ .b = .edit, .grows = .scales, .per = script.builtins.bytes_per_step, .store = .big_file, .call = "local x = edit(\"big\", \"b\", \"c\", {all = true})" },
     .{ .b = .walk, .grows = .scales, .store = .many_files, .call = "local x = walk(\"many\")" },
     // strings
     .{ .b = .split, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a,\", N)", .call = "local x = split(s, \",\")" },
@@ -66,6 +68,7 @@ const cases = [_]Case{
     .{ .b = .sub, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = sub(s, 1, -1)" },
     .{ .b = .trim, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = trim(s)" },
     .{ .b = .path, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = path(s, s)" },
+    .{ .b = .match_path, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = match_path(s, \"*b\")" },
     .{ .b = .basename, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = basename(s)" },
     .{ .b = .strip_suffix, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = strip_suffix(s, s)" },
     .{ .b = .upper, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = upper(s)" },
@@ -99,6 +102,7 @@ const cases = [_]Case{
     .{ .b = .take, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, i) end", .call = "local x = take(l, N)" },
     // the host
     .{ .b = .now, .grows = .constant, .why = "an integer the host handed in" },
+    .{ .b = .arg, .grows = .constant, .why = "a name compared with each value the run was given, a handful, their bytes charged" },
     .{ .b = .budget, .grows = .constant, .why = "six counters" },
     .{ .b = .yield, .grows = .constant, .why = "its argument checked; in the VM the copy it makes is charged a step a value and a step for 16 bytes, by collect.zig" },
     .{ .b = .print, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "print(s)" },

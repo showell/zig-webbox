@@ -19,11 +19,14 @@ pub const builtins_store = @import("builtins_store.zig");
 pub const compile = @import("compile.zig");
 pub const vm = @import("vm.zig");
 pub const process = @import("process.zig");
+pub const cli = @import("cli.zig");
 
 const std = @import("std");
 const Io = @import("host_io").Io;
 
 pub const Budgets = interp.Budgets;
+pub const Options = process.Options;
+pub const Arg = interp.Arg;
 pub const Effect = interp.Effect;
 pub const Stop = diag.Stop;
 
@@ -105,10 +108,15 @@ pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writ
 /// `out`, and the output budget is at most `out.len`. It always returns a
 /// Result: a source however hostile ends finished or stopped.
 pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+    return runWith(io, backing, root, source, budgets, now, out, .{});
+}
+
+/// `run`, with its options: its mode and its values by name (QUEUE 229).
+pub fn runWith(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8, options: Options) Result {
     // **IN THE TESTS, THE GATE** (metal-vmm QUEUE 211): every run is the
     // VM's, held to the tree-walker's on a copy of the store.
-    if (@import("builtin").is_test) return @import("gate_test.zig").run(io, backing, root, source, budgets, now, out);
-    return runOn(.vm, io, backing, root, source, budgets, now, out);
+    if (@import("builtin").is_test) return @import("gate_test.zig").run(io, backing, root, source, budgets, now, out, options);
+    return runOn(.vm, io, backing, root, source, budgets, now, out, options);
 }
 
 /// What runs a script: **the VM**, which the route and the runner use, or
@@ -125,7 +133,7 @@ pub const Engine = union(enum) {
     vm_background: u64,
 };
 
-pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8, options: Options) Result {
     // **THE VM THROUGH ITS CONTRACT** (`process.zig`): what a host runs is
     // what a one-shot run is, in slices or in one.
     switch (engine) {
@@ -135,8 +143,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
                 .vm_sliced, .vm_background => |n| n,
                 else => std.math.maxInt(u64),
             };
-            const mode: process.Mode = if (engine == .vm_background) .background else .atomic;
-            const p = process.Process.start(io, backing, root, source, mode, budgets, now, out.len) catch {
+            var opts = options;
+            if (engine == .vm_background) opts.mode = .background;
+            const p = process.Process.startWith(io, backing, root, source, opts, budgets, now, out.len) catch {
                 return .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the host could not hold the run" }, .output = out[0..0], .effects = &.{}, .steps = 0 };
             };
             while (p.step(.{ .steps = slice }) == .paused) {}
@@ -183,6 +192,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .program = program,
         .out = out,
         .out_cap = @min(out.len, budgets.output_bytes),
+        .read_only = options.mode == .background,
+        .dry_run = options.mode == .dry_run,
+        .args = options.args,
     };
     defer r.deinit();
     // The VM's runs went through its Process above: here, the walker's.
@@ -227,4 +239,6 @@ test {
     _ = @import("props_test.zig");
     _ = @import("yield_test.zig");
     _ = @import("process_test.zig");
+    _ = @import("agent_test.zig");
+    _ = cli;
 }
