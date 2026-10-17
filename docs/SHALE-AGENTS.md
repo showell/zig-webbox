@@ -282,9 +282,10 @@ A `to` with a `.` where the name is still **declared** (after `const`,
 `var` or `fn`, before a `:`, in a capture, an enum's member) stops the run,
 naming the line, with nothing written: `pub const
 linux_writes.kept_write_deadline_ms` was the essay's worst miss. So the
-stop says the block was not moved yet, as it does here. (A `shale-linux`
-block runs with the Linux prelude, in `src/shale_doc_linux_test.zig`.) A dry run shows the diffs first,
-and its reads see the rename (234, 2).
+stop says the block was not moved yet, as it does here. The rename
+writes as it goes, so `git diff` shows it and `git checkout` takes it
+back. (A `shale-linux` block runs with the Linux prelude, in
+`src/shale_doc_linux_test.zig`.)
 
 ### Two edits to one file, each asserted, one write
 

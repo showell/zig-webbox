@@ -176,8 +176,8 @@ test "linux prelude: edits_all's word check finds what edit's word mode finds, c
     // one that holds: the check must step as edit steps.
     const cases = [_][2][]const u8{
         .{ "xa-a-a\n", "a-a" },  .{ "foo foobar\n", "foo" }, .{ "_foo foo\n", "foo" },
-        .{ "a.b a.b\n", "a.b" }, .{ "--x--x\n", "-x-" },    .{ "aaa aa\n", "aa" },
-        .{ "x-x-x\n", "-x" },    .{ "ab ab\n", " ab" },     .{ "q.q.q q\n", "q.q" },
+        .{ "a.b a.b\n", "a.b" }, .{ "--x--x\n", "-x-" },     .{ "aaa aa\n", "aa" },
+        .{ "x-x-x\n", "-x" },    .{ "ab ab\n", " ab" },      .{ "q.q.q q\n", "q.q" },
     };
     for (cases) |c| {
         errdefer std.debug.print("text {s}old {s}\n", .{ c[0], c[1] });

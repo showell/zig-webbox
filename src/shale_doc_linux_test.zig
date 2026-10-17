@@ -1,8 +1,8 @@
 //! **SHALE-AGENTS.md'S `shale-linux` BLOCKS, RUN** (metal-vmm QUEUE 234,
 //! 3): a block that needs the Linux prelude (`zig_rename`, `run`, git) is
 //! fenced `shale-linux`, which the core's doc test (script/agent_test.zig)
-//! passes by, and runs here instead: on a small checkout, as a dry run,
-//! with the CLI's summary diffs, printing what the doc says it prints (`--
+//! passes by, and runs here instead: each on a fresh small checkout, with
+//! the CLI's summary diffs, printing what the doc says it prints (`--
 //! prints:`) or stopping as it says (`-- stops: class`).
 
 const std = @import("std");
@@ -63,7 +63,7 @@ const files = [_][2][]const u8{
     .{ "src/linux_host.zig", "pub const kept_write_deadline_ms = 5000;\nfn late(ms: u64) bool {\n    return ms > kept_write_deadline_ms;\n}\n" },
 };
 
-test "docs/SHALE-AGENTS.md: every shale-linux block runs with the Linux prelude on a checkout, as a dry run, as the doc says" {
+test "docs/SHALE-AGENTS.md: every shale-linux block runs with the Linux prelude on a checkout, as the doc says" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -80,7 +80,7 @@ test "docs/SHALE-AGENTS.md: every shale-linux block runs with the Linux prelude 
         t.diffs = .summary;
         try t.tmp.dir.createDirPath(t.threaded.io(), "src");
         for (files) |f| try t.put(f[0], f[1]);
-        var r = t.run(b.source, .dry_run);
+        var r = t.run(b.source, .atomic);
         defer r.deinit();
         if (b.stops) |class| {
             if (r.stop == null or !std.mem.eql(u8, @tagName(r.stop.?.class), class)) {
@@ -94,8 +94,6 @@ test "docs/SHALE-AGENTS.md: every shale-linux block runs with the Linux prelude 
             std.debug.print("docs/SHALE-AGENTS.md:{d}: prints\n{s}-- not --\n{s}", .{ b.line, r.output, b.prints.? });
             wrong += 1;
         }
-        // A dry run: the checkout is as it was.
-        for (files) |f| try testing.expectEqualStrings(f[1], try t.file(f[0]));
     }
     try testing.expectEqual(@as(usize, 0), wrong);
     try testing.expect(all.len >= 2);

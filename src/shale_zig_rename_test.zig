@@ -117,7 +117,7 @@ test "zig_rename: what it refuses: `from` not an identifier, `to` not one or a q
     try testing.expectEqualStrings("const x = 1;\nconst s = \"open\n;\n", try t.file("bad.zig"));
 }
 
-test "zig_rename: `lines` limits it to a range; a dry run's rename is seen by its reads and not made" {
+test "zig_rename: `lines` limits it to a range; a declaration outside it does not stop it" {
     var t: T = undefined;
     try init(&t);
     defer t.deinit();
@@ -128,9 +128,6 @@ test "zig_rename: `lines` limits it to a range; a dry run's rename is seen by it
     try t.put("d.zig", "const x = 1;\nconst b = x;\n");
     try testing.expectEqualStrings("1\t0", try lastLine(&t, "local r = zig_rename(\"d.zig\", \"x\", \"m.x\", {lines = {2, 2}}) print(r.renamed, r.left_in_comments)", .atomic));
     try testing.expectEqualStrings("const x = 1;\nconst b = m.x;\n", try t.file("d.zig"));
-    try t.put("r.zig", "const x = 1;\n");
-    try testing.expectEqualStrings("const y = 1;", try lastLine(&t, "zig_rename(\"r.zig\", \"x\", \"y\") print(line_at(\"r.zig\", 1))", .dry_run));
-    try testing.expectEqualStrings("const x = 1;\n", try t.file("r.zig"));
 }
 
 test "zig_rename: a step a token, more for a file four times the size (a name not there: no diff's charge)" {
@@ -143,7 +140,7 @@ test "zig_rename: a step a token, more for a file four times the size (a name no
         var src: std.ArrayList(u8) = .empty;
         for (0..n) |i| try src.print(a, "const v{d} = x;\n", .{i});
         try t.put("n.zig", src.items);
-        var r = t.run("zig_rename(\"n.zig\", \"absent\", \"y\")", .dry_run);
+        var r = t.run("zig_rename(\"n.zig\", \"absent\", \"y\")", .atomic);
         defer r.deinit();
         try testing.expect(r.stop == null);
         steps[k] = r.steps;
