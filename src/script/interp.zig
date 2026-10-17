@@ -148,9 +148,6 @@ pub const Run = struct {
     tried_change: bool = false,
     /// The copy's bookkeeping, kept from yield to yield (`collect.Books`).
     collecting: @import("collect.zig").Books = .{},
-    /// A dry run's own changes, which its reads see (overlay.zig): nothing
-    /// on metal.
-    overlay: @import("overlay.zig").Overlay = .{},
     /// The walk's recursion now (`Budgets.depth`).
     walk: u32 = 0,
     reads: u64 = 0,
@@ -193,6 +190,10 @@ pub const Run = struct {
     /// The lowest frame address the walk reached: the Zig stack it took,
     /// measured (docs/SHALE.md, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
+    /// A dry run's own changes, which its reads see (overlay.zig): nothing
+    /// on metal. **Last, and kept last**: a zero-size field among the others
+    /// moved metal's code by ~1.4 KB (dogpark.elf, measured), here by none.
+    overlay: @import("overlay.zig").Overlay = .{},
 
     /// The machine's memory, given back (the arena is the Result's).
     pub fn deinit(self: *Run) void {
