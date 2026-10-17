@@ -67,8 +67,10 @@ has none of it):
   - Its record is `<log>.job`. `job_alive`, `job_stop` (TERM, 2 seconds,
     then KILL) and `job_wait(job, {timeout_ms, file, contains})` take the
     job or that path, so a later call carries on.
-  - `job_wait` gives `{ended = "exited" | "found" | "timeout"[, code |
-    signal]}`.
+  - `job_wait` gives `{ended = "exited" | "found" | "timeout" | "lost"[,
+    code | signal]}`. `exited` always has a `code` or a `signal`; `lost` is
+    a job gone with its reaper and no end written (the reaper was itself
+    ended).
   - **Keep `timeout_ms` under the Bash call's own timeout** (120 s unless
     raised), because Shale cannot see it.
 - **Files:** `create(p, text)` refuses a file already there.

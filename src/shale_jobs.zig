@@ -9,8 +9,9 @@
 //! stdout and stderr its log, no death signal; writes its record; waits
 //! for it; and writes how it ended. **The record, `<log>.job`**, is a few
 //! `key=value` lines: `pid`, `pgid`, `start` (the leader's start time, raw
-//! from `/proc/<pid>/stat`), `started`, `argv`, and at its end `exit` or
-//! `signal`, and `ended`. Each write is whole: a new file renamed over it.
+//! from `/proc/<pid>/stat`), `started`, `argv`, `reaper` and `reaper_start`
+//! (the reaper's own id and start time), and at its end `exit` or `signal`,
+//! and `ended`. Each write is whole: a new file renamed over it.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -21,6 +22,8 @@ pub const Record = struct {
     start: []const u8 = "",
     started: i64 = 0,
     argv: []const u8 = "",
+    reaper: i32 = 0,
+    reaper_start: []const u8 = "",
     exit: ?u8 = null,
     signal: ?u32 = null,
     ended: ?i64 = null,
@@ -43,6 +46,8 @@ pub fn parseRecord(text: []const u8) ?Record {
         if (std.mem.eql(u8, k, "start")) r.start = v;
         if (std.mem.eql(u8, k, "started")) r.started = std.fmt.parseInt(i64, v, 10) catch return null;
         if (std.mem.eql(u8, k, "argv")) r.argv = v;
+        if (std.mem.eql(u8, k, "reaper")) r.reaper = std.fmt.parseInt(i32, v, 10) catch return null;
+        if (std.mem.eql(u8, k, "reaper_start")) r.reaper_start = v;
         if (std.mem.eql(u8, k, "exit")) r.exit = std.fmt.parseInt(u8, v, 10) catch return null;
         if (std.mem.eql(u8, k, "signal")) r.signal = std.fmt.parseInt(u32, v, 10) catch return null;
         if (std.mem.eql(u8, k, "ended")) r.ended = std.fmt.parseInt(i64, v, 10) catch return null;
@@ -53,7 +58,7 @@ pub fn parseRecord(text: []const u8) ?Record {
 
 fn formatRecord(buf: []u8, r: Record) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    w.print("pid={d}\npgid={d}\nstart={s}\nstarted={d}\nargv={s}\n", .{ r.pid, r.pgid, r.start, r.started, r.argv }) catch {};
+    w.print("pid={d}\npgid={d}\nstart={s}\nstarted={d}\nargv={s}\nreaper={d}\nreaper_start={s}\n", .{ r.pid, r.pgid, r.start, r.started, r.argv, r.reaper, r.reaper_start }) catch {};
     if (r.exit) |c| w.print("exit={d}\n", .{c}) catch {};
     if (r.signal) |s| w.print("signal={d}\n", .{s}) catch {};
     if (r.ended) |e| w.print("ended={d}\n", .{e}) catch {};
@@ -78,6 +83,15 @@ pub fn startOf(buf: []u8, pid: i32) ?[]const u8 {
     var i: usize = 3;
     while (it.next()) |f| : (i += 1) if (i == 22) return f;
     return null;
+}
+
+/// **WHETHER A JOB'S REAPER LIVES**, the one the record names: while it
+/// does, a job that is gone has an end still to be written.
+pub fn reaperAlive(r: Record) bool {
+    if (r.reaper <= 0) return false;
+    var buf: [1024]u8 = undefined;
+    const s = startOf(&buf, r.reaper) orelse return false;
+    return std.mem.eql(u8, s, r.reaper_start);
 }
 
 fn signalGroup(pgid: i32, sig: u32) bool {
@@ -243,8 +257,10 @@ pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []c
         linux.exit_group(127);
     }
     _ = linux.close(@intCast(log_fd));
-    var r: Record = .{ .pid = @intCast(pid), .pgid = @intCast(pid), .started = nowSeconds(), .argv = shown };
+    var r: Record = .{ .pid = @intCast(pid), .pgid = @intCast(pid), .started = nowSeconds(), .argv = shown, .reaper = linux.getpid() };
     var stat_buf: [1024]u8 = undefined;
+    var own_buf: [1024]u8 = undefined;
+    r.reaper_start = startOf(&own_buf, r.reaper) orelse return 2;
     // The child's start time, once it is the session leader (a moment).
     var tries: usize = 0;
     while (tries < 100) : (tries += 1) {

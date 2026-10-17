@@ -141,7 +141,10 @@ fn find(h: *Host, run: *Run, pos: ast.Pos, v: Value, name: []const u8) Error!Fou
 
 /// **WAITING ON A JOB**: until it ends (`exited`, and its `code` if it
 /// exited or the `signal` that ended it), a `file` (the log unless named) holds `contains` (`found`), or
-/// `timeout_ms` passes (`timeout`). It looks at once, then every second.
+/// `timeout_ms` passes (`timeout`). It looks at once, then every second. A
+/// job gone while its reaper lives is still ending: the reaper writes its
+/// end after it reaps it. Gone with its reaper and no end written, it is
+/// `lost`.
 fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (args.len != 2) return run.fail(pos, .argument, "`job_wait` takes a job and its options, `{{timeout_ms = ...}}`, given {d} arguments", .{args.len});
     const m = switch (args[1]) {
@@ -169,14 +172,16 @@ fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             } else |_| {}
         }
         if (j.record.done()) return result(run, pos, "exited", j.record.exit, j.record.signal);
-        // Gone without a word: the reaper itself was ended.
-        if (!jobs.alive(j.record)) {
+        const gone = !jobs.alive(j.record);
+        if (gone and !jobs.reaperAlive(j.record)) {
+            // The reaper's last write, if it made one, is there now.
             const again = try find(h, run, pos, args[0], "job_wait");
-            return result(run, pos, "exited", again.record.exit, again.record.signal);
+            if (again.record.done()) return result(run, pos, "exited", again.record.exit, again.record.signal);
+            return result(run, pos, "lost", null, null);
         }
         const spent = monoMs() - began;
         if (spent >= limit) return result(run, pos, "timeout", null, null);
-        sleepMs(@min(1000, limit - spent));
+        sleepMs(@min(if (gone) @as(u64, 10) else 1000, limit - spent));
     }
 }
 
