@@ -115,7 +115,7 @@ pub inline fn viewStatOrNull(run: *Run, full: []const u8) !?store.Stat {
     if (comptime overlay.on) if (run.dry_run) if (overlay.find(&run.overlay, full)) |e| return switch (e.kind) {
         .removed => null,
         .dir => .{ .size = 0, .kind = .directory, .mtime = @as(i96, run.now) * 1_000_000_000 },
-        .file => .{ .size = (try overlay.content(e, run.io, run.alloc, full)).len, .kind = .file, .mtime = @as(i96, run.now) * 1_000_000_000 },
+        .file => .{ .size = try overlay.size(e, run.io, run.alloc, full), .kind = .file, .mtime = @as(i96, run.now) * 1_000_000_000 },
     };
     return store.statOrNull(run.io, run.alloc, full); // the view
 }
@@ -133,13 +133,7 @@ pub inline fn viewReadAt(run: *Run, full: []const u8, offset: u64, buf: []u8) !u
     if (comptime overlay.on) if (run.dry_run) if (overlay.find(&run.overlay, full)) |e| switch (e.kind) {
         .removed => return error.FileNotFound,
         .dir => return error.IsDir,
-        .file => {
-            const c = try overlay.content(e, run.io, run.alloc, full);
-            if (offset >= c.len) return 0;
-            const n = @min(buf.len, c.len - @as(usize, @intCast(offset)));
-            @memcpy(buf[0..n], c[@intCast(offset)..][0..n]);
-            return n;
-        },
+        .file => return overlay.readAt(e, run.io, run.alloc, full, offset, buf),
     };
     return store.readAt(run.io, run.alloc, full, offset, buf); // the view
 }

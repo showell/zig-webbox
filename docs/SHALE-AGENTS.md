@@ -85,7 +85,7 @@ has none of it):
 
 **Git, in the git prelude** (`src/shale_prelude_git.shale`). Every call
 runs git under `run`, so it needs `--write`. A `repo` is a Shale path, `""`
-for the root and `repos:dog-park` for a mount.
+or `"."` for the root and `repos:dog-park` for a mount.
 - **Reading:** `git_status(repo)` gives `{code, path[, from]}`.
   `git_log(repo, {n, range, ref, fields})` gives `{hash, subject, date,
   author}`. `git_diff(repo, {range, paths, stat})` and `git_show(repo,
@@ -99,6 +99,10 @@ for the root and `repos:dog-park` for a mount.
     does.
   - `git_fetch(repo, {all})`, `git_pull_ff(repo)` and `git_merge_ff(repo,
     ref)`.
+  - `git_merge(repo, ref)` makes a merge commit when one is needed and
+    gives the new head. On a conflict it undoes the merge (`merge
+    --abort`) and stops, naming the conflicted paths, so the checkout is
+    never left half merged.
   - `git_worktree_add(repo, dir, {branch, new})`,
     `git_worktree_remove(repo, dir, {force})` and `git_branch_delete(repo,
     name, {force})`.
