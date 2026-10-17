@@ -549,7 +549,8 @@ test "lex: a block comment is `--` and a long string's opener, any level (the de
     try testing.expect(std.mem.indexOf(u8, bad.err.?.message, "a long comment with no `]=]`") != null);
 }
 
-test "lex: random sources of brackets, `=`, `-`, quotes and newlines end in a token stream or a clean error, never a panic, every place in the source (the design: fuzzed first)" {
+test "expensive fuzz: lex: random sources of brackets, `=`, `-`, quotes and newlines end in a token stream or a clean error, never a panic, every place in the source (the design: fuzzed first)" {
+    if (!@import("script_test_options").expensive) return error.SkipZigTest;
     var prng = std.Random.DefaultPrng.init(2322);
     const rand = prng.random();
     // Bytes, and the pieces of openers and closers, so long strings and

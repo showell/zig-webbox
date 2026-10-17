@@ -231,7 +231,8 @@ test "builtins: every builtin's work is charged, so one call cannot hide a milli
     try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
 }
 
-test "builtins: a change on the disk is in the effects log, however little arena is left (every limit swept)" {
+test "expensive sweep: builtins: a change on the disk is in the effects log, however little arena is left (every limit swept)" {
+    if (!@import("script_test_options").expensive) return error.SkipZigTest;
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();

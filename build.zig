@@ -83,8 +83,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     // **THE SCRIPT FUZZER'S COUNT** (src/script/fuzz_test.zig): a few hundred
     // sources in the tests, as many as asked for with -Dscript-fuzz.
-    const script_options = b.addOptions();
-    script_options.addOption(u32, "fuzz_runs", b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400);
+    const fuzz_runs = b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400;
+    // **THE EXPENSIVE ONES HUNT, NO GATE PAYS FOR THEM** (Steve, 2026-10-17:
+    // fuzzers are for bug-hunting expeditions; each bug found becomes a
+    // targeted unit test): a test named `expensive fuzz: ...` or `expensive
+    // sweep: ...` is skipped by `zig build test` and counted as skipped, and
+    // `zig build fuzz` runs those and nothing else.
+    const options_of = struct {
+        fn make(bb: *std.Build, runs: u32, expensive: bool) *std.Build.Module {
+            const o = bb.addOptions();
+            o.addOption(u32, "fuzz_runs", runs);
+            o.addOption(bool, "expensive", expensive);
+            return o.createModule();
+        }
+    }.make;
+    const fuzz_step = b.step("fuzz", "The expensive fuzzes and sweeps (tests named `expensive ...`), for a bug hunt; no gate runs them");
     // **ONLY THE TESTS NAMED** (-Dtest-filter=<text>): a change's own tests
     // in seconds, before the whole suite.
     const test_filter = b.option([]const u8, "test-filter", "run only the tests whose names contain this");
@@ -105,8 +118,19 @@ pub fn build(b: *std.Build) void {
         unit.root_module.addImport("webbox", webbox);
         unit.root_module.addImport("webbox_linux", webbox_linux);
         unit.root_module.addImport("host_io", host_io);
-        unit.root_module.addImport("script_test_options", script_options.createModule());
+        unit.root_module.addImport("script_test_options", options_of(b, fuzz_runs, false));
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+    // The expensive tests are all reached from webbox.zig's test block.
+    const hunt = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/webbox.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = b.dupeStrings(&.{"expensive "}), .test_runner = timing });
+    hunt.root_module.addImport("webbox", webbox);
+    hunt.root_module.addImport("webbox_linux", webbox_linux);
+    hunt.root_module.addImport("host_io", host_io);
+    hunt.root_module.addImport("script_test_options", options_of(b, fuzz_runs, true));
+    fuzz_step.dependOn(&b.addRunArtifact(hunt).step);
     test_step.dependOn(&b.addRunArtifact(signer_test).step);
 }
