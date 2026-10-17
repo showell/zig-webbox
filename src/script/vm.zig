@@ -110,6 +110,7 @@ const Machine = struct {
         m.operands.shrinkRetainingCapacity(m.operands.items.len - argc);
         m.operands.ensureUnusedCapacity(r.machine, func.operands + 1) catch return r.machineOom(op.pos);
         const caller = m.frame();
+        r.calls.append(r.machine, .{ .line = op.pos.line, .column = op.pos.column, .function = r.function }) catch return r.machineOom(op.pos);
         m.frames.append(r.machine, .{
             .func = func,
             .ret_pc = m.pc,
@@ -137,6 +138,7 @@ const Machine = struct {
         m.walk = m.frame().walk;
         r.function = f.caller;
         r.depth -= 1;
+        r.calls.items.len -= 1;
         m.operands.shrinkRetainingCapacity(f.sp);
         m.pc = f.ret_pc;
         m.push(if (f.out) |out| try r.attemptReturned(f.at, out, v) else v);
@@ -165,6 +167,9 @@ const Machine = struct {
             r.stop = null;
             r.ret = .nil;
             m.push(try r.attemptFailed(f.at, out, s));
+            // The calls back to the attempt's caller's: after its answer,
+            // made from the stop's whole trail.
+            r.calls.shrinkRetainingCapacity(i - 1);
             return true;
         }
         return false;

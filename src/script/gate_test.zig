@@ -83,7 +83,10 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     const arena_shaped = yields and (isArenaShaped(v.stop) or isArenaShaped(w.stop));
     if (!arena_shaped) {
         if (!std.mem.eql(u8, v.output, w.output)) why = "the output";
-        if (!sameStop(v.stop, w.stop)) why = "the stop";
+        // A machine stop both make is at the same place, and may be at a
+        // different depth of the same recursion: its trail is the
+        // machinery's too (QUEUE 229, chunk 1).
+        if (!sameStop(v.stop, w.stop) and !(machine_shaped and samePlace(v.stop.?, w.stop.?))) why = "the stop";
     }
     if (!yields and !machine_shaped) {
         if (v.steps != w.steps) why = "the steps";
@@ -141,7 +144,25 @@ fn sameStop(x: ?script.Stop, y: ?script.Stop) bool {
     const a = x.?;
     const b = y.?;
     return a.line == b.line and a.column == b.column and a.class == b.class and a.budget == b.budget and
-        std.mem.eql(u8, a.function, b.function) and std.mem.eql(u8, a.message, b.message);
+        std.mem.eql(u8, a.function, b.function) and std.mem.eql(u8, a.message, b.message) and sameTrail(a.trail, b.trail);
+}
+
+/// The same stop but for its trail.
+fn samePlace(a: script.Stop, b: script.Stop) bool {
+    var x = a;
+    var y = b;
+    x.trail = &.{};
+    y.trail = &.{};
+    return sameStop(x, y);
+}
+
+/// Each call made at the same place in the same function, in order.
+fn sameTrail(x: []const script.diag.Call, y: []const script.diag.Call) bool {
+    if (x.len != y.len) return false;
+    for (x, y) |a, b| {
+        if (a.line != b.line or a.column != b.column or !std.mem.eql(u8, a.function, b.function)) return false;
+    }
+    return true;
 }
 
 /// `src` to `dst`, links as links (their targets unread).

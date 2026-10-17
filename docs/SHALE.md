@@ -317,11 +317,26 @@ was in. The classes are:
 
 ```text
 ── stopped at <script>:<line>:<column> (in `<function>`): <class>[ <budget>]: <message> (<steps> steps)
+   called from <script>:<line>:<column> (in `<caller>`)
+   called from <script>:<line>:<column>
 ```
 
 `(in ...)` is there when it stopped inside a function, `<budget>` when a
 budget stopped it, and a function of the prelude is named "the prelude's
 <name>", its line the prelude's.
+
+**The trail** (metal-vmm QUEUE 229): after a stop inside a function, one
+`called from` line for each call that led there, innermost first, out to
+the top level, whose line has no `(in ...)`. A call made inside a prelude
+function reads `called from the prelude:<line>:<column>`, its line the
+prelude's. So a budget that runs out in the prelude's `walk_all` names the
+line of the script that called it:
+
+```text
+── stopped at seq 12:18:14 (in `the prelude's walk_all`): budget reads: the store-read budget (count) ran out (134718 steps)
+   called from seq 12:31:15 (in `sizes`)
+   called from seq 12:40:1
+```
 
 
 **The message says what to do.** Each one names what was wrong and, where
@@ -351,7 +366,10 @@ It gives back a map:
 - `{ok = true, value = v}` when `f` returned (with no `value` if it
   returned nil);
 - or `{ok = false, error = "...", class = "store", line = 12, column = 9,
-  in_function = "f"}`.
+  in_function = "f", trail = {...}}`. `trail` is the stop's calls,
+  innermost first, as the report's `called from` lines: a list of `{line,
+  column, in_function}` maps, out to the top level: the `attempt`
+  itself is one of them, the call of `f`, and the calls before it.
 
 Two things it does not do:
 - **It never catches a budget.** A budget is the run's, not the call's, so
@@ -492,7 +510,7 @@ the errors column says the rest.
 | `now()`, `budget()` | the host's time; what is left | |
 | `print(...)` | nil | `type` for a list or map |
 | `yield()` | nil | |
-| `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function}` | (the language's own: see `attempt`) |
+| `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function, trail}` | (the language's own: see `attempt`) |
 | the prelude's `walk_all(p, opts)`, `count_all(p, s)`, `find_next(p, s, at)` | every entry; every occurrence; the next one | as `walk`, `count_in`, `find_in` |
 
 ### The store
