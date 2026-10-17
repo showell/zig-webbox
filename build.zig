@@ -179,9 +179,24 @@ pub fn build(b: *std.Build) void {
     // cheapest first. A sibling that is not there fails the step by name.
     // Not in `test`: it needs the siblings, and minutes. Run before a webbox
     // change is pushed to master.
-    const consumers = b.step("consumers", "Each application's own checks against this tree: the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
+    const consumers = b.step("consumers", "Each application's own checks against this tree: metal-vmm's queue tool, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
     const here = b.build_root.path orelse ".";
     var prev: ?*std.Build.Step = null;
+    // **metal-vmm's queue tool, by this tree's own `shale`** (metal-vmm
+    // QUEUE 233): its Shale tests on its fixtures, first, as the cheapest.
+    {
+        const dir = b.pathJoin(&.{ here, "..", "metal-vmm" });
+        const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
+            "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; " ++
+                "cd '{s}' 2>/dev/null || {{ echo 'consumers: no metal-vmm beside this checkout ({s})'; exit 1; }}; " ++
+                "echo '==> metal-vmm: shale --write .shale/queue_test.shale'; \"$bin\" --write --budget output_bytes=8388608 .shale/queue_test.shale > /dev/null",
+            .{ dir, dir },
+        ) });
+        run.addFileArg(runner.getEmittedBin());
+        run.has_side_effects = true;
+        run.stdio = .inherit;
+        prev = &run.step;
+    }
     for ([_]struct { repo: []const u8, cmd: []const u8 }{
         .{ .repo = "observatory", .cmd = "zig build test" },
         .{ .repo = "dog-park", .cmd = "zig build test" },
