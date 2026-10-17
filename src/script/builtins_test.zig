@@ -956,5 +956,23 @@ test "builtins: an edit's diff in full, or one line a change when the run says `
     // One hunk, one line.
     var one = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\nline 04\\n\", \"x\\n\")", .{}, 0, &out_buf, .{ .mode = .dry_run, .diffs = .summary });
     defer one.deinit();
-    try testing.expectEqualStrings("edit n.txt: 1 hunk, -3 +2 lines\n", one.output);
+    try testing.expectEqualStrings("edit n.txt: 1 hunk, -2 +1 lines\n", one.output);
+}
+
+test "builtins: a diff's hunk ends at the line an edit's text ends, when old and new both end a line" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/n.txt", .data = "line 01\nline 02\nline 03\nline 04\nline 05\nline 06\n" });
+    // Two whole-line edits, the second to the file's end: no untouched line
+    // and no empty one in either hunk.
+    var r = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", {{old = \"line 02\\n\", new = \"X\\n\"}, {old = \"line 05\\nline 06\\n\", new = \"Y\\nZ\\n\"}})", .{}, 0, &out_buf, .{ .mode = .dry_run });
+    defer r.deinit();
+    try testing.expect(r.stop == null);
+    try testing.expectEqualStrings("--- a/n.txt\n+++ b/n.txt\n@@ -2,1 +2,1 @@\n-line 02\n+X\n@@ -5,2 +5,2 @@\n-line 05\n-line 06\n+Y\n+Z\n", r.output);
+    // A line joined to the next (its new text ends no line): the next line
+    // is in the hunk, since it changed.
+    var j = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\n\", \"x\")", .{}, 0, &out_buf, .{ .mode = .dry_run });
+    defer j.deinit();
+    try testing.expectEqualStrings("--- a/n.txt\n+++ b/n.txt\n@@ -3,2 +3,1 @@\n-line 03\n-line 04\n+xline 04\n", j.output);
 }
