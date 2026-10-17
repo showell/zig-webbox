@@ -697,3 +697,107 @@ test "property: a search's cost is linear in the string, whatever the pattern: `
     // costs about what `a*b` does: its 9 instructions to 5.
     try testing.expect(try reSteps(&f, "(a*)*b", n) <= 2 * plain);
 }
+
+// ── edit's list form (metal-vmm QUEUE 232) ───────────────────────────────
+
+/// `s` with every `old` replaced by `new`, left to right, none overlapping:
+/// what one edit with `all` does.
+fn replaceAll(a: std.mem.Allocator, s: []const u8, old: []const u8, new: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, s, from, old)) |i| {
+        try out.appendSlice(a, s[from..i]);
+        try out.appendSlice(a, new);
+        from = i + old.len;
+    }
+    try out.appendSlice(a, s[from..]);
+    return out.items;
+}
+
+/// The unified diff `edit` printed, applied to `was`: each hunk's `-` lines
+/// must be `was`'s lines where its header says, and its `+` lines take
+/// their place. Lines are what `\n` splits; the result is them joined.
+fn applyDiff(a: std.mem.Allocator, was: []const u8, diff: []const u8) ![]u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, was, '\n');
+    while (it.next()) |l| try lines.append(a, l);
+    var out: std.ArrayList([]const u8) = .empty;
+    var next_old: usize = 1;
+    var shift: i64 = 0;
+    var dl = std.mem.splitScalar(u8, diff, '\n');
+    _ = dl.next(); // --- a/
+    _ = dl.next(); // +++ b/
+    while (dl.next()) |h| {
+        if (h.len == 0) continue;
+        if (!std.mem.startsWith(u8, h, "@@ -")) return error.NotAHunk;
+        var nums = std.mem.tokenizeAny(u8, h, "@-+, ");
+        const a0 = try std.fmt.parseInt(usize, nums.next().?, 10);
+        const b0 = try std.fmt.parseInt(usize, nums.next().?, 10);
+        const c0 = try std.fmt.parseInt(i64, nums.next().?, 10);
+        const d0 = try std.fmt.parseInt(usize, nums.next().?, 10);
+        if (c0 != @as(i64, @intCast(a0)) + shift) return error.NewLineNumberWrong;
+        while (next_old < a0) : (next_old += 1) try out.append(a, lines.items[next_old - 1]);
+        for (0..b0) |_| {
+            const l = dl.next().?;
+            if (l.len == 0 or l[0] != '-') return error.NotARemovedLine;
+            if (!std.mem.eql(u8, l[1..], lines.items[next_old - 1])) return error.RemovedLineIsNotTheFiles;
+            next_old += 1;
+        }
+        for (0..d0) |_| {
+            const l = dl.next().?;
+            if (l.len == 0 or l[0] != '+') return error.NotAnAddedLine;
+            try out.append(a, l[1..]);
+        }
+        shift += @as(i64, @intCast(d0)) - @as(i64, @intCast(b0));
+    }
+    while (next_old <= lines.items.len) : (next_old += 1) try out.append(a, lines.items[next_old - 1]);
+    return std.mem.join(a, "\n", out.items);
+}
+
+test "property: a list of edits writes what the edits make in sequence, and its one diff, applied to the file as it was, gives the file written (QUEUE 232)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var prng = std.Random.DefaultPrng.init(232);
+    const rand = prng.random();
+    const alphabet = "ab\n";
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    for (0..3000) |round| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const was = try a.alloc(u8, 1 + rand.uintAtMost(usize, 40));
+        for (was) |*c| c.* = alphabet[rand.uintLessThan(usize, alphabet.len)];
+        try f.put("t.txt", was);
+        src.clearRetainingCapacity();
+        try src.appendSlice(testing.allocator, "print(edit(\"t.txt\", {");
+        var now: []const u8 = was;
+        var total: usize = 0;
+        for (0..1 + rand.uintAtMost(usize, 3)) |_| {
+            if (now.len == 0) break;
+            // `old`: a piece of the file as the edits so far left it.
+            const at = rand.uintLessThan(usize, now.len);
+            const old = now[at..@min(now.len, at + 1 + rand.uintAtMost(usize, 4))];
+            const new = try a.alloc(u8, rand.uintAtMost(usize, 5));
+            for (new) |*c| c.* = alphabet[rand.uintLessThan(usize, alphabet.len)];
+            total += std.mem.count(u8, now, old);
+            try src.appendSlice(testing.allocator, "{old = \"");
+            try appendShaleString(&src, old);
+            try src.appendSlice(testing.allocator, "\", new = \"");
+            try appendShaleString(&src, new);
+            try src.appendSlice(testing.allocator, "\", all = true}, ");
+            now = try replaceAll(a, now, old, new);
+        }
+        try src.appendSlice(testing.allocator, "}))");
+        const out = try f.output(src.items);
+        defer testing.allocator.free(out);
+        errdefer std.debug.print("round {d}: \"{f}\"\n{s}\n{s}\n", .{ round, std.zig.fmtString(was), src.items, out });
+        const written = try f.tmp.dir.readFileAlloc(f.threaded.io(), "data/t.txt", a, .limited(1024));
+        try testing.expectEqualStrings(now, written);
+        // The printed count, after the diff.
+        const count_at = std.mem.lastIndexOfScalar(u8, out[0 .. out.len - 1], '\n').? + 1;
+        try testing.expectEqual(total, try std.fmt.parseInt(usize, out[count_at .. out.len - 1], 10));
+        try testing.expectEqualStrings(now, try applyDiff(a, was, out[0..count_at]));
+    }
+}

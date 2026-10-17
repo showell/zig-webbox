@@ -149,6 +149,98 @@ test "agent: edit prints its diff and changes the file, one occurrence or all of
     try t.expectStop("edit(\"src/tcp.zig\", \"x\", \"y\", {every = true})", .{}, .argument, "takes `all` and `word`");
 }
 
+test "agent: edit's list form applies its edits in sequence, each to the one before, one diff and one write (QUEUE 232)" {
+    var t: Tree = undefined;
+    try t.init();
+    defer t.deinit();
+    // The second matches only after the first; the third is two lines on.
+    try t.expectOutput(
+        \\print(edit("src/tcp.zig", {
+        \\  {old = "const x = 1;", new = "const y = 1;"},
+        \\  {old = "const y", new = "const z"},
+        \\  {old = "fn send()", new = "fn send2()"},
+        \\}))
+    , .{},
+        \\--- a/src/tcp.zig
+        \\+++ b/src/tcp.zig
+        \\@@ -1,1 +1,1 @@
+        \\-const x = 1;
+        \\+const z = 1;
+        \\@@ -3,1 +3,1 @@
+        \\-fn send() void {}
+        \\+fn send2() void {}
+        \\3
+        \\
+    );
+    const now = try t.file("data/src/tcp.zig");
+    defer testing.allocator.free(now);
+    try testing.expectEqualStrings("const z = 1;\n// DEPARTS (bounded): the window\nfn send2() void {}\n", now);
+    // An edit across what an earlier one changed and the line after: one
+    // hunk from the old file to the new.
+    try t.expectOutput(
+        \\print(edit("src/tcp.zig", {
+        \\  {old = "const z = 1;", new = "const z = 10;"},
+        \\  {old = "10;\n// DEPARTS", new = "10; // merged\n// DEPARTS"},
+        \\}))
+    , .{},
+        \\--- a/src/tcp.zig
+        \\+++ b/src/tcp.zig
+        \\@@ -1,2 +1,2 @@
+        \\-const z = 1;
+        \\-// DEPARTS (bounded): the window
+        \\+const z = 10; // merged
+        \\+// DEPARTS (bounded): the window
+        \\2
+        \\
+    );
+    // An edit's own options: the rename, as the one-edit form gives it.
+    try t.expectOutput("print(edit(\"src/sub/deep.zig\", {{old = \"send\", new = \"transmit\", all = true, word = true}}))", .{},
+        \\--- a/src/sub/deep.zig
+        \\+++ b/src/sub/deep.zig
+        \\@@ -1,1 +1,1 @@
+        \\-fn send() void {}
+        \\+fn transmit() void {}
+        \\@@ -2,1 +2,1 @@
+        \\-const sender = send;
+        \\+const sender = transmit;
+        \\2
+        \\
+    );
+}
+
+test "agent: a list of edits that fails anywhere writes nothing and prints no diff; each edit is held to the one-edit form's rules (QUEUE 232)" {
+    var t: Tree = undefined;
+    try t.init();
+    defer t.deinit();
+    const before = try t.file("data/src/tcp.zig");
+    defer testing.allocator.free(before);
+    var r = t.run("print(\"before\") edit(\"src/tcp.zig\", {{old = \"const x\", new = \"const y\"}, {old = \"fn send\", new = \"fn go\"}, {old = \"absent\", new = \"x\"}})", .{});
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Class.argument, r.stop.?.class);
+    try testing.expect(std.mem.indexOf(u8, r.stop.?.message, "\"absent\" is not in src/tcp.zig") != null);
+    try testing.expectEqualStrings("before\n", r.output);
+    try testing.expectEqual(@as(usize, 0), r.effects.len);
+    const after = try t.file("data/src/tcp.zig");
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(before, after);
+    // An `old` there twice, without `all`: the one-edit form's refusal.
+    try t.expectStop("edit(\"src/tcp_arrives.zig\", {{old = \"DEPARTS\", new = \"X\"}})", .{}, .argument, "is in src/tcp_arrives.zig 2 times: a longer `old` picks one");
+    try t.expectStop("edit(\"src/tcp.zig\", {})", .{}, .argument, "no edits");
+    try t.expectStop("edit(\"src/tcp.zig\", {{old = \"x\"}})", .{}, .argument, "`new`");
+    try t.expectStop("edit(\"src/tcp.zig\", {{old = \"x\", new = \"y\", every = true}})", .{}, .argument, "takes `old`, `new`, `all` and `word`");
+    try t.expectStop("edit(\"src/tcp.zig\", {\"x\"})", .{}, .type, "a map");
+    try t.expectStop("edit(\"src/tcp.zig\", \"x\")", .{}, .type, "a list of edits");
+    // A dry run: the diff, one effect, the file as it was.
+    var d = t.run("edit(\"src/tcp.zig\", {{old = \"const x\", new = \"const y\"}, {old = \"fn send\", new = \"fn go\"}})", .{ .mode = .dry_run });
+    defer d.deinit();
+    try testing.expectEqual(@as(?script.Stop, null), d.stop);
+    try testing.expectEqual(@as(usize, 1), d.effects.len);
+    try testing.expectEqualStrings("dry run", d.effects[0].outcome);
+    const kept = try t.file("data/src/tcp.zig");
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings(before, kept);
+}
+
 test "agent: a dry run shows the diff and logs every change, and changes nothing; what a real run would refuse it refuses too" {
     var t: Tree = undefined;
     try t.init();
