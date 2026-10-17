@@ -13,7 +13,11 @@
 //! none made, and no program run. The Linux host (`shale_host_linux.zig`)
 //! is the core's seam: `host("run", ...)`, `host("real", ...)` and mount
 //! paths (`runs:x`), the mounts from `SHALE_MOUNTS` or
-//! `~/.config/shale/mounts`. The store's bases are set as a server sets
+//! `~/.config/shale/mounts`. **The preludes after the core's**: the Linux
+//! prelude (`run`, `must`, `tail_lines`, ...), the repo's
+//! (`.shale/prelude.shale` at the root) and the user's (the file
+//! `SHALE_PRELUDE` names, `""` none, else `~/.config/shale/prelude.shale`).
+//! The store's bases are set as a server sets
 //! them, the root and `<root>/../auth`, so its path limits are measured as
 //! the bare-metal host spells them. It prints what the script printed on
 //! stdout, then, tersely, how the run ended on stderr (`cli.printReport`).
@@ -95,10 +99,18 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer host.deinit();
     const seam = host.options();
+    var preludes_why: []const u8 = "";
+    const preludes = shale_host.loadPreludes(arena, io, host.root_abs, init.environ_map.get("SHALE_PRELUDE"), home, &preludes_why) catch |e| switch (e) {
+        error.Malformed => {
+            try err.print("shale: the preludes: {s}\n", .{preludes_why});
+            return 2;
+        },
+        else => return e,
+    };
 
     const out = try gpa.alloc(u8, c.budgets.output_bytes);
     defer gpa.free(out);
-    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .mode = c.mode, .args = c.args, .host = seam.host, .path_hook = seam.path_hook });
+    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .mode = c.mode, .args = c.args, .host = seam.host, .path_hook = seam.path_hook, .preludes = preludes });
     defer result.deinit();
 
     var out_buf: [4096]u8 = undefined;
@@ -108,6 +120,6 @@ pub fn main(init: std.process.Init) !u8 {
     try w.flush();
     const records = try arena.alloc([]const u8, host.records.items.len);
     for (host.records.items, records) |r, *line| line.* = r.line;
-    try cli.printReport(&result, cli.scriptName(c), &.{}, .{ .verbose = c.verbose, .dry_run = c.mode == .dry_run, .records = records, .budgets = c.budgets }, err);
+    try cli.printReport(&result, cli.scriptName(c), preludes, .{ .verbose = c.verbose, .dry_run = c.mode == .dry_run, .records = records, .budgets = c.budgets }, err);
     return if (result.finished()) 0 else 1;
 }

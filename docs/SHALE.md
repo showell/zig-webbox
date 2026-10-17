@@ -1157,6 +1157,12 @@ SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
   path's OS path, and a path whose first part has a `:` is a mount's
   (`runs:gates/summary`). The mounts are in `SHALE_MOUNTS`'s file, else
   `~/.config/shale/mounts` (`name = /abs/path` or `name = ~/path` a line).
+- **The preludes after the core's**: the Linux prelude (`run`, `must`,
+  `re_lines`, `head_lines`, `tail_lines`, `grep_all`, `unique`, `newest`,
+  `create`, `edits_all`: SHALE-AGENTS.md), the repo's
+  (`.shale/prelude.shale` at the root) and the user's (`SHALE_PRELUDE`'s
+  file, `""` none, else `~/.config/shale/prelude.shale`). A later one may
+  not redefine an earlier one's function.
 - The runner sets the store's bases as a server does, so path limits are
   measured as metal measures them.
 - **Terse**: it prints the output, then a stop as `name:line:column (in

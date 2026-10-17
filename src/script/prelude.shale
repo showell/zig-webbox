@@ -68,7 +68,7 @@ function glob(pattern, opts?)
     for k in keys(opts) do
       if k ~= "hidden" then fail("`glob` takes `hidden`, not `" .. k .. "`") end
     end
-    if opts.hidden then skip = "" end
+    if get(opts, "hidden", false) then skip = "" end
   end
   local parts = split(pattern, "/")
   local base = {}

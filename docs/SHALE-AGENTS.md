@@ -47,6 +47,30 @@ raw, for text that holds quotes and lines), `walk` with `skip`, and the
 language's own `split`, `words`, `contains`, `sort`, `table` and maps. The
 whole language is [`SHALE.md`](SHALE.md).
 
+**On Linux, the Linux prelude** (`src/shale_prelude_linux.shale`; metal
+has none of it):
+- **Programs:** `run(argv, opts)` runs one (`timeout_ms` and a keep, `head`
+  or `tail` or `whole`, are required; see SHALE.md, "The runner").
+  `must(r)` gives `r` if it exited 0; otherwise it prints its output and
+  fails, naming the program and how it ended. `real(p)` gives a path's OS
+  path, for an argv.
+- **Text:** `re_lines(s, pattern, opts?)` gives `{line, text}`, with
+  `invert` and `nocase`. `head_lines(p, n)` and `tail_lines(p, n)` take a
+  file of any size and give nil for a missing one. `grep_all(p, lit)` is
+  `grep` for a file of any size. `unique(list)` gives each item once. `newest(dir, n)`
+  gives the names that changed last.
+- **Files:** `create(p, text)` refuses a file already there.
+  `edits_all({{p, edits}, ...})` checks every file's edits before it writes
+  any.
+
+**A repo's own prelude** is `.shale/prelude.shale` at the root. **A
+user's** is `~/.config/shale/prelude.shale` (`SHALE_PRELUDE=<file>` names
+another, `SHALE_PRELUDE=` none). Each holds only functions, and none may
+take an earlier prelude's name. A stop in one names it:
+`stopped at .shale/prelude.shale:5:12`. A function's last parameters may
+be optional (`function f(a, opts?)`): a call that leaves them out gives
+them nil.
+
 Every block of Shale below runs as a test (`src/script/agent_test.zig`), on
 a small checkout shaped like zig-metal-unikernel's, as a dry run. What it
 prints is under `-- prints:` (a tab shows as `<TAB>`).

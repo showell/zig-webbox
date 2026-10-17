@@ -31,4 +31,5 @@ test {
     _ = shale_keep;
     _ = shale_spawn;
     _ = shale_host_linux;
+    _ = @import("shale_prelude_linux_test.zig");
 }

@@ -1,0 +1,185 @@
+-- **THE LINUX PRELUDE** (metal-vmm QUEUE 233, chunk 2; the dogfood
+-- design's "Running a program", "Text" and "Edits that work"): what a
+-- script has on Linux beside the core's. `run` and `real` are the names a
+-- script types for the host's own calls; the rest are written in Shale,
+-- over the core's builtins, so their every read and step is charged as if
+-- the script had written them. Metal has none of this.
+
+-- A program, run under `opts` (the host checks them: `timeout_ms` and a
+-- keep are required).
+function run(argv, opts)
+  return host("run", argv, opts)
+end
+
+-- A Shale path's absolute OS path, for a program's argv.
+function real(path)
+  return host("real", path)
+end
+
+-- **THE `&&` OF A SHELL CHAIN**: `r` when its program exited 0; else its
+-- output printed, and a failure naming the program and how it ended.
+function must(r)
+  if r.ended == "exit" and r.code == 0 then return r end
+  local out = r.out
+  if ends_with(out, "\n") then out = sub(out, 1, #out - 1) end
+  if out ~= "" then print(out) end
+  local what = "`" .. join(r.argv, " ") .. "`"
+  if r.ended == "exit" then fail(what .. " exited " .. r.code) end
+  if r.ended == "timeout" then fail(what .. " timed out") end
+  fail(what .. " was ended by a signal")
+end
+
+-- The lines of `s` a regular expression matches (`{invert = true}`: the
+-- others; `{nocase = true}`: either case), each `{line, text}`, numbered
+-- from 1.
+function re_lines(s, pattern, opts?)
+  local o = {}
+  local invert = false
+  if opts ~= nil then
+    for k in keys(opts) do
+      if k == "nocase" then
+        o.nocase = opts.nocase
+      elseif k == "invert" then
+        invert = opts.invert
+      else
+        fail("`re_lines` takes `invert` and `nocase`, not `" .. k .. "`")
+      end
+    end
+  end
+  local got = {}
+  local n = 0
+  for text in lines(s) do
+    n = n + 1
+    if (re_find(text, pattern, o) ~= nil) ~= invert then push(got, {line = n, text = text}) end
+  end
+  return got
+end
+
+-- The first `n` lines of a file, read a part at a time; nil when there is
+-- no file.
+function head_lines(p, n)
+  if n < 0 then fail("`head_lines`: " .. n .. " lines") end
+  if not exists(p) then return nil end
+  local got = {}
+  local at = 0
+  while #got < n do
+    local part = read_lines(p, at)
+    for l in part.lines do
+      if #got == n then break end
+      push(got, l)
+    end
+    if part.done then break end
+    at = part.next
+  end
+  return got
+end
+
+-- The last `n` lines of a file; nil when there is no file. It reads back
+-- from the end, a part twice the last each time, until `n` lines fit.
+function tail_lines(p, n)
+  if n < 0 then fail("`tail_lines`: " .. n .. " lines") end
+  if not exists(p) then return nil end
+  local size = stat(p).size
+  local part = 65536
+  while true do
+    local from = 0
+    if size > part then from = size - part end
+    -- A part begins at a line's start: the one after a newline at or
+    -- after the byte before it.
+    local at = 0
+    if from > 0 then
+      local nl = find_next(p, "\n", from - 1)
+      if nl == nil then at = size else at = nl + 1 end
+    end
+    local got = {}
+    while at < size do
+      local r = read_lines(p, at)
+      for l in r.lines do push(got, l) end
+      if #got > n then got = last(got, n) end
+      if r.done then break end
+      at = r.next
+    end
+    if #got >= n or from == 0 then return last(got, n) end
+    part = part * 2
+  end
+end
+
+-- A list's strings, each once, in the order first seen.
+function unique(list)
+  local seen = {}
+  local got = {}
+  for x in list do
+    if not has_key(seen, x) then
+      seen[x] = true
+      push(got, x)
+    end
+  end
+  return got
+end
+
+-- The lines of a file of any size holding a literal, `{line, text}`, a
+-- part at a time, numbered across the parts: `grep` past the call-bytes
+-- cap.
+function grep_all(p, lit)
+  if lit == "" then fail("`grep_all` of \"\": every line holds it") end
+  local got = {}
+  local n = 0
+  local at = 0
+  while true do
+    local r = read_lines(p, at)
+    for l in r.lines do
+      n = n + 1
+      if contains(l, lit) then push(got, {line = n, text = l}) end
+    end
+    if r.done then return got end
+    at = r.next
+  end
+end
+
+-- The names of the `n` entries of a folder that changed last, newest
+-- first (`ls -t | head`); names that changed at once, by name.
+function newest(p, n)
+  local rows = {}
+  for name in ls(p) do
+    local path = name
+    if p ~= "" and not ends_with(p, ":") then path = p .. "/" .. name end
+    push(rows, {name = name, modified = stat(path).modified})
+  end
+  sort(rows, "modified", "desc")
+  local got = {}
+  for r in take(rows, n) do push(got, r.name) end
+  return got
+end
+
+-- A new file: refused if one is there already.
+function create(p, text)
+  if exists(p) then fail("`create`: " .. p .. " is there already: `edit` or `replace` it") end
+  replace(p, text)
+end
+
+-- **EDITS TO SEVERAL FILES** (`{{p, {{old, new[, all][, word]}, ...}}, ...}`):
+-- every file's edits checked against it first, in sequence as `edit`'s
+-- list form applies them, and nothing written unless all hold; then each
+-- file is edited, atomically. The set is not atomic: a file changed
+-- between the check and its edit stops there, the files before it
+-- written. A `word` edit is checked for its `old` being there at all;
+-- `edit` holds it to whole words. The replacements made in all.
+function edits_all(list)
+  for item in list do
+    local text = read(item[1])
+    local j = 0
+    for e in item[2] do
+      j = j + 1
+      local times = #split(text, e.old) - 1
+      local where = "`edits_all`: " .. item[1] .. "'s edit " .. j .. ": "
+      if times == 0 then fail(where .. "`old` is not there; nothing written") end
+      local all = get(e, "all", false)
+      local word = get(e, "word", false)
+      if times > 1 and not all and not word then fail(where .. "`old` is there " .. times .. " times, and the edit does not say `all`; nothing written") end
+      if not word then text = substitute(text, e.old, e.new) end
+    end
+  end
+  local n = 0
+  for item in list do n = n + edit(item[1], item[2]) end
+  return n
+end

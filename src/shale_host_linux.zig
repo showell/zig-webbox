@@ -21,6 +21,10 @@ const regex = script.regex;
 const keep = @import("shale_keep.zig");
 const spawn = @import("shale_spawn.zig");
 
+/// **THE LINUX PRELUDE** (QUEUE 233, chunk 2): the names a script types
+/// (`run`, `real`) over `host`, and the helpers only Linux has.
+pub const linux_prelude: script.parse.Prelude = .{ .name = "the Linux prelude", .source = @embedFile("shale_prelude_linux.shale") };
+
 /// The most programs a run may run (the design's "The CLI's defaults").
 pub const runs_most = 64;
 
@@ -82,6 +86,34 @@ pub fn loadMounts(alloc: std.mem.Allocator, io: std.Io, pinned: ?[]const u8, hom
         return e;
     };
     return .{ .mounts = mounts, .from = from };
+}
+
+/// **THE PRELUDES AFTER THE CORE'S, IN ORDER** (the dogfood design's "The
+/// architecture"): the Linux prelude; the repo's, `.shale/prelude.shale` at
+/// the root, if it is there; the user's, the file `SHALE_PRELUDE` names
+/// (`""` none, the tests' pin) or else `~/.config/shale/prelude.shale` if it
+/// is there. Each is named as a stop shows its lines.
+pub fn loadPreludes(alloc: std.mem.Allocator, io: std.Io, root_abs: []const u8, pinned: ?[]const u8, home: []const u8, why: *[]const u8) error{ OutOfMemory, Malformed }![]script.parse.Prelude {
+    var out: std.ArrayList(script.parse.Prelude) = .empty;
+    try out.append(alloc, linux_prelude);
+    const repo = try std.fmt.allocPrint(alloc, "{s}/.shale/prelude.shale", .{root_abs});
+    if (try readPrelude(alloc, io, repo, false, "", why)) |src| try out.append(alloc, .{ .name = ".shale/prelude.shale", .source = src });
+    if (pinned) |p| {
+        if (p.len > 0) if (try readPrelude(alloc, io, p, true, "SHALE_PRELUDE=", why)) |src| try out.append(alloc, .{ .name = p, .source = src });
+    } else {
+        const user = try std.fmt.allocPrint(alloc, "{s}/.config/shale/prelude.shale", .{home});
+        if (try readPrelude(alloc, io, user, false, "", why)) |src| try out.append(alloc, .{ .name = "~/.config/shale/prelude.shale", .source = src });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// A prelude's source; null for one not there that need not be.
+fn readPrelude(alloc: std.mem.Allocator, io: std.Io, path: []const u8, required: bool, shown: []const u8, why: *[]const u8) error{ OutOfMemory, Malformed }!?[]const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(interp.Budgets.default_source_bytes)) catch |e| {
+        if (!required and e == error.FileNotFound) return null;
+        why.* = try std.fmt.allocPrint(alloc, "{s}{s}: {s}", .{ shown, path, @errorName(e) });
+        return error.Malformed;
+    };
 }
 
 /// **A PROGRAM'S ENVIRONMENT**, inherited, `K=V` each, but for
