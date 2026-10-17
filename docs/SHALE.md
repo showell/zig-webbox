@@ -191,7 +191,14 @@ The host chooses, not the script; a signed request names it
 - **The runner** (`shale`, `zig build script`, below) runs **dry**
   unless told `--write` (QUEUE 229): its changes are checked, counted and
   logged with the outcome `dry run`, an `edit`'s diff printed, and none
-  made. With `--write` it is atomic. Shale's default budgets, each of
+  made. **It sees its own changes** (QUEUE 234, `src/script/overlay.zig`):
+  each is held in an overlay keyed by the resolved path, and every read,
+  `stat`, `exists` and `is_dir` sees it, so a change after a change
+  previews against the first; listing (`ls`, `walk`) a folder it changed
+  stops with an `argument` error (run `--write` on a copy), and the
+  overlay's bytes are the run's arena's, copied at a `yield`. Metal
+  compiles none of it (`host_io` says `shale_dry_run` only on Linux).
+  With `--write` it is atomic. Shale's default budgets, each of
   which `--budget NAME=N` sets (the table in "The budgets").
 - **Dog Park takes background runs only.** lynrummy.com's route runs
   both: atomic ones, and background ones its host steps between requests

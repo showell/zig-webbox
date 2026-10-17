@@ -24,6 +24,7 @@ const ast = @import("ast.zig");
 const interp = @import("interp.zig");
 const value = @import("value.zig");
 const bi = @import("builtins.zig");
+const overlay = @import("overlay.zig");
 
 const Run = interp.Run;
 const Value = value.Value;
@@ -143,6 +144,11 @@ pub fn collect(r: *Run, pos: ast.Pos, slots: []const []Value, tables: []const *?
         return if (e == error.OutOfMemory) e else r.budgetStop(pos, .kept);
     };
     r.effects = effects;
+    // A dry run's overlay is as much the run's as its effects.
+    if (comptime overlay.on) {
+        c.bytes += overlay.bytes(&r.overlay);
+        r.overlay = overlay.copy(&r.overlay, r.alloc) catch return r.budgetStop(pos, .kept);
+    }
     // From here the fresh arena holds what the run reports (the effects,
     // a stop's message), and the old one goes, however this ends.
     defer old.deinit();

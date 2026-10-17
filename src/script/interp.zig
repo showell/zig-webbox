@@ -148,6 +148,9 @@ pub const Run = struct {
     tried_change: bool = false,
     /// The copy's bookkeeping, kept from yield to yield (`collect.Books`).
     collecting: @import("collect.zig").Books = .{},
+    /// A dry run's own changes, which its reads see (overlay.zig): nothing
+    /// on metal.
+    overlay: @import("overlay.zig").Overlay = .{},
     /// The walk's recursion now (`Budgets.depth`).
     walk: u32 = 0,
     reads: u64 = 0,
