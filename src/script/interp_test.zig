@@ -85,6 +85,13 @@ test "run: functions, recursion, and a frame of their own; a function is called 
     try expectOutput("function f(n) local x = n if n > 0 then f(n - 1) end return x end print(f(3))", "3\n");
 }
 
+test "run: an optional parameter (`b?`) is nil when a call leaves it out (metal-vmm QUEUE 233)" {
+    try expectOutput("function f(a, b?) if b == nil then return a end return a + b end print(f(1), f(1, 2))", "1\t3\n");
+    try expectOutput("function g(a?, b?) return tostring(a) .. tostring(b) end print(g(), g(1), g(1, 2))", "nilnil\t1nil\t12\n");
+    // `attempt` fills them in as a call does.
+    try expectOutput("function h(a, b?) return b end print(attempt(h, 1).ok)", "true\n");
+}
+
 test "run: a local whose value is a call keeps it, when the call grows the locals' stack (the stack moved under the slot's pointer)" {
     // `local s = f()` took the slot's address before the call, and the
     // call's frame, appended, could move the stack: the value went to the

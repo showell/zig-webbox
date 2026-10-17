@@ -585,74 +585,8 @@ fn tracked(h: *Host, run: *Run, pos: ast.Pos, path: []const u8, cwd: []const u8)
 // ── tests: the fixture the build makes, found along PATH ─────────────────
 
 const testing = std.testing;
-const fixture = @import("shale_test_options").fixture;
 
-var out_buf: [64 * 1024]u8 = undefined;
-
-const T = struct {
-    tmp: std.testing.TmpDir,
-    threaded: std.Io.Threaded,
-    arena: std.heap.ArenaAllocator,
-    root: []const u8,
-    host: Host,
-    path_env: []const u8,
-
-    fn init(t: *T) !void {
-        t.tmp = testing.tmpDir(.{});
-        t.threaded = std.Io.Threaded.init(testing.allocator, .{});
-        t.arena = std.heap.ArenaAllocator.init(testing.allocator);
-        const a = t.arena.allocator();
-        var cwd: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.os.linux.getcwd(&cwd, cwd.len);
-        const here = std.mem.sliceTo(cwd[0..n], 0);
-        t.root = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}", .{ here, &t.tmp.sub_path });
-        const fixture_abs = if (std.fs.path.isAbsolute(fixture)) fixture else try std.fmt.allocPrint(a, "{s}/{s}", .{ here, fixture });
-        t.path_env = try std.fmt.allocPrint(a, "PATH={s}:/usr/bin:/bin", .{std.fs.path.dirname(fixture_abs).?});
-        t.host = .{ .alloc = testing.allocator, .root_abs = t.root, .cwd_abs = try a.dupe(u8, here), .env = try a.dupe([]const u8, &.{t.path_env}) };
-    }
-
-    fn deinit(t: *T) void {
-        t.host.deinit();
-        t.arena.deinit();
-        t.threaded.deinit();
-        t.tmp.cleanup();
-    }
-
-    fn run(t: *T, src: []const u8, mode: script.process.Mode) script.Result {
-        const o = t.host.options();
-        return script.runWith(t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook });
-    }
-
-    fn expectOutput(t: *T, src: []const u8, want: []const u8) !void {
-        var r = t.run(src, .atomic);
-        defer r.deinit();
-        if (r.stop) |s| {
-            std.debug.print("{s}\n  stopped {d}:{d} {s}: {s}\n", .{ src, s.line, s.column, @tagName(s.class), s.message });
-            return error.TestUnexpectedResult;
-        }
-        try testing.expectEqualStrings(want, r.output);
-    }
-
-    fn expectStop(t: *T, src: []const u8, mode: script.process.Mode, class: script.diag.Class, says: []const u8) !void {
-        var r = t.run(src, mode);
-        defer r.deinit();
-        const s = r.stop orelse {
-            std.debug.print("{s}: no stop\n", .{src});
-            return error.TestUnexpectedResult;
-        };
-        errdefer std.debug.print("{s}: {s}: {s}\n", .{ src, @tagName(s.class), s.message });
-        try testing.expectEqual(class, s.class);
-        try testing.expect(std.mem.indexOf(u8, s.message, says) != null);
-    }
-
-    fn put(t: *T, name: []const u8, data: []const u8) !void {
-        try t.tmp.dir.writeFile(t.threaded.io(), .{ .sub_path = name, .data = data });
-    }
-
-    fn file(t: *T, name: []const u8) ![]u8 {
-        return t.tmp.dir.readFileAlloc(t.threaded.io(), name, t.arena.allocator(), .limited(1 << 20));
-    }
-};
+const T = @import("shale_test_host.zig").T;
 
 test "host: run keeps the head and tail of what a program prints, and says how it ended and what it counted" {
     var t: T = undefined;

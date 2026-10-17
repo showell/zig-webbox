@@ -134,6 +134,7 @@ pub const Parser = struct {
             .string => "a string",
             .name => std.fmt.allocPrint(self.alloc, "the name `{s}`", .{t.text}) catch "a name",
             .int => std.fmt.allocPrint(self.alloc, "the number {s}", .{t.text}) catch "a number",
+            .question => "`?`, which marks an optional parameter (`function f(a, b?)`) and nothing else",
             else => std.fmt.allocPrint(self.alloc, "`{s}`", .{t.text}) catch t.text,
         };
     }
@@ -496,22 +497,32 @@ pub const Parser = struct {
         _ = try self.expect(.lparen, "`(` after the function's name");
         self.frame.depth = 1;
         var params: u16 = 0;
+        // **OPTIONAL PARAMETERS** (`function f(a, b?)`, metal-vmm QUEUE
+        // 233): the last ones only; a call may leave them out, and the
+        // parse gives them nil.
+        var optional: u16 = 0;
+        var first_optional: []const u8 = "";
         if (self.tok.tag != .rparen) {
             while (true) {
                 if (self.tok.tag == .dot_dot) return self.failAt(self.here(), .refused, "varargs are not in this language");
                 const p = try self.expect(.name, "a parameter's name");
                 _ = try self.declare(p.text, .{ .line = p.line, .column = p.column });
                 params += 1;
+                if (self.tok.tag == .question) {
+                    if (optional == 0) first_optional = p.text;
+                    optional += 1;
+                    try self.advance();
+                } else if (optional > 0) return self.failf(.{ .line = p.line, .column = p.column }, .syntax, "`{s}` is required after an optional parameter: the optional ones (`{s}?`) come last", .{ p.text, first_optional });
                 if (self.tok.tag != .comma) break;
                 try self.advance();
             }
         }
         _ = try self.expect(.rparen, "`)` after the parameters");
         // Known before the body, so the body may call it.
-        self.functions.items[index] = .{ .name = shown, .pos = pos, .params = params, .frame = 0, .body = &.{} };
+        self.functions.items[index] = .{ .name = shown, .pos = pos, .params = params, .optional = optional, .frame = 0, .body = &.{} };
         const body = try self.block();
         _ = try self.expect(.kw_end, "`end` to close the function");
-        self.functions.items[index] = .{ .name = shown, .pos = pos, .params = params, .frame = self.frame.slots, .body = body };
+        self.functions.items[index] = .{ .name = shown, .pos = pos, .params = params, .optional = optional, .frame = self.frame.slots, .body = body };
     }
 
     // ── expressions ──────────────────────────────────────────────────────
@@ -680,6 +691,7 @@ pub const Parser = struct {
         const attempt = std.mem.eql(u8, name, reserved_call);
         var target: ast.Call.Target = undefined;
         var params: ?u16 = null;
+        var optional: u16 = 0;
         var shown = name;
         if (attempt) {
             try self.advance(); // (
@@ -688,6 +700,7 @@ pub const Parser = struct {
             const i = try self.functionNamed(f.text) orelse return self.failf(.{ .line = f.line, .column = f.column }, .name, "`attempt` calls a function of the script declared above it, and there is no function `{s}` above this line", .{f.text});
             target = .{ .attempt = i };
             params = self.functions.items[i].params;
+            optional = self.functions.items[i].optional;
             shown = f.text;
             if (self.tok.tag == .comma) {
                 try self.advance();
@@ -699,6 +712,7 @@ pub const Parser = struct {
             if (try self.functionNamed(name)) |i| {
                 target = .{ .function = i };
                 params = self.functions.items[i].params;
+                optional = self.functions.items[i].optional;
             } else if (std.meta.stringToEnum(ast.Builtin, name)) |b| {
                 target = .{ .builtin = b };
             } else if (lua_names.get(name)) |why| {
@@ -718,7 +732,12 @@ pub const Parser = struct {
         }
         _ = try self.expect(.rparen, "`)` to close the call");
         const given = self.exprs.items.len - at;
-        if (params) |n| if (given != n) return self.failf(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ shown, n, if (n == 1) "" else "s", given });
+        if (params) |n| {
+            if (optional > 0 and (given < n - optional or given > n)) return self.failf(pos, .argument, "`{s}` takes {d} to {d} arguments, given {d}", .{ shown, n - optional, n, given });
+            if (optional == 0 and given != n) return self.failf(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ shown, n, if (n == 1) "" else "s", given });
+            // The ones left out, nil.
+            for (given..n) |_| try self.exprs.append(self.scratch, try self.new(ast.Expr, .{ .pos = pos, .kind = .nil }));
+        }
         return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .call = .{ .target = target, .args = try self.alloc.dupe(*ast.Expr, self.exprs.items[at..]) } } });
     }
 

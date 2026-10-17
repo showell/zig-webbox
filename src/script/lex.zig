@@ -54,6 +54,8 @@ pub const Tag = enum {
     comma,
     dot,
     hash,
+    /// `?`: after a parameter's name, the parameter is optional.
+    question,
     semicolon,
 };
 
@@ -199,6 +201,7 @@ pub const Lexer = struct {
             '*' => .star,
             '%' => .percent,
             '#' => .hash,
+            '?' => .question,
             '(' => .lparen,
             ')' => .rparen,
             '{' => .lbrace,

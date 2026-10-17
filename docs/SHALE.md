@@ -221,7 +221,11 @@ The host chooses, not the script; a signed request names it
 - `function name(a, b) ... end`, at the top level only. A function may
   recurse, and **is called only after it is declared**, as in Lua: a call
   above the declaration is an error (or, for a builtin's name, the
-  builtin).
+  builtin). **A call gives every parameter**, or it is an error when the
+  script is parsed, **except an optional one**: `function f(a, b?)`
+  marks `b` optional, the optional ones last, and a call that leaves one
+  out gives it nil (`f(1)` is `f(1, nil)`). An options map is the usual
+  one (`re_lines(s, p, opts?)`).
 - `const NAME = e`, at the top level only. The name is never assigned
   again, and the functions declared after it see it. A table it names can
   still change. A function that reads a const before its line has run

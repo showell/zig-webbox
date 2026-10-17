@@ -156,6 +156,9 @@ pub const Function = struct {
     name: []const u8,
     pos: Pos,
     params: u16,
+    /// The last of `params` that may be left out (`b?`): a call that
+    /// leaves them out is given nil for them, by the parse.
+    optional: u16 = 0,
     /// Slots in its frame: parameters first, then every local it declares.
     frame: u16,
     body: []Stmt,
