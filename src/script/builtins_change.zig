@@ -218,15 +218,18 @@ fn editFile(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         now = next.items;
         replaced_n += at.items.len;
     }
-    try rewrite(run, pos, p, was, now, spans.items);
+    // `rewrite`'s two lines, here again: so `rewrite` is unreferenced on
+    // metal, and metal's image does not move (80 bytes, measured).
+    try writeDiff(run, pos, p.rel, was, now, spans.items);
+    _ = try changeAt(run, pos, b, .replace, p, now);
     return .{ .int = @intCast(replaced_n) };
 }
 
 /// **A FILE REWRITTEN BY SPANS** (metal-vmm QUEUE 234, 3): `was` became
 /// `now`, `spans` saying where. Its diff (by the run's `diffs` setting),
 /// then the change, logged as an `edit`: a dry run's, its overlay's and
-/// its budgets' as every change is. `edit`'s, and the Linux host's
-/// `zig_rename`'s.
+/// its budgets' as every change is: `edit`'s own tail, for the Linux
+/// host's `zig_rename`.
 pub fn rewrite(run: *Run, pos: ast.Pos, p: Path, was: []const u8, now: []const u8, spans: []const Span) Error!void {
     try writeDiff(run, pos, p.rel, was, now, spans);
     _ = try changeAt(run, pos, .edit, .replace, p, now);
