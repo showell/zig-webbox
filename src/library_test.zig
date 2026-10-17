@@ -16,7 +16,10 @@
 //!   the library compiles and never serves): what a page serves is the
 //!   application's;
 //! - every module the root names is in its `test {}` block, so its tests run
-//!   (`host_fetch`'s never did).
+//!   (`host_fetch`'s never did);
+//! - no file takes `Io` from std (an `Io` declared as std's): on metal it is
+//!   `host_io`'s, and std's has no machine under it (the kernel's build
+//!   refuses one, zig-metal-unikernel tools/verdicts.py's `STD_IO_ALIAS`).
 //!
 //! The library's own tests (`*_test.zig`) are recorded, not walked: they may
 //! embed what they check and name test options.
@@ -142,6 +145,9 @@ fn problems(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
                 try out.append(a, try std.fmt.allocPrint(a, "{s}: reached from {s}, and not there", .{ name, root.file }));
                 continue;
             };
+            // Split, so this file is not one the kernel's regex finds.
+            for ([_][]const u8{ "const Io = " ++ "std.Io;", "const Io = " ++ "@import(\"std\").Io;" }) |alias| if (std.mem.indexOf(u8, body, alias) != null)
+                try out.append(a, try std.fmt.allocPrint(a, "{s} takes Io from std (`{s}`): a library file's Io is host_io's", .{ name, alias }));
             for (try refs(a, body, "@embedFile")) |e| {
                 if (std.mem.endsWith(u8, e, ".shale") and std.mem.indexOfScalar(u8, e, '/') == null) continue;
                 try out.append(a, try std.fmt.allocPrint(a, "{s} embeds {s}: what a page serves is the application's, not the library's", .{ name, e }));
@@ -217,6 +223,8 @@ test "library: its check finds each kind of mistake, on planted trees" {
         .{ .file = "a.zig", .body = "const l = @import(\"webbox_linux\");\n", .says = "a.zig imports the module webbox_linux" },
         .{ .file = "a.zig", .body = "const l = @import(\"l.zig\");\n", .says = "a.zig reaches the Linux half's l.zig" },
         .{ .file = "l.zig", .body = "const a = @import(\"a.zig\");\n", .says = "l.zig reaches a.zig by path" },
+        .{ .file = "sub/t.zig", .body = "const std = @import(\"std\");\nconst Io = " ++ "std.Io;\n", .says = "sub/t.zig takes Io from std" },
+        .{ .file = "a.zig", .body = "const Io = " ++ "@import(\"std\").Io;\n", .says = "a.zig takes Io from std" },
         .{ .file = "webbox.zig", .body = "pub const a = @import(\"a.zig\");\npub const s = @import(\"sub/s.zig\");\n\ntest {\n    _ = a;\n}\n", .says = "webbox.zig names s but its test block does not" },
     }) |c| {
         const was = try tmp.dir.readFileAlloc(io, c.file, a, .limited(1 << 16));

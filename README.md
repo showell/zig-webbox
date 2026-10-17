@@ -81,7 +81,22 @@ and its effects log says what.
 
 ## Checks
 
-    zig build test
+    zig build test          # every test but the expensive ones: about 30 s
+    zig build consumers     # the applications' own checks against this tree: minutes
+    zig build fuzz          # the expensive fuzzes and sweeps, for a bug hunt
+
+**`test`** includes the library's own shape (`src/library_test.zig`: what
+each root reaches it names, the modules each half may import, no page
+embedded, every named module in its test block, `Io` from `host_io`).
+**`consumers`** runs, against this checkout and one at a time, the
+Observatory's and dog-park's `zig build test`, zig-metal-unikernel's `zig
+build gopher` and angry-gopher's `ops/check_zig`; it needs those checkouts
+beside this one, and fails naming one that is missing. Run it before a change
+here goes to master: each of them caught a webbox change that `test` passed.
+**`fuzz`** runs the tests named `expensive fuzz: ...` or `expensive sweep:
+...`, which `test` counts as skipped: a fuzz hunts bugs once, and each bug it
+finds becomes a test of its own. `-Dtest-timing` prints each test's time,
+slowest first.
 
 `-Dtest-filter=TEXT` runs only the tests whose names contain it;
 `-Dscript-fuzz=N` sets how many sources the script fuzzer runs. Two more

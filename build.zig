@@ -148,4 +148,35 @@ pub fn build(b: *std.Build) void {
     hunt.root_module.addImport("shale_test_options", shale_options.createModule());
     fuzz_step.dependOn(&b.addRunArtifact(hunt).step);
     test_step.dependOn(&b.addRunArtifact(signer_test).step);
+
+    // **THE APPLICATIONS, BUILT ON THIS TREE** (the box's essay "checks that
+    // stopped checking", 2026-10-17): a webbox change broke angry-gopher's
+    // checks for 14 hours, and the kernel's build and angry-gopher's again
+    // the same day, each found only when someone ran that repo's checks.
+    // `zig build consumers` runs each application's own, against this
+    // checkout (they name it by path, `../zig-webbox`), one at a time,
+    // cheapest first. A sibling that is not there fails the step by name.
+    // Not in `test`: it needs the siblings, and minutes. Run before a webbox
+    // change is pushed to master.
+    const consumers = b.step("consumers", "Each application's own checks against this tree: the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
+    const here = b.build_root.path orelse ".";
+    var prev: ?*std.Build.Step = null;
+    for ([_]struct { repo: []const u8, cmd: []const u8 }{
+        .{ .repo = "observatory", .cmd = "zig build test" },
+        .{ .repo = "dog-park", .cmd = "zig build test" },
+        .{ .repo = "zig-metal-unikernel", .cmd = "zig build gopher" },
+        .{ .repo = "angry-gopher", .cmd = "./ops/check_zig" },
+    }) |c| {
+        const dir = b.pathJoin(&.{ here, "..", c.repo });
+        const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
+            "cd '{s}' 2>/dev/null || {{ echo 'consumers: no {s} beside this checkout ({s})'; exit 1; }}; " ++
+                "echo '==> {s}: {s}'; env -u ZIG_PROGRESS {s}",
+            .{ dir, c.repo, dir, c.repo, c.cmd, c.cmd },
+        ) });
+        run.has_side_effects = true;
+        run.stdio = .inherit;
+        if (prev) |p| run.step.dependOn(p);
+        prev = &run.step;
+    }
+    consumers.dependOn(prev.?);
 }
