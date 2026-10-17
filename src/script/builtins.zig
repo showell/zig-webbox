@@ -44,6 +44,7 @@ const topics = .{
     @import("builtins_time.zig"),
     @import("builtins_format.zig"),
     @import("builtins_numbers.zig"),
+    @import("builtins_regex.zig"),
 };
 
 /// The most arguments any builtin but `print` takes: the interpreter

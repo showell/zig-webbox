@@ -158,3 +158,57 @@ test "prelude: room_for says whether the budgets left hold what is asked, by bud
     defer bad.deinit();
     try testing.expectEqual(script.diag.Class.index, bad.stop.?.class);
 }
+
+test "prelude: the functions found in prelude.shale are every function a parse of it declares, and it declares nothing else (QUEUE 230)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var stop: ?script.diag.Stop = null;
+    // The prelude parsed as a script's source: its functions the script's own.
+    const whole = try script.parse.parse(arena.allocator(), script.parse.prelude, 64, &stop);
+    try testing.expectEqual(whole.functions.len, script.parse.prelude_index.len);
+    for (whole.functions, script.parse.prelude_index) |f, at| {
+        try testing.expectEqualStrings(f.name, at.name);
+        try testing.expectEqual(f.pos.line, at.line);
+        try testing.expectEqual(@as(u32, 1), f.pos.column);
+    }
+    // A declaration is an empty `do` where it stood: nothing else is there.
+    for (whole.main.body) |s| try testing.expect(s.kind == .do and s.kind.do.len == 0);
+}
+
+test "prelude: every prelude function is reached when a script calls it, one script each, and runs (QUEUE 230)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const calls = [_]struct { []const u8, []const u8 }{
+        .{ "walk_all", "print(#walk_all(\"chat\", {}))" },
+        .{ "walk_upto", "print(walk_upto(\"chat\", {}, 2).done)" },
+        .{ "room_for", "print(room_for({reads = 1}))" },
+        .{ "glob", "print(#glob(\"*.txt\"))" },
+        .{ "count_all", "print(count_all(\"top.txt\", \"o\"))" },
+        .{ "find_next", "print(find_next(\"top.txt\", \"p\", 3))" },
+    };
+    try testing.expectEqual(script.parse.prelude_index.len, calls.len);
+    for (script.parse.prelude_index, calls) |at, c| {
+        try testing.expectEqualStrings(at.name, c[0]);
+        var r = f.run(c[1], .{});
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {s}\n", .{ c[1], if (r.stop) |s| s.message else "" });
+        try testing.expect(r.finished());
+        try testing.expect(r.output.len > 0);
+    }
+}
+
+test "prelude: a prelude function's own calls are the prelude's, though the script declared one of their name (QUEUE 230)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // glob's walk_all is the prelude's, parsed at glob's first call, after
+    // the script's own: the script's is called only by the script.
+    try f.expectOutput("function walk_all(p, o) return {} end\nprint(#glob(\"*.txt\"), #walk_all(\"\", {}))", "1\t0\n");
+    // A prelude function first met inside the script's function: the
+    // function's locals and the script's consts are not the prelude's.
+    try f.expectOutput("const got = 9\nfunction f(o) local more = 1 return #glob(\"*.txt\") + more + got end\nprint(f(0))", "11\n");
+    // A `const` of the name of a function the prelude calls hides nothing
+    // of the prelude's.
+    try f.expectOutput("const walk_all = 1\nfunction f() return #glob(\"*.txt\") end\nprint(f())", "1\n");
+}

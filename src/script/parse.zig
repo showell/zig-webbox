@@ -81,10 +81,15 @@ pub const Parser = struct {
     /// Whether the frame is the script's own (top level) or a function's.
     in_function: bool = false,
     functions: std.ArrayList(ast.Function) = .empty,
+    /// The script's own functions, by name.
     function_names: std.StringHashMapUnmanaged(u32) = .empty,
-    /// How many of `functions` are the prelude's (prelude.shale), parsed
-    /// before the script: while it is parsed, all of them so far.
-    prelude_functions: u32 = 0,
+    /// **ONLY THE PRELUDE A SCRIPT CALLS** (metal-vmm QUEUE 230): each of
+    /// `prelude_index`'s functions, once its first call has parsed it, as
+    /// its index in `functions`. One never called is never parsed, and
+    /// takes none of the machine.
+    prelude_loaded: [prelude_index.len]?u32 = @splat(null),
+    /// Whether a prelude function is being parsed: its calls are to the
+    /// prelude's functions and the builtins, never to the script's.
     in_prelude: bool = false,
     /// The top-level `const`s declared so far: what a function declared
     /// after them sees (QUEUE 206).
@@ -444,23 +449,26 @@ pub const Parser = struct {
         // 220): from its line on, its calls by that name are to it, so a
         // function added to the prelude never breaks a script that already
         // declared one; declared twice by the script, it is refused.
-        if (self.function_names.get(name)) |i| if (self.in_prelude or i >= self.prelude_functions)
+        if (!self.in_prelude and self.function_names.contains(name))
             return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
         const index: u32 = @intCast(self.functions.items.len);
         // An error in a prelude function names it so: its line is the
         // prelude's, never the script's.
         const shown = if (self.in_prelude) try std.fmt.allocPrint(self.alloc, "the prelude's {s}", .{name}) else name;
-        try self.function_names.put(self.scratch, name, index);
+        if (self.in_prelude) {
+            self.prelude_loaded[preludeAt(name).?] = index;
+        } else try self.function_names.put(self.scratch, name, index);
         // Reserved now, so it may call itself.
         try self.functions.append(self.scratch, undefined);
 
         const saved = self.frame;
+        const saved_in_function = self.in_function;
         self.frame = .{};
         self.in_function = true;
         defer {
             self.frame.locals.deinit(self.scratch);
             self.frame = saved;
-            self.in_function = false;
+            self.in_function = saved_in_function;
         }
         _ = try self.expect(.lparen, "`(` after the function's name");
         self.frame.depth = 1;
@@ -646,7 +654,7 @@ pub const Parser = struct {
             try self.advance(); // (
             const f = try self.expect(.name, "the name of the function `attempt` calls");
             if (self.tok.tag == .lparen) return self.failAt(self.here(), .syntax, "`attempt(f, a, b)` calls `f` itself: name it, without its own parentheses");
-            const i = self.function_names.get(f.text) orelse return self.failf(.{ .line = f.line, .column = f.column }, .name, "`attempt` calls a function of the script declared above it, and there is no function `{s}` above this line", .{f.text});
+            const i = try self.functionNamed(f.text) orelse return self.failf(.{ .line = f.line, .column = f.column }, .name, "`attempt` calls a function of the script declared above it, and there is no function `{s}` above this line", .{f.text});
             target = .{ .attempt = i };
             params = self.functions.items[i].params;
             shown = f.text;
@@ -657,7 +665,7 @@ pub const Parser = struct {
         } else {
             if (self.lookup(name) != null or (self.in_function and self.constant(name) != null))
                 return self.failf(pos, .refused, "`{s}` is a value here, not a function: a local, a parameter or a `const` of that name hides the function or builtin; name it otherwise", .{name});
-            if (self.function_names.get(name)) |i| {
+            if (try self.functionNamed(name)) |i| {
                 target = .{ .function = i };
                 params = self.functions.items[i].params;
             } else if (std.meta.stringToEnum(ast.Builtin, name)) |b| {
@@ -681,6 +689,45 @@ pub const Parser = struct {
         const given = self.exprs.items.len - at;
         if (params) |n| if (given != n) return self.failf(pos, .argument, "`{s}` takes {d} argument{s}, given {d}", .{ shown, n, if (n == 1) "" else "s", given });
         return self.new(ast.Expr, .{ .pos = pos, .kind = .{ .call = .{ .target = target, .args = try self.alloc.dupe(*ast.Expr, self.exprs.items[at..]) } } });
+    }
+
+    /// The function a call by `name` is to: the script's own, declared
+    /// above (never, from inside the prelude); else the prelude's, parsed
+    /// now if this is its first call; else none.
+    fn functionNamed(self: *Parser, name: []const u8) Error!?u32 {
+        if (!self.in_prelude) if (self.function_names.get(name)) |i| return i;
+        const k = preludeAt(name) orelse return null;
+        if (self.prelude_loaded[k] == null) try self.loadPrelude(k);
+        return self.prelude_loaded[k].?;
+    }
+
+    /// **A PRELUDE FUNCTION, PARSED AT ITS FIRST CALL** (QUEUE 230), from
+    /// its own line of prelude.shale, as if the prelude had been parsed
+    /// before the script: no `const` of the script's, no local, no depth
+    /// of the call it was met in. Its own calls to the prelude parse what
+    /// they reach in turn.
+    fn loadPrelude(self: *Parser, k: usize) Error!void {
+        const saved_lexer = self.lexer;
+        const saved_tok = self.tok;
+        const saved_ahead = self.ahead;
+        const saved_in_prelude = self.in_prelude;
+        const saved_nesting = self.nesting;
+        const saved_consts = self.consts;
+        self.lexer = .{ .src = prelude, .at = prelude_index[k].at, .line = prelude_index[k].line, .alloc = self.alloc };
+        self.ahead = null;
+        self.in_prelude = true;
+        self.nesting = 0;
+        self.consts = .empty;
+        defer {
+            self.lexer = saved_lexer;
+            self.tok = saved_tok;
+            self.ahead = saved_ahead;
+            self.in_prelude = saved_in_prelude;
+            self.nesting = saved_nesting;
+            self.consts = saved_consts;
+        }
+        try self.advance();
+        try self.function(self.here());
     }
 
     fn table(self: *Parser, pos: ast.Pos) Error!*ast.Expr {
@@ -733,6 +780,37 @@ pub const Parser = struct {
 /// **THE PRELUDE**: functions every script has, in Shale (prelude.shale).
 pub const prelude = @embedFile("prelude.shale");
 
+/// Where a prelude function begins: its `function`, at the start of `line`.
+pub const PreludeFunction = struct { name: []const u8, at: usize, line: u32 };
+
+/// **THE PRELUDE'S FUNCTIONS, FOUND WHEN THIS IS BUILT** (QUEUE 230): each
+/// line of prelude.shale that begins `function name(`. The prelude holds
+/// only functions, each from the start of a line; parse_test holds this
+/// list to a parse of the whole prelude.
+pub const prelude_index: []const PreludeFunction = blk: {
+    @setEvalBranchQuota(100_000);
+    var found: []const PreludeFunction = &.{};
+    var at: usize = 0;
+    var line: u32 = 1;
+    while (at < prelude.len) {
+        const end = std.mem.indexOfScalarPos(u8, prelude, at, '\n') orelse prelude.len;
+        const text = prelude[at..end];
+        if (std.mem.startsWith(u8, text, "function ")) {
+            const paren = std.mem.indexOfScalar(u8, text, '(') orelse @compileError("prelude.shale: a function without its `(`");
+            found = found ++ [_]PreludeFunction{.{ .name = text["function ".len..paren], .at = at, .line = line }};
+        }
+        at = end + 1;
+        line += 1;
+    }
+    break :blk found;
+};
+
+/// The prelude function named `name`, as its place in `prelude_index`.
+fn preludeAt(name: []const u8) ?usize {
+    for (prelude_index, 0..) |f, k| if (std.mem.eql(u8, f.name, name)) return k;
+    return null;
+}
+
 /// The whole source, parsed. On `error.Parse`, `stop` says where and why.
 pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop) Error!ast.Program {
     return parseMeasured(alloc, alloc, source, max_nesting, stop, null);
@@ -743,7 +821,7 @@ pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, sto
 /// the tree, from `alloc`, exactly its size.
 pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize) Error!ast.Program {
     const top = @frameAddress();
-    var p: Parser = .{ .alloc = alloc, .scratch = scratch, .lexer = lex.Lexer.init(alloc, prelude), .tok = undefined, .max_nesting = max_nesting };
+    var p: Parser = .{ .alloc = alloc, .scratch = scratch, .lexer = lex.Lexer.init(alloc, source), .tok = undefined, .max_nesting = max_nesting };
     defer if (stack_used) |u| {
         u.* = top -| p.stack_low;
     };
@@ -759,19 +837,10 @@ pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, sourc
     }
     errdefer stop.* = p.stop;
     p.frame.depth = 0;
-    // **THE PRELUDE FIRST** (prelude.shale, QUEUE 220): its functions, each
-    // declared as a script's would be, then the script, which may call them.
-    p.in_prelude = true;
-    try p.advance();
-    const declared = try p.block();
-    // A function's declaration is an empty `do` where it stood.
-    for (declared) |d| if (d.kind != .do or d.kind.do.len != 0) @panic("prelude.shale holds only functions");
-    if (p.tok.tag != .eof) @panic("prelude.shale holds only functions");
-    p.in_prelude = false;
-    p.prelude_functions = @intCast(p.functions.items.len);
-    p.lexer = lex.Lexer.init(alloc, source);
+    // The script; a prelude function (prelude.shale, QUEUE 220) is parsed
+    // at its first call (QUEUE 230).
     try p.advance();
     const body = try p.block();
     if (p.tok.tag != .eof) return p.failf(p.here(), .syntax, "{s} with nothing open to close", .{p.describe(p.tok)});
-    return .{ .functions = try alloc.dupe(ast.Function, p.functions.items), .prelude_functions = p.prelude_functions, .const_names = try alloc.dupe([]const u8, p.consts.items), .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
+    return .{ .functions = try alloc.dupe(ast.Function, p.functions.items), .const_names = try alloc.dupe([]const u8, p.consts.items), .main = .{ .name = "the script", .pos = .{ .line = 1, .column = 1 }, .params = 0, .frame = p.frame.slots, .body = body } };
 }

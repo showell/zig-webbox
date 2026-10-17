@@ -129,6 +129,27 @@ const cases = [_]Case{
     .{ .src = "function f(n) return f(n + 1) end f(1)", .line = 1, .column = 22, .function = "f", .budget = .call_depth, .class = .budget, .message = "calls nest deeper than the call-depth budget (64)" },
     .{ .src = "while true do end", .line = 1, .column = 7, .budget = .steps, .class = .budget, .message = "the step budget (100000 steps) ran out" },
     .{ .src = "function g(x) return x + {} end print(g(1))", .line = 1, .column = 24, .function = "g", .class = .type, .message = "`+` takes integers, and its right is an empty table" },
+    // Regular expressions (QUEUE 230): every construct the subset leaves out, refused by name.
+    .{ .src = "local m = re_find(\"x\", \"a|b\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: `|` is not in this subset: no alternation; a class (`[ab]`) is one byte of several, or call `re_find` once for each" },
+    .{ .src = "local m = re_find(\"x\", \"a{2}\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: `{n,m}` is not in this subset: write the part out as often as it must come (`\\d\\d\\d?`), or `\\{` for the byte" },
+    .{ .src = "local m = re_find(\"x\", \"(?:a)\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 1: `(?` is not in this subset: no lookaround and no groups that do not capture" },
+    .{ .src = "local m = re_find(\"x\", \"(a)(b)\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 4: one capture group a pattern: a second `(` is not in this subset (`\\(` is the byte)" },
+    .{ .src = "local m = re_find(\"x\", \"(a(b))\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 3: one capture group a pattern: a second `(` is not in this subset (`\\(` is the byte)" },
+    .{ .src = "local m = re_find(\"x\", \"a)\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: a `)` with no `(` before it: `\\)` is the byte" },
+    .{ .src = "local m = re_find(\"x\", \"(a\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 1: a `(` that is never closed" },
+    .{ .src = "local m = re_find(\"x\", \"[ab\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 1: a `[` that is never closed" },
+    .{ .src = "local m = re_find(\"x\", \"*a\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 1: a `*`, `+` or `?` with nothing before it to repeat" },
+    .{ .src = "local m = re_find(\"x\", \"a**\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 3: a repetition repeated (`a**`, `a+*`): one is enough" },
+    .{ .src = "local m = re_find(\"x\", \"a*?\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 3: lazy repetition (`*?`, `+?`, `??`) is not in this subset: every repetition takes as much as it can" },
+    .{ .src = "local m = re_find(\"x\", \"^*\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: `^` and `$` are places, not bytes: they cannot repeat" },
+    .{ .src = "local m = re_find(\"x\", \"(a)\\\\1\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 4: backreferences (`\\1`) are not in this subset" },
+    .{ .src = "local m = re_find(\"x\", \"\\\\bword\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 1: `\\b` is not in this subset: no word boundaries; `\\W` or `^` and `$` where the edge is a byte or the string's end" },
+    .{ .src = "local m = re_find(\"x\", \"\\\\q\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 1: an escape this subset does not have: `\\d \\w \\s` (and `\\D \\W \\S`), `\\n \\t \\r`, or `\\` before a byte that is not a letter or digit" },
+    .{ .src = "local m = re_find(\"x\", \"a\\\\\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: a pattern that ends in `\\`: `\\\\` is the byte" },
+    .{ .src = "local m = re_find(\"x\", \"[z-a]\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: a range whose end is before its start (`z-a`): write it `a-z`" },
+    .{ .src = "local m = re_find(\"x\", \"[[:alpha:]]\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 2: `[:alpha:]` and its kind are not in this subset: write the bytes (`[a-zA-Z]`), or `\\[` for the byte" },
+    .{ .src = "local m = re_find(\"x\", \"[a-\\\\d]\")", .line = 1, .column = 11, .class = .argument, .message = "`re_find`'s pattern, at its byte 4: a range's end must be one byte, not a class" },
+    .{ .src = "local m = re_match(\"x\", rep(\"a\", 257))", .line = 1, .column = 11, .class = .argument, .message = "`re_match`'s pattern is 257 bytes, and one may be at most 256" },
 };
 
 var out_buf: [4096]u8 = undefined;

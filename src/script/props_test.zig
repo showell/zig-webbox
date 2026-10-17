@@ -399,3 +399,301 @@ test "property: line_at at every offset of a file is the line lines(read(whole))
         \\if ok then print("ok") end
     , "line_at");
 }
+
+// ── regular expressions (metal-vmm QUEUE 230, chunk 2) ──────────────────
+
+const regex = script.regex;
+
+/// **A PATTERN OF THE SUBSET, AS A TREE**: what the generator makes, the
+/// reference matcher reads, and `render` writes as the pattern's text. The
+/// reference never parses: it reads the tree the text was written from.
+const GNode = struct {
+    kind: enum { lit, any, set, start, end, group },
+    c: u8 = 0,
+    set: usize = 0,
+    quant: enum { one, star, plus, opt } = .one,
+    inner: []const GNode = &.{},
+};
+
+/// The classes the generator writes, and which bytes each holds.
+const gen_sets = [_]struct { text: []const u8, holds: []const u8 }{
+    .{ .text = "[ab]", .holds = "ab" },
+    .{ .text = "[^a]", .holds = "b1 .\n" },
+    .{ .text = "[a-b]", .holds = "ab" },
+    .{ .text = "\\d", .holds = "1" },
+    .{ .text = "\\w", .holds = "ab1" },
+    .{ .text = "\\s", .holds = " \n" },
+    .{ .text = "[^ab1]", .holds = " .\n" },
+    .{ .text = "[.1]", .holds = ".1" },
+    .{ .text = "[\\d ]", .holds = "1 " },
+    .{ .text = "\\S", .holds = "ab1." },
+};
+/// What the strings are made of: every class above tells some apart.
+const gen_alphabet = "ab1 .\n";
+
+fn genSeq(rand: std.Random, arena: std.mem.Allocator, len_most: usize, group_left: *bool) ![]const GNode {
+    const n = rand.uintAtMost(usize, len_most);
+    const seq = try arena.alloc(GNode, n);
+    for (seq) |*node| {
+        node.* = switch (rand.uintLessThan(u8, 16)) {
+            0...5 => .{ .kind = .lit, .c = "ab1 .\n"[rand.uintLessThan(usize, 6)] },
+            6, 7 => .{ .kind = .any },
+            8...10 => .{ .kind = .set, .set = rand.uintLessThan(usize, gen_sets.len) },
+            11 => .{ .kind = .start },
+            12 => .{ .kind = .end },
+            else => if (group_left.*) blk: {
+                group_left.* = false;
+                var none = false;
+                break :blk .{ .kind = .group, .inner = try genSeq(rand, arena, 3, &none) };
+            } else .{ .kind = .lit, .c = 'a' },
+        };
+        if (node.kind != .start and node.kind != .end) node.quant = switch (rand.uintLessThan(u8, 8)) {
+            0, 1 => .star,
+            2 => .plus,
+            3 => .opt,
+            else => .one,
+        };
+    }
+    return seq;
+}
+
+fn render(out: *std.ArrayList(u8), seq: []const GNode) !void {
+    const a = testing.allocator;
+    for (seq) |node| {
+        switch (node.kind) {
+            .lit => switch (node.c) {
+                '.' => try out.appendSlice(a, "\\."),
+                '\n' => try out.appendSlice(a, "\\n"),
+                else => try out.append(a, node.c),
+            },
+            .any => try out.append(a, '.'),
+            .set => try out.appendSlice(a, gen_sets[node.set].text),
+            .start => try out.append(a, '^'),
+            .end => try out.append(a, '$'),
+            .group => {
+                try out.append(a, '(');
+                try render(out, node.inner);
+                try out.append(a, ')');
+            },
+        }
+        switch (node.quant) {
+            .one => {},
+            .star => try out.append(a, '*'),
+            .plus => try out.append(a, '+'),
+            .opt => try out.append(a, '?'),
+        }
+    }
+}
+
+/// **THE REFERENCE: A BACKTRACKING MATCHER**, slow and plainly right:
+/// each choice tried in its order of preference (more before fewer, a
+/// group's `?` taken before skipped), the first way through that reaches
+/// the pattern's end is the match. A loop's turn that matched nothing
+/// ends the loop as failed (a `+`'s first turn excepted), as a Thompson
+/// machine's does: an empty turn is never what makes a match.
+const Ref = struct {
+    s: []const u8,
+
+    const Caps = struct { gs: ?usize = null, ge: ?usize = null };
+    const Hit = struct { end: usize, caps: Caps };
+    const Cont = union(enum) {
+        done,
+        seq: struct { rest: []const GNode, next: *const Cont },
+        close: *const Cont,
+        /// After a `*` turn begun at `start`: another turn, or on.
+        again: struct { node: *const GNode, start: usize, next: *const Cont },
+        /// After a `+`'s first turn: more turns, or on.
+        more: struct { node: *const GNode, next: *const Cont },
+    };
+
+    fn go(r: Ref, k: *const Cont, pos: usize, caps: Caps) ?Hit {
+        return switch (k.*) {
+            .done => .{ .end = pos, .caps = caps },
+            .seq => |q| r.seqAt(q.rest, q.next, pos, caps),
+            .close => |next| r.go(next, pos, .{ .gs = caps.gs, .ge = pos }),
+            .again => |q| if (pos == q.start) null else r.star(q.node, q.next, pos, caps),
+            .more => |q| r.star(q.node, q.next, pos, caps),
+        };
+    }
+
+    fn seqAt(r: Ref, nodes: []const GNode, k: *const Cont, pos: usize, caps: Caps) ?Hit {
+        if (nodes.len == 0) return r.go(k, pos, caps);
+        const n = &nodes[0];
+        const rest: Cont = .{ .seq = .{ .rest = nodes[1..], .next = k } };
+        return switch (n.quant) {
+            .one => r.once(n, &rest, pos, caps),
+            .opt => r.once(n, &rest, pos, caps) orelse r.go(&rest, pos, caps),
+            .star => r.star(n, &rest, pos, caps),
+            .plus => r.once(n, &Cont{ .more = .{ .node = n, .next = &rest } }, pos, caps),
+        };
+    }
+
+    fn star(r: Ref, n: *const GNode, k: *const Cont, pos: usize, caps: Caps) ?Hit {
+        return r.once(n, &Cont{ .again = .{ .node = n, .start = pos, .next = k } }, pos, caps) orelse r.go(k, pos, caps);
+    }
+
+    fn once(r: Ref, n: *const GNode, k: *const Cont, pos: usize, caps: Caps) ?Hit {
+        const at: ?u8 = if (pos < r.s.len) r.s[pos] else null;
+        return switch (n.kind) {
+            .lit => if (at != null and at.? == n.c) r.go(k, pos + 1, caps) else null,
+            .any => if (at != null and at.? != '\n') r.go(k, pos + 1, caps) else null,
+            .set => if (at != null and std.mem.indexOfScalar(u8, gen_sets[n.set].holds, at.?) != null) r.go(k, pos + 1, caps) else null,
+            .start => if (pos == 0) r.go(k, pos, caps) else null,
+            .end => if (pos == r.s.len) r.go(k, pos, caps) else null,
+            .group => r.seqAt(n.inner, &Cont{ .close = k }, pos, .{ .gs = pos, .ge = null }),
+        };
+    }
+
+    /// The leftmost match, as `regex.search` gives it.
+    fn find(r: Ref, seq: []const GNode) ?regex.Found {
+        for (0..r.s.len + 1) |start| {
+            if (r.seqAt(seq, &Cont{ .done = {} }, start, .{})) |h| return .{
+                .start = start,
+                .end = h.end,
+                .group = if (h.caps.gs != null and h.caps.ge != null) .{ h.caps.gs.?, h.caps.ge.? } else null,
+            };
+        }
+        return null;
+    }
+};
+
+fn groupText(s: []const u8, f: regex.Found) []const u8 {
+    return if (f.group) |g| s[g[0]..g[1]] else "";
+}
+
+test "property: re_find's machine finds what a backtracking matcher finds, on random patterns of the subset and random strings (QUEUE 230)" {
+    var prng = std.Random.DefaultPrng.init(230);
+    const rand = prng.random();
+    var pattern: std.ArrayList(u8) = .empty;
+    defer pattern.deinit(testing.allocator);
+    var s: std.ArrayList(u8) = .empty;
+    defer s.deinit(testing.allocator);
+    var matched: usize = 0;
+    for (0..20_000) |round| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var group_left = true;
+        const tree = try genSeq(rand, arena.allocator(), 6, &group_left);
+        pattern.clearRetainingCapacity();
+        try render(&pattern, tree);
+        s.clearRetainingCapacity();
+        for (0..rand.uintAtMost(usize, 12)) |_| try s.append(testing.allocator, gen_alphabet[rand.uintLessThan(usize, gen_alphabet.len)]);
+
+        var refused: regex.Refusal = undefined;
+        var program = regex.compile(testing.allocator, pattern.items, &refused) catch |e| {
+            std.debug.print("round {d}: /{s}/ refused at {d}: {s}\n", .{ round, pattern.items, refused.at, refused.message });
+            return e;
+        };
+        defer program.deinit(testing.allocator);
+        var scratch = try regex.Scratch.init(testing.allocator, &program);
+        defer scratch.deinit(testing.allocator);
+        const got = regex.search(&program, &scratch, s.items, std.math.maxInt(u64));
+        const want = (Ref{ .s = s.items }).find(tree);
+        errdefer std.debug.print("round {d}: /{s}/ on \"{f}\": got {?any}, want {?any}\n", .{ round, pattern.items, std.zig.fmtString(s.items), got.found, want });
+        try testing.expect(got.finished);
+        try testing.expectEqual(want == null, got.found == null);
+        if (want) |w| {
+            matched += 1;
+            try testing.expectEqual(w.start, got.found.?.start);
+            try testing.expectEqual(w.end, got.found.?.end);
+            try testing.expectEqualStrings(groupText(s.items, w), groupText(s.items, got.found.?));
+        }
+    }
+    // The rounds are not all misses.
+    try testing.expect(matched > 5_000);
+}
+
+/// `s` written inside a Shale string literal.
+fn appendShaleString(src: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| switch (c) {
+        '\n' => try src.appendSlice(testing.allocator, "\\n"),
+        '\\', '"' => {
+            try src.append(testing.allocator, '\\');
+            try src.append(testing.allocator, c);
+        },
+        else => try src.append(testing.allocator, c),
+    };
+}
+
+test "property: re_find and re_match in a script say what the backtracking matcher says, through both engines (QUEUE 230)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var prng = std.Random.DefaultPrng.init(2301);
+    const rand = prng.random();
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    var pattern: std.ArrayList(u8) = .empty;
+    defer pattern.deinit(testing.allocator);
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(testing.allocator);
+    var s_buf: [16]u8 = undefined;
+    for (0..300) |round| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var group_left = true;
+        const tree = try genSeq(rand, arena.allocator(), 6, &group_left);
+        pattern.clearRetainingCapacity();
+        try render(&pattern, tree);
+        const s = s_buf[0..rand.uintAtMost(usize, s_buf.len)];
+        for (s) |*c| c.* = gen_alphabet[rand.uintLessThan(usize, gen_alphabet.len)];
+        // The script: every field of the match, the group's only when the
+        // pattern has one.
+        src.clearRetainingCapacity();
+        try src.appendSlice(testing.allocator, "local s = \"");
+        try appendShaleString(&src, s);
+        try src.appendSlice(testing.allocator, "\"\nlocal p = \"");
+        try appendShaleString(&src, pattern.items);
+        try src.appendSlice(testing.allocator,
+            \\"
+            \\local m = re_find(s, p)
+            \\if m then print(m.at, "[" .. m.text .. "]", "[" .. get(m, "group", "-") .. "]", re_match(s, p)) else print("none", re_match(s, p)) end
+        );
+        const has_group = std.mem.indexOfScalar(u8, pattern.items, '(') != null;
+        want.clearRetainingCapacity();
+        if ((Ref{ .s = s }).find(tree)) |w| {
+            try want.print(testing.allocator, "{d}\t[{s}]\t[{s}]\ttrue\n", .{ w.start + 1, s[w.start..w.end], if (has_group) groupText(s, w) else "-" });
+        } else try want.appendSlice(testing.allocator, "none\tfalse\n");
+        const out = try f.output(src.items);
+        defer testing.allocator.free(out);
+        errdefer std.debug.print("round {d}: /{s}/ on \"{f}\"\n", .{ round, pattern.items, std.zig.fmtString(s) });
+        try testing.expectEqualStrings(want.items, out);
+    }
+}
+
+/// The steps of `re_find(rep("a", n), pattern)` alone, its setup's taken off.
+fn reSteps(f: *Fixture, pattern: []const u8, n: usize) !u64 {
+    var buf: [256]u8 = undefined;
+    const setup = try std.fmt.bufPrint(&buf, "local s = rep(\"a\", {d})", .{n});
+    var r0 = script.run(f.threaded.io(), testing.allocator, f.root, setup, .{ .steps = 500_000_000 }, 0, &out_buf);
+    defer r0.deinit();
+    var buf2: [512]u8 = undefined;
+    const whole = try std.fmt.bufPrint(&buf2, "{s}\nlocal m = re_find(s, \"{s}\")", .{ setup, pattern });
+    var r = script.run(f.threaded.io(), testing.allocator, f.root, whole, .{ .steps = 500_000_000 }, 0, &out_buf);
+    defer r.deinit();
+    try testing.expect(r.finished());
+    return r.steps - r0.steps;
+}
+
+test "property: a search's cost is linear in the string, whatever the pattern: `(a*)*b` on a run of `a` costs about what `a*b` does (QUEUE 230)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const n = 20_000;
+    const plain = try reSteps(&f, "a*b", n);
+    // Exactly what it says it charges: 20,001 places (the end is one) at
+    // `a*b`'s 5 instructions, 4 to compile its 3 bytes, and the call's 4.
+    try testing.expectEqual(@as(u64, 20_001 * 5 + 4 + 4), plain);
+    for ([_][]const u8{ "(a*)*b", "(a+)+b", "a?a?a?a?a?a*a*a*b", "(a?)*a*b" }) |p| {
+        const at_n = try reSteps(&f, p, n);
+        const at_4n = try reSteps(&f, p, 4 * n);
+        errdefer std.debug.print("/{s}/: {d} steps at {d}, {d} at {d}; a*b {d}\n", .{ p, at_n, n, at_4n, 4 * n, plain });
+        // Four times the string, four times the steps, within 1% (a
+        // search's end and its compile are a few steps it pays once).
+        try testing.expect(at_4n <= 4 * at_n);
+        try testing.expect(at_4n * 100 >= 4 * at_n * 99);
+    }
+    // The loop of a loop, which backtracking takes exponential time over,
+    // costs about what `a*b` does: its 9 instructions to 5.
+    try testing.expect(try reSteps(&f, "(a*)*b", n) <= 2 * plain);
+}

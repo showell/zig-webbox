@@ -80,6 +80,8 @@ const cases = [_]Case{
     .{ .b = .lines, .grows = .scales, .setup = "local s = rep(\"a\\n\", N)", .call = "local x = lines(s)" },
     .{ .b = .words, .grows = .scales, .setup = "local s = rep(\"a \", N)", .call = "local x = words(s)" },
     .{ .b = .like, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = like(s, \"*b\")" },
+    .{ .b = .re_find, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = re_find(s, \"a*b\")" },
+    .{ .b = .re_match, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "local x = re_match(s, \"b\")" },
     .{ .b = .rep, .grows = .scales, .call = "local x = rep(\"ab\", N)" },
     .{ .b = .substitute, .grows = .scales, .per = script.builtins.bytes_per_step, .setup = "local s = rep(\"a\", N)", .call = "local x = substitute(s, \"a\", \"b\")" },
     // numbers
@@ -256,6 +258,8 @@ const hard_cases = [_]struct { name: []const u8, store: Setup = .none, setup: []
     .{ .name = "find_in, a near-match", .store = .big_file, .setup = "", .call = "local x = find_in(\"big\", \"ab\\nab\\nab\\nX\")" },
     .{ .name = "lines, a line a byte", .setup = "local s = rep(\"\\n\", N)", .call = "local x = lines(s)" },
     .{ .name = "like, backtracking", .setup = "local s = rep(\"a\", N)", .call = "local x = like(s, \"*a*a*b\")" },
+    .{ .name = "re_find, a loop of a loop that never matches", .setup = "local s = rep(\"a\", N)", .call = "local x = re_find(s, \"(a*)*b\")" },
+    .{ .name = "re_find, many ways at every byte", .setup = "local s = rep(\"a\", N)", .call = "local x = re_find(s, \"a?a?a?a?a*a*a*$\")" },
     .{ .name = "sort, strings sharing a prefix", .setup = "local l = {} for i = 1, N do push(l, rep(\"x\", 20) .. (N - i)) end", .call = "sort(l)" },
 };
 

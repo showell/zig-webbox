@@ -557,6 +557,8 @@ the errors column says the rest.
 | `like(s, pattern)` | a boolean | |
 | `match_path(path, pattern)` | a boolean | `argument` past 64 parts |
 | `between(s, a, b)` | the text between, or nil | |
+| `re_find(s, pattern)` | the leftmost match, `{at, text[, group]}`, or nil | `argument` for a pattern past 256 bytes or with what the subset leaves out |
+| `re_match(s, pattern)` | a boolean: whether `s` holds a match | as `re_find` |
 | `rep(s, n)` | `s`, `n` times | `argument` for `n` < 0 |
 | `substitute(s, old, new)` | `s` with each `old` replaced | `argument` for `old` = "" |
 | `path(a, b, ...)` | the parts joined with `/` | |
@@ -647,7 +649,7 @@ the bytes compared there a step for 16 (see "What a builtin costs").
 | `sub(s, i[, j])` | Lua's: 1-based, inclusive, negatives counted from the end, clamped |
 | `trim(s)`, `upper(s)`, `lower(s)` | ASCII only |
 | `like(s, pattern)` | whether the whole of `s` matches: `*` is any run of bytes, `?` is one byte, any other byte is itself. Every byte looked at is a step, so a pattern that backtracks a long string runs out of steps |
-| `between(s, a, b)` | the text after the first `a` in `s` and before the first `b` after it, or nil when either is not there; `a` of "" is the start, `b` of "" the end: `between(line, "DEPARTS (", ")")`. A field's extraction, without regular expressions |
+| `between(s, a, b)` | the text after the first `a` in `s` and before the first `b` after it, or nil when either is not there; `a` of "" is the start, `b` of "" the end: `between(line, "DEPARTS (", ")")`. A field between two literals; `re_find` where a field has a shape |
 | `match_path(path, pattern)` | whether a path matches a glob, part by part on `/`: `**` is any number of parts, none included; in any other part `*` and `?` are `like`'s, never across a `/`. `src/**/*.zig` is every `.zig` under `src`, `src/tcp*.zig` only those in it. The prelude's `glob` uses it |
 | `rep(s, n)` | `s`, `n` times over; charged before it is made |
 | `substitute(s, old, new)` | every `old` replaced by `new`, left to right, none overlapping; `old` = "" is an error |
@@ -679,6 +681,62 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 -- 2<TAB>cd
 -- 3<TAB>cd
 ```
+
+### Regular expressions
+
+**A small subset, and linear** (metal-vmm QUEUE 230; Steve, 2026-10-18).
+A field taken out of a line is one call, where `between`, `split` and a
+helper took three:
+
+```shale
+local m = re_find("src/tcp.zig:412: DEPARTS (bounded) the window", "DEPARTS \\((\\w+)\\)")
+if m then print(m.at, m.text, m.group) end
+print(re_match("  pub fn deadline(", "^\\s*pub fn"), re_match("x", "\\d"))
+local r = re_find("see tcp.zig:40 and gone.zig:1", "(\\w+\\.zig):\\d+")
+print(r.group, parse_int(sub(r.text, #r.group + 2)))
+-- prints:
+-- 18<TAB>DEPARTS (bounded)<TAB>bounded
+-- true<TAB>false
+-- tcp.zig<TAB>40
+```
+
+| builtin | gives |
+|---|---|
+| `re_find(s, pattern)` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none. Test it with `if m then`: `==` on a map is refused, `m == nil` with it |
+| `re_match(s, pattern)` | whether `s` holds a match, anywhere, as `grep` says of a line; `^` and `$` pin it to the whole |
+
+| in a pattern | is |
+|---|---|
+| a byte | itself; `\` before any byte that is not a letter or digit is that byte (`\.`, `\(`, `\[`, `\\`) |
+| `.` | any byte but a newline |
+| `[abc]`, `[a-z]`, `[^...]` | one byte of the class, or (`^` first) one not in it; `\d \w \s` may be in it; a `]` first is the byte |
+| `\d`, `\w`, `\s`, and `\D \W \S` | a digit, a letter, digit or `_`, a blank (space, tab, newline, `\r`, `\v`, `\f`); the capitals, any other byte |
+| `\n`, `\t`, `\r` | a newline, a tab, a carriage return |
+| `*`, `+`, `?` | the part before, any number of times, at least once, or once or not; **each takes as much as it can** |
+| `^`, `$` | the string's start, its end |
+| `( ... )` | **one capture group a pattern**; it may repeat, `(ab)*`, and keeps its last turn |
+
+**Refused, each by name** (`argument`, saying what to write instead): `|`
+(no alternation: a class is one byte of several), `{n,m}`, a second `(`,
+`(?...)` (no lookaround), `\1` (no backreferences), `\b`, lazy `*?`, a
+repetition repeated (`a**`), `[:alpha:]`, and a pattern of more than 256
+bytes. A pattern is written in a Shale string, so its `\` is written
+`\\`: `"\\d+"` is the pattern `\d+`.
+
+**What it costs: linear, whatever the pattern.** A pattern compiles to a
+few instructions a byte (once a run: the run keeps the last 8 by their
+text, a step a byte to compile), and a search runs every way through them
+at once, a byte at a time, each instruction at most once a byte: **a step
+a byte of the string, and one for its end, times the pattern's
+instructions**. `a*b` is 5 instructions, `(a*)*b` 9: on 20,000 `a`s they
+cost 100,013 and 180,020 steps, and four times the string four times the
+steps (props_test). A backtracking engine's `(a*)*b` would take time
+exponential in the string; here no pattern can make a step count a lie.
+The match is the one a backtracking matcher would find first, tested
+against one on 20,000 random patterns and strings, with one rule of
+Thompson's: a loop's turn that matches nothing ends the loop as failed.
+Perl and Python take that turn, so on "a", `(a?)*`'s group here is "a",
+there "".
 
 ### Numbers
 
@@ -728,7 +786,11 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 Each part of their work is one builtin call under its cap, so a run's
 slices and budgets are as if the script had written them itself. **A
 script may declare a function of the same name:** its calls are then its
-own, from its line on.
+own, from its line on. **Only what a script calls is in its run** (metal-vmm
+QUEUE 230): a prelude function is parsed and compiled at its first call,
+with those it calls in turn (`glob` brings `walk_all`), so a script that
+calls none holds none of it in its machine. A prelude function's own calls
+are the prelude's, whatever the script has declared.
 
 | function | gives | costs |
 |---|---|---|
@@ -1298,7 +1360,9 @@ holds every source of the module.
 - **Errors are values only through `attempt`**, and budgets never.
 - **No remove from a list or a map.** A list only grows, which is what
   lets `for x in` walk it in place.
-- **No floats, no patterns, no closures.**
+- **No floats, no closures.** Patterns only as the regular expressions'
+  linear subset, `re_find` and `re_match` (Steve, 2026-10-18: "yes to
+  regex"): no alternation, one group, no backtracking.
 - **Offsets in files are 0-based; positions in strings are 1-based.** The
   first are the site's (sidecars count bytes from 0); the second are
   Lua's.
