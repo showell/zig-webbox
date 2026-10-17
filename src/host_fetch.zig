@@ -80,6 +80,15 @@ pub fn provide(f: Fetcher) void {
     fetcher = f;
 }
 
+/// What a test saves before it provides a fake, and puts back after.
+pub fn fetcherNow() ?Fetcher {
+    return fetcher;
+}
+
+pub fn provideOrNone(f: ?Fetcher) void {
+    fetcher = f;
+}
+
 /// Starts a fetch. `Busy` while one is running or its end is unread;
 /// `PathTooLong` past `path_most`; `NoFetch` on a host that offers none (a
 /// unit test's site, started with no host).
