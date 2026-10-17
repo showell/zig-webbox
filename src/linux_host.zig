@@ -68,7 +68,7 @@ pub const Options = struct {
 };
 
 /// `S` is a site (site.zig's `Site(App)`, or a namespace that re-exports one):
-/// `start`, `route`, `Started`.
+/// `start`, `route`, `Started`, and optionally `between(io, Now) Wake`.
 pub fn Server(comptime S: type) type {
     inline for (.{ "start", "route", "Started", "bodyLimit" }) |name| {
         if (!@hasDecl(S, name)) @compileError("linux_host.Server takes a site, which declares " ++ name ++ " (site.zig)");
@@ -169,7 +169,7 @@ pub fn Server(comptime S: type) type {
         fn startBetween(io: Io, stop: *const std.atomic.Value(bool)) void {
             if (!@hasDecl(S, "between")) return;
             turn.lockUncancelable(io);
-            _ = S.between(io, nowUnix(io));
+            _ = S.between(io, nowOf(io));
             turn.unlock(io);
             _ = std.Thread.spawn(.{}, betweenLoop, .{ io, stop }) catch |e| {
                 std.debug.print("{s}: no thread for work between requests ({s}); a background run is never stepped\n", .{ host_name, @errorName(e) });
@@ -186,7 +186,7 @@ pub fn Server(comptime S: type) type {
         fn betweenLoop(io: Io, stop: *const std.atomic.Value(bool)) void {
             while (!stop.load(.acquire)) {
                 turn.lockUncancelable(io);
-                const more = S.between(io, nowUnix(io));
+                const more = S.between(io, nowOf(io)) == .more;
                 turn.unlock(io);
                 // A handler waiting goes first: checked every millisecond,
                 // not spun on (the box's cold review: a core burned).
@@ -1352,6 +1352,11 @@ pub fn freeSpaceAt(path: []const u8) ?free_space.Space {
 var host_name: []const u8 = "";
 var started_unix: i64 = 0;
 
+/// Both clocks, for `between` (site.zig's `Now`).
+fn nowOf(io: Io) @import("webbox").site.Now {
+    return .{ .awake_ns = Io.Clock.now(.awake, io).nanoseconds, .unix_s = nowUnix(io) };
+}
+
 fn nowUnix(io: Io) i64 {
     return @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
 }
@@ -1446,12 +1451,12 @@ const TestSite = struct {
     var slices_run: std.atomic.Value(u32) = .init(0);
     /// The thread of the first `between` call since it was last zeroed.
     var first_between_thread: std.atomic.Value(std.Thread.Id) = .init(0);
-    pub fn between(io: Io, _: i64) bool {
+    pub fn between(io: Io, _: @import("webbox").site.Now) @import("webbox").site.Wake {
         _ = first_between_thread.cmpxchgStrong(0, std.Thread.getCurrentId(), .acq_rel, .acquire);
-        if (slices_left.load(.acquire) == 0) return false;
+        if (slices_left.load(.acquire) == 0) return .idle;
         sleepMs(io, between_slice_ms) catch {};
         _ = slices_run.fetchAdd(1, .acq_rel);
-        return slices_left.fetchSub(1, .acq_rel) > 1;
+        return if (slices_left.fetchSub(1, .acq_rel) > 1) .more else .idle;
     }
     fn streamFrame(_: []const u8, _: std.mem.Allocator, blob: []const u8) error{OutOfMemory}!?[]const u8 {
         return blob;

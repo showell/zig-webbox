@@ -114,10 +114,9 @@ pub fn Site(comptime App: type) type {
         /// **BETWEEN REQUESTS** (metal-vmm QUEUE 211): the application's
         /// work a host does between handlers, under the turn, one slice at a
         /// time (a background script's, `script_route.sliceBackground`);
-        /// whether there is more. A site with none says no.
-        pub fn between(io: Io, now: i64) bool {
-            if (!@hasDecl(App, "between")) return false;
-            return App.between(io, now);
+        /// when it next needs a turn (`Wake`). A site with none is idle.
+        pub fn between(io: Io, now: Now) Wake {
+            return betweenOf(App, io, now);
         }
 
         /// The route's cap on a body, from the head's target (its path; the
@@ -338,6 +337,48 @@ fn familyName(comptime A: type, target: []const u8) []const u8 {
     if (!@hasDecl(A, "family")) return "all";
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     return @tagName(A.family(path));
+}
+
+/// When the application next needs a turn, and the clocks a host hands
+/// `between` (wake.zig).
+pub const Wake = @import("wake.zig").Wake;
+pub const Now = @import("wake.zig").Now;
+
+/// **AN APPLICATION'S `between`, AS EITHER SHAPE**: one that answers `Wake`
+/// is handed both clocks; one that answers `bool` (whether there is more)
+/// keeps the Unix seconds it was written for, and its answer is `.more` or
+/// `.idle`. Never a clock cast into the other.
+fn betweenOf(comptime A: type, io: Io, now: Now) Wake {
+    if (!@hasDecl(A, "between")) return .idle;
+    const answers = @typeInfo(@TypeOf(A.between)).@"fn".return_type.?;
+    if (answers == bool) return if (A.between(io, now.unix_s)) .more else .idle;
+    if (answers == Wake) return A.between(io, now);
+    @compileError("an application's between answers bool or webbox.site.Wake (site.zig)");
+}
+
+test "site: an application's between is called in its own shape: bool with Unix seconds, Wake with both clocks, none idle" {
+    const Old = struct {
+        var seen: i64 = 0;
+        fn between(_: Io, now: i64) bool {
+            seen = now;
+            return now == 1_800_000_000;
+        }
+    };
+    const New = struct {
+        var seen: Now = undefined;
+        fn between(_: Io, now: Now) Wake {
+            seen = now;
+            return .{ .at = now.awake_ns + 60 * std.time.ns_per_s };
+        }
+    };
+    const io = std.testing.io;
+    const now: Now = .{ .awake_ns = 5 * std.time.ns_per_s, .unix_s = 1_800_000_000 };
+    try testing.expectEqual(Wake.more, betweenOf(Old, io, now));
+    try testing.expectEqual(@as(i64, 1_800_000_000), Old.seen);
+    try testing.expectEqual(Wake.idle, betweenOf(Old, io, .{ .awake_ns = 0, .unix_s = 7 }));
+    try testing.expectEqual(Wake{ .at = 65 * std.time.ns_per_s }, betweenOf(New, io, now));
+    try testing.expectEqual(now, New.seen);
+    try testing.expectEqual(Wake.idle, betweenOf(struct {}, io, now));
 }
 
 test "site: a long topic's upload is counted under uploads: the family is read from the whole path (189's minor 10)" {
