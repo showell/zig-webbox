@@ -556,3 +556,13 @@ test "run: a 64 KiB chain the parse takes as one level, `1+1+...+1` and its kin,
         }
     }
 }
+
+test "run: a map or a list compared with the literal nil, `==` and `~=`, either side (metal-vmm QUEUE 231)" {
+    try expectOutput("print({} == nil, nil == {1}, {a = 1} ~= nil, nil ~= {})", "false\tfalse\ttrue\ttrue\n");
+    // What `re_find` gives: a map, or nil.
+    try expectOutput("local m = re_find(\"ab\", \"b\") local n = re_find(\"ab\", \"c\") print(m == nil, m ~= nil, n == nil, n ~= nil)", "false\ttrue\ttrue\tfalse\n");
+    // Inside a function, and as a condition.
+    try expectOutput("function f(t) if t == nil then return \"none\" end return #t end print(f(nil), f({1, 2}))", "none\t2\n");
+    // Nil against nil, and a scalar against nil, are as they were.
+    try expectOutput("local x = nil print(x == nil, 1 == nil, nil ~= \"a\", nil == nil)", "true\tfalse\ttrue\ttrue\n");
+}
