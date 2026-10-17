@@ -19,7 +19,6 @@ const B = ast.Builtin;
 const spec = bi.spec;
 const hub = @import("builtins_store.zig");
 const rd = @import("builtins_read.zig");
-const overlay = @import("overlay.zig");
 const fileSize = rd.fileSize;
 const readSized = rd.readSized;
 const Path = hub.Path;
@@ -165,8 +164,7 @@ fn replaced(run: *Run, pos: ast.Pos, spans: *std.ArrayList(Span), i: usize, len:
 /// ...}, ...})`** (QUEUE 232): the edits in sequence, each to the file as
 /// the one before left it and held to the same rules, one diff and one
 /// write; an edit that fails stops the run before anything is printed or
-/// written. The change is `replace`'s, logged as `edit`: in a dry run (the
-/// Linux tool without `--write`) the diff is all it does. The file is read
+/// written. The change is `replace`'s, logged as `edit`. The file is read
 /// whole: at most the call-bytes cap. The number of occurrences replaced.
 fn editFile(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const b: B = .edit;
@@ -350,20 +348,9 @@ fn changeAt(run: *Run, pos: ast.Pos, b: B, c: Change, p: Path, data: []const u8)
     // **ONLY WHAT ISN'T THERE IS MISSING** (209(a)): any other failure to
     // look is the store's own, named, logged, and why the run stopped.
     const looked: ?anyerror = switch (c) {
-        .remove, .remove_tree => if (hub.viewStatOrNull(run, p.full)) |st| (if (st == null) error.FileNotFound else null) else |e| e,
+        .remove, .remove_tree => if (store.statOrNull(io, a, p.full)) |st| (if (st == null) error.FileNotFound else null) else |e| e,
         else => null,
     };
-    // **A DRY RUN**: checked and counted as made, logged, not made. What it
-    // cannot know without making it (a folder missing for a `replace`, the
-    // disk full) it does not say.
-    if (looked == null and run.dry_run) {
-        run.effects.appendAssumeCapacity(.{ .op = @tagName(b), .path = p.rel, .outcome = "dry run" });
-        // **AND HELD**, so the reads after it see it (metal-vmm QUEUE 234).
-        if (comptime overlay.on) overlay.record(&run.overlay, a, switch (c) {
-            inline else => |t| @field(overlay.Change, @tagName(t)),
-        }, p.full, data) catch return run.oom(pos);
-        return .nil;
-    }
     const outcome: ?anyerror = if (looked) |e| e else switch (c) {
         .replace => if (store.replace(io, a, p.full, data, .{})) |_| null else |e| e,
         .append => if (store.append(io, a, p.full, data)) |_| null else |e| e,

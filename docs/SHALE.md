@@ -8,8 +8,7 @@ and on bare metal. Every run stays inside its budgets.
 
 A script **just runs.** Its effects happen as it goes. A run that stops
 keeps what it already did, and its effects log says what that was. There
-is no rollback. (On Linux, `shale` runs a script dry unless told
-`--write`: its changes are logged, an `edit`'s diff printed, none made.)
+is no rollback; on Linux, git is the undo.
 
 **For an agent choosing a tool** (in place of Python, sed or awk, on a code
 checkout or any folder): [`SHALE-AGENTS.md`](SHALE-AGENTS.md). **The
@@ -55,9 +54,10 @@ what avoids it:
 6. **A line is not 200 bytes.** `read(p, f, 200)` cuts a long line;
    `line_at(p, offset)` gives the whole line around an offset, and
    `read_lines` whole lines a part at a time.
-7. **Look before you change, and run it dry first.** On Linux, `shale`
-   without `--write` logs every change and makes none; `edit` shows its
-   diff.
+7. **Look before you change.** On Linux, work in a git checkout, so a
+   run's changes can be seen (`git diff`) and taken back; `edit` prints its
+   diff before it writes. On metal there is no undo: rehearse a script on
+   a copy of the data first (Steve, 2026-10-17).
 
 When a run stops, its report names the line, and the calls that led
 there:
@@ -75,7 +75,7 @@ there:
 | lynrummy.com (`POST /admin/script`, angry-gopher's `admin_script`) | atomic (changes, holds the turn); background (reads only, in slices) | atomic: 2,000,000 steps, 500 reads, 16 MiB read, 100 changes, 8 MiB arena; background: the same but 10,000 reads |
 | Dog Park (`POST /admin/script`, its `src/play/shale.zig`) | background only: an atomic run is refused | 50,000,000 steps, 10,000 reads, 256 MiB read, no changes, 8 MiB arena |
 | an installed suite (`src/shale_suite.zig`) | background, on a schedule | the application's background budgets, its output at most 64 KiB |
-| Linux, `shale` | dry unless `--write`; then atomic | Shale's defaults (the budgets' table), each settable with `--budget NAME=N` |
+| Linux, `shale` | atomic | Shale's defaults (the budgets' table), each settable with `--budget NAME=N` |
 
 ## A first script, step by step
 
@@ -188,18 +188,9 @@ The host chooses, not the script; a signed request names it
 | may change the store | yes | **no**: `replace`, `append`, `mkdir`, `remove` and `remove_tree` stop it, an `argument` error naming `atomic` |
 | its budgets on the live sites | the site's own, small: lynrummy.com's 500 reads, 16 MiB read, 2M steps | the background's, larger: 10,000 reads (Dog Park's, `budgets` in its `src/play/shale.zig`) |
 
-- **The runner** (`shale`, `zig build script`, below) runs **dry**
-  unless told `--write` (QUEUE 229): its changes are checked, counted and
-  logged with the outcome `dry run`, an `edit`'s diff printed, and none
-  made. **It sees its own changes** (QUEUE 234, `src/script/overlay.zig`):
-  each is held in an overlay keyed by the resolved path, and every read,
-  `stat`, `exists` and `is_dir` sees it, so a change after a change
-  previews against the first; listing (`ls`, `walk`) a folder it changed
-  stops with an `argument` error (run `--write` on a copy), and the
-  overlay's bytes are the run's arena's, copied at a `yield`. Metal
-  compiles none of it (`host_io` says `shale_dry_run` only on Linux).
-  With `--write` it is atomic. Shale's default budgets, each of
-  which `--budget NAME=N` sets (the table in "The budgets").
+- **The runner** (`shale`, `zig build script`, below) runs atomic, with
+  Shale's default budgets, each of which `--budget NAME=N` sets (the
+  table in "The budgets").
 - **Dog Park takes background runs only.** lynrummy.com's route runs
   both: atomic ones, and background ones its host steps between requests
   (since v32, metal-vmm QUEUE 222; angry-gopher
@@ -641,7 +632,7 @@ the errors column says the rest.
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
 | `read_lines(p[, offset[, n]])` | `{lines, next, done}`: the whole lines from byte `offset` (0 unset), at least `n` bytes (64 KiB unset) and on to the end of the line it stops in, so no line is cut; `lines` as `lines` splits them; `next` where the next part starts; `done` whether that is the file's end. `offset` is a line's start, as `next` is | a read; the part's bytes, and up to 512 past it for the last line's end; the whole part at most the call-bytes cap | `argument` for a negative offset, `n` under 1 or past the cap, or a line longer than the cap; `store` |
 | `grep(p, s)` | the lines of the file holding `s`, a literal, as `{line, text}`, `line` 1-based, in order, a line once however often it holds `s` | a read; the file whole, a step for 16 bytes, and each line kept a step a byte. At most the call-bytes cap: a bigger file goes through `read_lines` | `argument` for `s` empty or a file past the cap; `store` |
-| `edit(p, old, new[, {all, word}])` | the number of occurrences of `old` replaced by `new`; **the change's diff is printed first** (unified: `--- a/p`, `+++ b/p`, a hunk for the lines each occurrence is on). `old` must be in the file once, unless `all`; `word` takes only whole words (no letter, digit or `_` either side). Logged as `edit`; in a dry run the diff is all it does. **Where the host says `summary`** (`Options.diffs`; the Linux CLI unless `--verbose`), the diff is one line, `edit p: N hunks, -O +N lines`, printed where the diff is, before the change budgets are checked; the hunk walk is charged as in full, and only the writes' charge goes. **`edit(p, {{old = ..., new = ...[, all = true][, word = true]}, ...})`**, its list form (metal-vmm QUEUE 232): at most 64 edits a call, in sequence, each to the file as the one before left it, each held to the rules above; one diff, from the file as it was to the file as the last edit left it; one write. An edit that fails stops the run with nothing printed and nothing written, and its error says which edit it was | a read, the file whole (at most the call-bytes cap), a step for 16 bytes, each edit; then `replace`'s change | `argument` for `old` empty, not there, or there more than once without `all`, and for an edit with no `old` or `new` or another key; `type` for an edit not a map; as `read` and `replace` |
+| `edit(p, old, new[, {all, word}])` | the number of occurrences of `old` replaced by `new`; **the change's diff is printed first** (unified: `--- a/p`, `+++ b/p`, a hunk for the lines each occurrence is on). `old` must be in the file once, unless `all`; `word` takes only whole words (no letter, digit or `_` either side). Logged as `edit`. **Where the host says `summary`** (`Options.diffs`; the Linux CLI unless `--verbose`), the diff is one line, `edit p: N hunks, -O +N lines`, printed where the diff is, before the change budgets are checked; the hunk walk is charged as in full, and only the writes' charge goes. **`edit(p, {{old = ..., new = ...[, all = true][, word = true]}, ...})`**, its list form (metal-vmm QUEUE 232): at most 64 edits a call, in sequence, each to the file as the one before left it, each held to the rules above; one diff, from the file as it was to the file as the last edit left it; one write. An edit that fails stops the run with nothing printed and nothing written, and its error says which edit it was | a read, the file whole (at most the call-bytes cap), a step for 16 bytes, each edit; then `replace`'s change | `argument` for `old` empty, not there, or there more than once without `all`, and for an edit with no `old` or `new` or another key; `type` for an edit not a map; as `read` and `replace` |
 | `line_at(p, offset)` | the whole line holding byte `offset`, without its newline (a newline is its own line's last byte); nil at the file's end or past it | a read; the line, read back and on from `offset` 512 bytes at a time, then once more whole | `argument` for a negative offset or a line longer than the call-bytes cap; `store` |
 | `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
 | `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
@@ -1144,15 +1135,15 @@ first.
 ## The runner
 
 ```sh
-shale [--root DIR] [--write] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
+shale [--root DIR] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
 shale <<'SHALE'                  # no FILE, no -e: the script is stdin
 SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
 ```
 
 - **The root** is `--root`, else `SHALE_ROOT`, else the working
   directory.
-- **A dry run unless `--write`**: its changes are logged, none made, no
-  program run, and it says so at the end.
+- **A run makes its changes and runs its programs**: on Linux, git is
+  the undo ("What was decided": no dry run).
 - `--budget NAME=N` sets one budget: `steps`, `reads`, `read_bytes`,
   `output_bytes`, `changes`, `change_bytes`, `arena_bytes`, `call_bytes`
   or `call_entries`. **The runner's own defaults** (metal-vmm QUEUE 233):
@@ -1182,13 +1173,13 @@ SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
   measured as metal measures them.
 - **Terse**: it prints the output, then a stop as `name:line:column (in
   \`f\`)` (a later prelude's line by that prelude's name) and its trail;
-  what the run used only past half a budget or on a stop; a dry run's
-  changes; an `edit`'s diff as one line, `edit p: N hunks, -O +N lines`.
+  what the run used only past half a budget or on a stop; an `edit`'s
+  diff as one line, `edit p: N hunks, -O +N lines`.
   `--verbose` adds the effects, the programs run and their logs, what the
   run used, always, and every diff in full.
 - **What goes where:** the script's own output on stdout; on stderr the
-  report: a stop and its trail, the effects, the programs run, the dry
-  run's line, and `── used:`, which is what the run took of four budgets
+  report: a stop and its trail, the effects, the programs run, and
+  `── used:`, which is what the run took of four budgets
   (steps, reads, read bytes, output bytes) beside each budget. Both
   stream, so `> f 2>&1` keeps them in order.
 - It exits 0 if the script finished, 1 if it stopped, 2 if the command
@@ -1231,8 +1222,7 @@ it three things through `Options`, and metal hands none
   A later prelude may not redefine an earlier one's function. **Metal's
   parse compiles none of this**: `host_io_std.zig` says
   `shale_preludes`, and metal's host_io doesn't.
-- **A dry run runs no program:** `run` and `job_start` stop it as `budget
-  runs`, which `attempt` can't catch. A run runs at most 64 programs.
+- **A run runs at most 64 programs** (`budget runs`).
 - **The gate** (`tools/shale_gate.zig`, installed on the box) is the PreToolUse
   hook that holds an agent to Shale (SHALE-AGENTS.md, "The gate").
 
@@ -1336,12 +1326,10 @@ else of the script module's insides:
   request's heap: the values' arena, the machine's memory and its
   output, each under its budget. A second run later needs no host change
   but a count.
-- **Three modes.** `atomic` is today's run, whole inside one handler, and
+- **Two modes.** `atomic` is today's run, whole inside one handler, and
   may change the store. `background` is stepped in slices between
   handlers and **only reads**: `replace`, `append`, `mkdir`, `remove`
-  and `remove_tree` are `argument` errors naming `atomic`. `dry_run`
-  (the Linux CLI's default) checks, counts and logs every change and
-  makes none, an `edit`'s diff printed. A script that
+  and `remove_tree` are `argument` errors naming `atomic`. A script that
   finds and then deletes is a background run to find, then an atomic
   one to act.
 - **A slice ends after any store call** (Steve: "let the kernel swap it
@@ -1482,8 +1470,9 @@ holds every source of the module.
 
 ## What was decided, and what was refused
 
-- **A dry run on Linux only.** On the sites a script just runs (Steve);
-  the Linux `shale` runs dry unless `--write` (QUEUE 229, `Mode.dry_run`).
+- **No dry run** (Steve, 2026-10-17, deleting the one the Linux CLI had,
+  QUEUE 229's `Mode.dry_run` and 234's overlay): on Linux, git is the
+  undo; on metal, rehearse a script on a copy of the data.
 - **On metal, no effects beyond the store.** No network, no clock but
   `now()`, no host. Linux's Shale has more behind one seam, metal's
   unchanged ("On Linux: behind the seam"; zig-webbox

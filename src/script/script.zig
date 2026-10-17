@@ -200,7 +200,6 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .out = out,
         .out_cap = @min(out.len, budgets.output_bytes),
         .read_only = options.mode == .background,
-        .dry_run = options.mode == .dry_run,
         .args = options.args,
         .host = options.host,
         .path_hook = options.path_hook,
@@ -256,6 +255,5 @@ test {
     _ = @import("agent_test.zig");
     _ = @import("host_test.zig");
     _ = @import("cli_test.zig");
-    _ = @import("overlay_test.zig");
     _ = cli;
 }

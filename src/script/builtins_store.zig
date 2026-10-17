@@ -15,7 +15,6 @@ const bi = @import("builtins.zig");
 const text = @import("builtins_text.zig");
 
 const store = @import("../store.zig");
-const overlay = @import("overlay.zig");
 
 const Run = interp.Run;
 const Value = value.Value;
@@ -105,48 +104,6 @@ pub fn modifiedSeconds(mtime_ns: i96) i64 {
     return @intCast(@divFloor(mtime_ns, 1_000_000_000));
 }
 
-// ── the view: every read of the store ────────────────────────────────────
-
-/// **EVERY READ OF THE STORE GOES THROUGH HERE** (metal-vmm QUEUE 234, 2):
-/// the store, unless a dry run's overlay says otherwise of the path (its
-/// own changes: overlay.zig). Metal compiles the store alone. A test fails
-/// a builtins_* file that reads the store another way.
-pub inline fn viewStatOrNull(run: *Run, full: []const u8) !?store.Stat {
-    if (comptime overlay.on) if (run.dry_run) if (overlay.find(&run.overlay, full)) |e| return switch (e.kind) {
-        .removed => null,
-        .dir => .{ .size = 0, .kind = .directory, .mtime = @as(i96, run.now) * 1_000_000_000 },
-        .file => .{ .size = try overlay.size(e, run.io, run.alloc, full), .kind = .file, .mtime = @as(i96, run.now) * 1_000_000_000 },
-    };
-    return store.statOrNull(run.io, run.alloc, full); // the view
-}
-
-pub inline fn viewStat(run: *Run, full: []const u8) !store.Stat {
-    return (try viewStatOrNull(run, full)) orelse error.FileNotFound;
-}
-
-pub inline fn viewHas(run: *Run, full: []const u8) !bool {
-    return (try viewStatOrNull(run, full)) != null;
-}
-
-/// Up to `buf.len` bytes from `offset`; how many arrived.
-pub inline fn viewReadAt(run: *Run, full: []const u8, offset: u64, buf: []u8) !usize {
-    if (comptime overlay.on) if (run.dry_run) if (overlay.find(&run.overlay, full)) |e| switch (e.kind) {
-        .removed => return error.FileNotFound,
-        .dir => return error.IsDir,
-        .file => return overlay.readAt(e, run.io, run.alloc, full, offset, buf),
-    };
-    return store.readAt(run.io, run.alloc, full, offset, buf); // the view
-}
-
-/// **A DRY RUN CANNOT LIST A FOLDER IT CHANGED**, asked before each
-/// `store.list`: merging the overlay into a listing's order, its budgets
-/// and a walk's `more` is not worth it, and refusing is honest. On metal,
-/// nothing.
-pub inline fn viewListCheck(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error!void {
-    if (comptime overlay.on) if (run.dry_run and overlay.touches(&run.overlay, full))
-        return run.fail(pos, .argument, "`{s}`: a dry run cannot list {s} after changing it: run --write on a copy", .{ @tagName(b), rel });
-}
-
 // ── reading ──────────────────────────────────────────────────────────────
 
 /// **`ls(p)`**: the names in a folder, sorted. The store lists a missing
@@ -156,7 +113,7 @@ fn ls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .ls, args[0], true);
     try countRead(run, pos);
     const a = run.alloc;
-    const st = (viewStatOrNull(run, p.full) catch |e| return storeFailed(run, pos, .ls, p.rel, e)) orelse return storeFailed(run, pos, .ls, p.rel, error.FileNotFound);
+    const st = (store.statOrNull(run.io, a, p.full) catch |e| return storeFailed(run, pos, .ls, p.rel, e)) orelse return storeFailed(run, pos, .ls, p.rel, error.FileNotFound);
     if (st.kind != .directory) return storeFailed(run, pos, .ls, p.rel, error.NotDir);
     const entries = try sortedEntries(run, pos, .ls, p.full, p.rel);
     const out = try run.newTable(pos);
@@ -171,7 +128,7 @@ fn stat(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .stat, args[0], true);
     try countRead(run, pos);
     const a = run.alloc;
-    const st = viewStat(run, p.full) catch |e| return storeFailed(run, pos, .stat, p.rel, e);
+    const st = store.stat(run.io, a, p.full) catch |e| return storeFailed(run, pos, .stat, p.rel, e);
     const out = try run.newTable(pos);
     out.map.put(a, "size", .{ .int = @intCast(st.size) }) catch return run.oom(pos);
     out.map.put(a, "kind", .{ .string = @tagName(st.kind) }) catch return run.oom(pos);
@@ -183,12 +140,12 @@ fn stat(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 fn exists(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .exists, args[0], true);
     try countRead(run, pos);
-    return .{ .boolean = viewHas(run, p.full) catch |e| return storeFailed(run, pos, .exists, p.rel, e) };
+    return .{ .boolean = store.has(run.io, run.alloc, p.full) catch |e| return storeFailed(run, pos, .exists, p.rel, e) };
 }
 
 fn isDir(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .is_dir, args[0], false);
     try countRead(run, pos);
-    const st = viewStatOrNull(run, p.full) catch |e| return storeFailed(run, pos, .is_dir, p.rel, e);
+    const st = store.statOrNull(run.io, run.alloc, p.full) catch |e| return storeFailed(run, pos, .is_dir, p.rel, e);
     return .{ .boolean = if (st) |x| x.kind == .directory else false };
 }

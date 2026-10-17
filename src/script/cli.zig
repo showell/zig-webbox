@@ -2,28 +2,25 @@
 //! what `shale` was asked, pure, so it is tested here and the runner
 //! (`src/script_runner.zig`) only does the I/O.
 //!
-//!     shale [--root DIR] [--write] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
+//!     shale [--root DIR] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
 //!
-//! **A DRY RUN UNLESS `--write`**: the run's changes are checked, counted,
-//! logged and, for `edit`, shown as a diff, and none is made. **With no
-//! FILE and no `-e`, the script is stdin** (metal-vmm QUEUE 233). **TERSE**
-//! (the dogfood design's "The CLI's defaults"): what a run used is said
-//! only past half a budget or on a stop, the effects only on `--verbose` or
-//! in a dry run; `printReport` is the CLI's, and `script.report`, the
-//! route's, is frozen.
+//! **A run makes its changes and runs its programs**: on Linux, git is
+//! the undo (Steve, 2026-10-17, deleting the dry run). **With no FILE and
+//! no `-e`, the script is stdin** (metal-vmm QUEUE 233). **TERSE** (the
+//! dogfood design's "The CLI's defaults"): what a run used is said only
+//! past half a budget or on a stop, the effects only on `--verbose`;
+//! `printReport` is the CLI's, and `script.report`, the route's, is frozen.
 
 const std = @import("std");
 const interp = @import("interp.zig");
 const builtins = @import("builtins.zig");
-const process = @import("process.zig");
 const parse_mod = @import("parse.zig");
 const script = @import("script.zig");
 const diag = @import("diag.zig");
 
 pub const usage =
-    \\usage: shale [--root DIR] [--write] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
+    \\usage: shale [--root DIR] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
     \\  --root DIR        the folder the script's paths are relative to (SHALE_ROOT, or here)
-    \\  --write           make the changes and run the programs; without it the run is dry
     \\  --verbose         the effects, the programs run and what the run used, always
     \\  --budget NAME=N   one budget: steps, reads, read_bytes, output_bytes, changes,
     \\                    change_bytes, arena_bytes, call_bytes, call_entries
@@ -46,7 +43,6 @@ pub const Command = struct {
     /// Neither a FILE nor `-e`: the script is stdin.
     from_stdin: bool = false,
     verbose: bool = false,
-    mode: process.Mode = .dry_run,
     budgets: interp.Budgets = defaults,
     /// Into the caller's buffer.
     args: []const interp.Arg = &.{},
@@ -67,9 +63,7 @@ pub fn parse(argv: []const []const u8, env_root: ?[]const u8, args_buf: []interp
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const a = argv[i];
-        if (std.mem.eql(u8, a, "--write")) {
-            c.mode = .atomic;
-        } else if (std.mem.eql(u8, a, "--verbose")) {
+        if (std.mem.eql(u8, a, "--verbose")) {
             c.verbose = true;
         } else if (std.mem.eql(u8, a, "--root") or std.mem.eql(u8, a, "--budget") or std.mem.eql(u8, a, "-e")) {
             if (i + 1 == argv.len) return refuse(why_buf, "{s} needs a value", .{a});
@@ -124,7 +118,6 @@ pub fn pastHalf(u: Used, b: interp.Budgets) bool {
 /// How the CLI reports a run.
 pub const How = struct {
     verbose: bool = false,
-    dry_run: bool = false,
     /// What the host did (each program it ran, each log): on `--verbose`.
     records: []const []const u8 = &.{},
     budgets: interp.Budgets = .{},
@@ -134,7 +127,7 @@ pub const How = struct {
 /// A stop, always, and where: a line in a prelude is that prelude's, by its
 /// name (`the Linux prelude:12:5`), never the script's.
 pub fn printReport(r: *const script.Result, name: []const u8, preludes: []const parse_mod.Prelude, how: How, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (how.verbose or (how.dry_run and r.effects.len > 0)) {
+    if (how.verbose) {
         try w.print("── effects ({d}) ──\n", .{r.effects.len});
         for (r.effects) |e| try w.print("{s} {s}: {s}\n", .{ e.op, e.path, e.outcome });
     }
@@ -154,8 +147,6 @@ pub fn printReport(r: *const script.Result, name: []const u8, preludes: []const 
     const b = how.budgets;
     if (how.verbose or r.stop != null or pastHalf(.{ .steps = r.steps, .reads = r.reads, .read_bytes = r.read_bytes, .output = r.output.len }, b))
         try w.print("── used: {d} of {d} steps, {d} of {d} reads, {d} of {d} read bytes, {d} of {d} output bytes\n", .{ r.steps, b.steps, r.reads, b.reads, r.read_bytes, b.read_bytes, r.output.len, b.output_bytes });
-    if (how.dry_run and r.effects.len > 0)
-        try w.print("── a dry run: {d} change{s} logged, none made; --write makes them\n", .{ r.effects.len, if (r.effects.len == 1) "" else "s" });
 }
 
 /// The source a line of `function` is in: the core's prelude, a later
@@ -209,20 +200,18 @@ fn refused(argv: []const []const u8) ![]const u8 {
     };
 }
 
-test "cli: a file and its values, a dry run rooted here unless told otherwise" {
+test "cli: a file and its values, rooted here unless told otherwise" {
     const c = try parsed(&.{ "count.shale", "dir=src", "n=3" }, null);
     try testing.expectEqualStrings(".", c.root);
     try testing.expectEqualStrings("count.shale", c.file.?);
-    try testing.expectEqual(process.Mode.dry_run, c.mode);
     try testing.expectEqual(@as(usize, 2), c.args.len);
     try testing.expectEqualStrings("dir", c.args[0].name);
     try testing.expectEqualStrings("3", c.args[1].value);
 }
 
-test "cli: --root, SHALE_ROOT, --write, --budget, -e" {
-    const c = try parsed(&.{ "--write", "--budget", "steps=99", "--budget", "reads=7", "-e", "print(1)", "x=" }, "/data");
+test "cli: --root, SHALE_ROOT, --budget, -e" {
+    const c = try parsed(&.{ "--budget", "steps=99", "--budget", "reads=7", "-e", "print(1)", "x=" }, "/data");
     try testing.expectEqualStrings("/data", c.root);
-    try testing.expectEqual(process.Mode.atomic, c.mode);
     try testing.expectEqual(@as(u64, 99), c.budgets.steps);
     try testing.expectEqual(@as(u64, 7), c.budgets.reads);
     try testing.expectEqualStrings("print(1)", c.source.?);
@@ -233,6 +222,8 @@ test "cli: --root, SHALE_ROOT, --write, --budget, -e" {
 
 test "cli: what it refuses, said" {
     try testing.expectEqualStrings("--wrte is not an option", try refused(&.{ "--wrte", "a.shale" }));
+    // Every run writes, so there is no `--write`.
+    try testing.expectEqualStrings("--write is not an option", try refused(&.{ "--write", "a.shale" }));
     try testing.expectEqualStrings("--budget stepz=3: no budget is called stepz", try refused(&.{ "--budget", "stepz=3", "a.shale" }));
     try testing.expectEqualStrings("--budget steps=x: x is not a number", try refused(&.{ "--budget", "steps=x", "a.shale" }));
     try testing.expectEqualStrings("--budget steps=0: a budget is at least 1", try refused(&.{ "--budget", "steps=0", "a.shale" }));
@@ -249,7 +240,7 @@ test "cli: no FILE and no -e: the script is stdin's, its values still read" {
     const c = try parsed(&.{}, null);
     try testing.expect(c.from_stdin);
     try testing.expect(c.file == null and c.source == null);
-    const v = try parsed(&.{ "--write", "n=3" }, null);
+    const v = try parsed(&.{ "--verbose", "n=3" }, null);
     try testing.expect(v.from_stdin);
     try testing.expectEqualStrings("3", v.args[0].value);
     try testing.expect(!(try parsed(&.{"a.shale"}, null)).from_stdin);

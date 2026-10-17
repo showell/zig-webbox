@@ -1,6 +1,6 @@
 //! **SHALE'S LINUX HOST** (metal-vmm QUEUE 233, chunk 1; the dogfood
-//! design's "The architecture", "Mounts", "Running a program", "The dry
-//! run"): what the CLI hands the core through its seam. `host(name, ...)`
+//! design's "The architecture", "Mounts", "Running a program"): what the
+//! CLI hands the core through its seam. `host(name, ...)`
 //! comes here (`call`): `run` a program under its options, `real` a Shale
 //! path's OS path. Paths come here first (`resolve`): a path whose first
 //! part has a `:` is a mount's (`runs:x/test.log`).
@@ -444,7 +444,6 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     try run.charge(pos, argv.len);
 
     // **A DRY RUN RUNS NO PROGRAM**, and attempt cannot catch it.
-    if (run.dry_run) return run.budgetStop(pos, .runs);
     if (run.host_runs >= runs_most) {
         run.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = .runs, .function = run.function, .trail = run.calls.items, .message = std.fmt.allocPrint(a, "{d} programs a run, the most: run the rest in another", .{runs_most}) catch "too many programs in one run" };
         return error.Stop;
@@ -683,12 +682,10 @@ test "host: what run refuses without a want, by name and by an untracked path; a
     try testing.expect(std.mem.indexOf(u8, t.host.records.items[t.host.records.items.len - 1].line, "(want: test: the fixture)") != null);
 }
 
-test "host: a dry run runs no program and attempt cannot catch it; a timeout is a result" {
+test "host: a timeout is a result" {
     var t: T = undefined;
     try t.init();
     defer t.deinit();
-    try t.expectStop("host(\"run\", {\"shale-fixture\", \"lines\", \"1\"}, {timeout_ms = 1000, tail = 1})", .dry_run, .budget, "a dry run runs no program; --write runs it");
-    try t.expectStop("function f() return host(\"run\", {\"shale-fixture\"}, {timeout_ms = 10, tail = 1}) end local r = attempt(f) print(\"caught\")", .dry_run, .budget, "dry run");
     try t.expectOutput(
         \\local r = host("run", {"shale-fixture", "sleep", "20000"}, {timeout_ms = 200, tail = 1})
         \\print(r.ended, has_key(r, "code"), r.ms < 5000)

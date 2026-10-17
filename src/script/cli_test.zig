@@ -43,7 +43,7 @@ test "cli: terse: a run that finished well inside says nothing; a stop, where, t
     try testing.expect(std.mem.indexOf(u8, stop, "\n── used: ") != null);
 }
 
-test "cli: a dry run's changes are listed, verbose or not" {
+test "cli: a run's changes are listed on --verbose, and only then" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -51,10 +51,14 @@ test "cli: a dry run's changes are listed, verbose or not" {
     const root = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer testing.allocator.free(root);
     var out: [1024]u8 = undefined;
-    var r = script.runWith(threaded.io(), testing.allocator, root, "replace(\"a.txt\", \"x\")", .{}, 0, &out, .{ .mode = .dry_run });
+    var r = script.runWith(threaded.io(), testing.allocator, root, "replace(\"a.txt\", \"x\")", .{}, 0, &out, .{});
     defer r.deinit();
-    var w: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer w.deinit();
-    try printReport(&r, "a.shale", &.{}, .{ .dry_run = true }, &w.writer);
-    try testing.expectEqualStrings("── effects (1) ──\nreplace a.txt: dry run\n── a dry run: 1 change logged, none made; --write makes them\n", w.written());
+    var quiet: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer quiet.deinit();
+    try printReport(&r, "a.shale", &.{}, .{}, &quiet.writer);
+    try testing.expectEqualStrings("", quiet.written());
+    var loud: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer loud.deinit();
+    try printReport(&r, "a.shale", &.{}, .{ .verbose = true }, &loud.writer);
+    try testing.expect(std.mem.startsWith(u8, loud.written(), "── effects (1) ──\nreplace a.txt: ok\n"));
 }

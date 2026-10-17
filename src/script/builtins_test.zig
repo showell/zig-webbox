@@ -800,7 +800,6 @@ test "builtins: walk's stats count as reads, a call considers at most call_entri
         switch (mode) {
             .background => try testing.expectEqualStrings("chat/a.md\nchat/deep\n", p.output()),
             .atomic => try testing.expectEqual(script.diag.Class.store, p.status().stop.?.class),
-            .dry_run => unreachable,
         }
     }
 }
@@ -940,12 +939,14 @@ test "builtins: an edit's diff in full, or one line a change when the run says `
     // Each within its line: twenty hunks.
     for (1..21) |i| try src.print(testing.allocator, "push(es, {{old = \"line {d:0>2}\", new = \"LINE {d:0>2}\"}})\n", .{ i, i });
     try src.appendSlice(testing.allocator, "print(edit(\"n.txt\", es))\n");
-    var full = script.runWith(f.threaded.io(), testing.allocator, f.root, src.items, .{}, 0, &out_buf, .{ .mode = .dry_run });
+    var full = script.runWith(f.threaded.io(), testing.allocator, f.root, src.items, .{}, 0, &out_buf, .{});
     defer full.deinit();
     try testing.expect(full.stop == null);
     const full_bytes = full.output.len;
     try testing.expect(std.mem.startsWith(u8, full.output, "--- a/n.txt\n+++ b/n.txt\n@@ -1,1 +1,1 @@\n-line 01\n+LINE 01\n"));
-    var short = script.runWith(f.threaded.io(), testing.allocator, f.root, src.items, .{}, 0, &out_buf, .{ .mode = .dry_run, .diffs = .summary });
+    // The file as it was: the run before changed it.
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/n.txt", .data = body.items });
+    var short = script.runWith(f.threaded.io(), testing.allocator, f.root, src.items, .{}, 0, &out_buf, .{ .diffs = .summary });
     defer short.deinit();
     try testing.expect(short.stop == null);
     try testing.expectEqualStrings("edit n.txt: 20 hunks, -20 +20 lines\n20\n", short.output);
@@ -954,7 +955,8 @@ test "builtins: an edit's diff in full, or one line a change when the run says `
     // the writes' charge goes.
     try testing.expect(short.steps < full.steps);
     // One hunk, one line.
-    var one = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\nline 04\\n\", \"x\\n\")", .{}, 0, &out_buf, .{ .mode = .dry_run, .diffs = .summary });
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/n.txt", .data = body.items });
+    var one = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\nline 04\\n\", \"x\\n\")", .{}, 0, &out_buf, .{ .diffs = .summary });
     defer one.deinit();
     try testing.expectEqualStrings("edit n.txt: 1 hunk, -2 +1 lines\n", one.output);
 }
@@ -966,13 +968,13 @@ test "builtins: a diff's hunk ends at the line an edit's text ends, when old and
     try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/n.txt", .data = "line 01\nline 02\nline 03\nline 04\nline 05\nline 06\n" });
     // Two whole-line edits, the second to the file's end: no untouched line
     // and no empty one in either hunk.
-    var r = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", {{old = \"line 02\\n\", new = \"X\\n\"}, {old = \"line 05\\nline 06\\n\", new = \"Y\\nZ\\n\"}})", .{}, 0, &out_buf, .{ .mode = .dry_run });
+    var r = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", {{old = \"line 02\\n\", new = \"X\\n\"}, {old = \"line 05\\nline 06\\n\", new = \"Y\\nZ\\n\"}})", .{}, 0, &out_buf, .{});
     defer r.deinit();
     try testing.expect(r.stop == null);
     try testing.expectEqualStrings("--- a/n.txt\n+++ b/n.txt\n@@ -2,1 +2,1 @@\n-line 02\n+X\n@@ -5,2 +5,2 @@\n-line 05\n-line 06\n+Y\n+Z\n", r.output);
     // A line joined to the next (its new text ends no line): the next line
     // is in the hunk, since it changed.
-    var j = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\n\", \"x\")", .{}, 0, &out_buf, .{ .mode = .dry_run });
+    var j = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\n\", \"x\")", .{}, 0, &out_buf, .{});
     defer j.deinit();
     try testing.expectEqualStrings("--- a/n.txt\n+++ b/n.txt\n@@ -3,2 +3,1 @@\n-line 03\n-line 04\n+xline 04\n", j.output);
 }

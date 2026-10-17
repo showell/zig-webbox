@@ -2,8 +2,7 @@
 //! script needs to work on a code checkout, held through the gate like
 //! every other run: its values by name (`arg`), globs (`match_path`, the
 //! prelude's `glob`), lines that hold a literal (`grep`), and edits that
-//! show their diff, made only when the run may change the store (a dry
-//! run logs them).
+//! show their diff, made only when the run may change the store.
 
 const std = @import("std");
 const script = @import("script.zig");
@@ -237,40 +236,15 @@ test "agent: a list of edits that fails anywhere writes nothing and prints no di
     // its list is read, a wrong one included.
     try t.expectStop("local l = {} for i = 1, 65 do push(l, {old = \"const x\", new = \"const x\"}) end edit(\"src/tcp.zig\", l)", .{}, .argument, "at most 64 edits");
     try t.expectStop("edit(\"src/tcp.zig\", {\"not an edit\"})", .{ .mode = .background }, .argument, "only reads");
-    // A dry run: the diff, one effect, the file as it was.
-    var d = t.run("edit(\"src/tcp.zig\", {{old = \"const x\", new = \"const y\"}, {old = \"fn send\", new = \"fn go\"}})", .{ .mode = .dry_run });
+    // Both edits, one effect, one write.
+    var d = t.run("edit(\"src/tcp.zig\", {{old = \"const x\", new = \"const y\"}, {old = \"fn send\", new = \"fn go\"}})", .{});
     defer d.deinit();
     try testing.expectEqual(@as(?script.Stop, null), d.stop);
     try testing.expectEqual(@as(usize, 1), d.effects.len);
-    try testing.expectEqualStrings("dry run", d.effects[0].outcome);
-    const kept = try t.file("data/src/tcp.zig");
-    defer testing.allocator.free(kept);
-    try testing.expectEqualStrings(before, kept);
-}
-
-test "agent: a dry run shows the diff and logs every change, and changes nothing; what a real run would refuse it refuses too" {
-    var t: Tree = undefined;
-    try t.init();
-    defer t.deinit();
-    var r = t.run("edit(\"src/tcp.zig\", \"const x = 1;\", \"const x = 2;\") replace(\"new.txt\", \"hi\") remove(\"README.md\") mkdir(\"made\")", .{ .mode = .dry_run });
-    defer r.deinit();
-    try testing.expectEqual(@as(?script.Stop, null), r.stop);
-    try testing.expect(std.mem.startsWith(u8, r.output, "--- a/src/tcp.zig\n"));
-    try testing.expectEqual(@as(usize, 4), r.effects.len);
-    for (r.effects, [_][]const u8{ "edit", "replace", "remove", "mkdir" }) |e, op| {
-        try testing.expectEqualStrings(op, e.op);
-        try testing.expectEqualStrings("dry run", e.outcome);
-    }
-    const kept = try t.file("data/src/tcp.zig");
-    defer testing.allocator.free(kept);
-    try testing.expect(std.mem.startsWith(u8, kept, "const x = 1;"));
-    const readme = try t.file("data/README.md");
-    defer testing.allocator.free(readme);
-    try testing.expectEqualStrings("top\n", readme);
-    try testing.expectError(error.FileNotFound, t.tmp.dir.access(t.threaded.io(), "data/new.txt", .{}));
-    try t.expectStop("remove(\"none.txt\")", .{ .mode = .dry_run }, .store, "not found");
-    // A background run refuses an edit, as any change.
-    try t.expectStop("edit(\"src/tcp.zig\", \"const\", \"var\")", .{ .mode = .background }, .argument, "only reads");
+    try testing.expectEqualStrings("ok", d.effects[0].outcome);
+    const made = try t.file("data/src/tcp.zig");
+    defer testing.allocator.free(made);
+    try testing.expect(std.mem.indexOf(u8, made, "const y") != null and std.mem.indexOf(u8, made, "fn go") != null);
 }
 
 // ── docs/SHALE-AGENTS.md: every block runs ──────────────────────────────
@@ -296,7 +270,7 @@ fn checkout(t: *Tree) !void {
     try d.writeFile(io, .{ .sub_path = "data/src/big_test.zig", .data = big.items });
 }
 
-test "docs/SHALE-AGENTS.md: every shale block runs on the checkout, as a dry run, and prints what the doc says it prints" {
+test "docs/SHALE-AGENTS.md: every shale block runs on a fresh checkout and prints what the doc says it prints" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const doc = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), "docs/SHALE-AGENTS.md", testing.allocator, .limited(1 << 20));
@@ -311,7 +285,7 @@ test "docs/SHALE-AGENTS.md: every shale block runs on the checkout, as a dry run
         try t.init();
         defer t.deinit();
         try checkout(&t);
-        var r = t.run(sn.source, .{ .mode = .dry_run });
+        var r = t.run(sn.source, .{});
         defer r.deinit();
         if (r.stop) |s| {
             std.debug.print("docs/SHALE-AGENTS.md:{d}: stopped {d}:{d} {s}: {s}\n", .{ sn.line, s.line, s.column, @tagName(s.class), s.message });
@@ -323,10 +297,6 @@ test "docs/SHALE-AGENTS.md: every shale block runs on the checkout, as a dry run
             std.debug.print("docs/SHALE-AGENTS.md:{d}: prints\n{s}-- not --\n{s}", .{ sn.line, got, sn.prints orelse "(nothing said)\n" });
             wrong += 1;
         }
-        // A dry run: the checkout is as it was.
-        const tcp = try t.file("data/src/tcp.zig");
-        defer testing.allocator.free(tcp);
-        try testing.expect(std.mem.indexOf(u8, tcp, "pastDeadline") != null);
     }
     try testing.expectEqual(@as(usize, 0), wrong);
     try testing.expect(all.len >= 5);
@@ -341,7 +311,7 @@ test "agent: a result says what the run took of its store budgets, as the Linux 
     try testing.expectEqual(@as(u64, 3), r.reads);
     try testing.expectEqual(@as(u64, 4), r.read_bytes);
     try testing.expectEqual(@as(u64, 0), r.changes);
-    var w = t.run("replace(\"x.txt\", \"hi\") mkdir(\"d\")", .{ .mode = .dry_run });
+    var w = t.run("replace(\"x.txt\", \"hi\") mkdir(\"d\")", .{});
     defer w.deinit();
     try testing.expectEqual(@as(u64, 2), w.changes);
 }

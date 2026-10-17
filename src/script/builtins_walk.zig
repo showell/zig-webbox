@@ -30,16 +30,14 @@ pub const specs = [_]bi.Spec{
 /// What a folder holds, its names sorted, charged as `ls` is: an entry a
 /// step and the sort's bound. The read is the caller's to count.
 pub fn sortedEntries(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error![]store.Entry {
-    try hub.viewListCheck(run, pos, b, full, rel);
-    const entries = store.list(run.io, run.alloc, full) catch |e| return storeFailed(run, pos, b, rel, e); // the view, checked
+    const entries = store.list(run.io, run.alloc, full) catch |e| return storeFailed(run, pos, b, rel, e);
     return sortEntries(run, pos, entries);
 }
 
 /// `sortedEntries`, or null for a folder gone in a background run, which
 /// reads while others write.
 fn sortedEntriesOrGone(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error!?[]store.Entry {
-    try hub.viewListCheck(run, pos, b, full, rel);
-    const entries = store.list(run.io, run.alloc, full) catch |e| { // the view, checked
+    const entries = store.list(run.io, run.alloc, full) catch |e| {
         if (run.read_only and e == error.FileNotFound) return null;
         return storeFailed(run, pos, b, rel, e);
     };
@@ -179,7 +177,7 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         }
     }
     try countRead(run, pos);
-    const st = (hub.viewStatOrNull(run, p.full) catch |e| return storeFailed(run, pos, .walk, p.rel, e)) orelse return storeFailed(run, pos, .walk, p.rel, error.FileNotFound);
+    const st = (store.statOrNull(run.io, a, p.full) catch |e| return storeFailed(run, pos, .walk, p.rel, e)) orelse return storeFailed(run, pos, .walk, p.rel, error.FileNotFound);
     if (st.kind != .directory) return storeFailed(run, pos, .walk, p.rel, error.NotDir);
     var levels: std.ArrayList(Level) = .empty;
     levels.append(a, .{ .rel = p.rel, .entries = try sortedEntries(run, pos, .walk, p.full, p.rel), .depth = 1 }) catch return run.oom(pos);
@@ -232,7 +230,7 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             const es: ?store.Stat = if (en.kind == .other) null else stat: {
                 try countRead(run, pos);
                 if (between_list_and_stat_for_test) |hook| hook();
-                break :stat hub.viewStat(run, full.?) catch |e| {
+                break :stat store.stat(run.io, a, full.?) catch |e| {
                     // **A BACKGROUND RUN READS WHILE OTHERS WRITE**: an
                     // entry gone since its folder was listed is passed by.
                     if (run.read_only and e == error.FileNotFound) continue;

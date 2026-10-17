@@ -47,8 +47,8 @@ pub const Budget = enum {
     /// The machine's own memory: the tree, the code, the frames, the
     /// operands (the box's review of 211).
     machine,
-    /// Programs a host runs (metal-vmm QUEUE 233): none in a dry run, and
-    /// the host's own cap on a run's (the Linux CLI's, 64). Not a field of
+    /// Programs a host runs (metal-vmm QUEUE 233): the host's own cap on a
+    /// run's (the Linux CLI's, 64). Not a field of
     /// the budgets: the host counts and says.
     runs,
 };

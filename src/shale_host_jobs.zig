@@ -26,8 +26,7 @@ pub fn call(h: *Host, run: *Run, pos: ast.Pos, name: []const u8, args: []const V
     }
     if (std.mem.eql(u8, name, "job_stop")) {
         if (args.len != 1) return run.fail(pos, .argument, "`job_stop` takes a job, given {d} arguments", .{args.len});
-        if (run.dry_run) return run.budgetStop(pos, .runs);
-        const j = try find(h, run, pos, args[0], name);
+            const j = try find(h, run, pos, args[0], name);
         try run.charge(pos, 1);
         const was = jobs.stop(j.record, 2000);
         if (was) h.record("job {s} stopped", .{j.shown});
@@ -40,7 +39,7 @@ pub fn call(h: *Host, run: *Run, pos: ast.Pos, name: []const u8, args: []const V
 /// **A JOB STARTED**: `argv` under the reaper, `log` its output (required),
 /// `cwd`, `env` added to the inherited environment, `want` as `run`'s. No
 /// `secrets`: a detached job's log has nobody to scrub it. Counted against
-/// the run's cap on programs; never in a dry run.
+/// the run's cap on programs.
 fn start(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (args.len != 2) return run.fail(pos, .argument, "`job_start` takes argv and its options, `job_start({{\"zig\", \"build\"}}, {{log = \"runs:build.log\"}})`, given {d} arguments", .{args.len});
     const a = run.alloc;
@@ -72,7 +71,6 @@ fn start(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const log_shown = try hl.strOpt(run, pos, "log", log_v);
     try run.charge(pos, argv.len);
 
-    if (run.dry_run) return run.budgetStop(pos, .runs);
     if (run.host_runs >= hl.runs_most) {
         run.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = .runs, .function = run.function, .trail = run.calls.items, .message = std.fmt.allocPrint(a, "{d} programs a run, the most: run the rest in another", .{hl.runs_most}) catch "too many programs in one run" };
         return error.Stop;

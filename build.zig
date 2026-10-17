@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(runner);
     const run_script = b.addRunArtifact(runner);
     if (b.args) |a| run_script.addArgs(a);
-    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--write] [--verbose] [--budget NAME=N]... [<file.shale> | -e SOURCE] [name=value ...]").dependOn(&run_script.step);
+    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--verbose] [--budget NAME=N]... [<file.shale> | -e SOURCE] [name=value ...]").dependOn(&run_script.step);
 
     // **SHALE'S HOT PATHS, TIMED** (src/script_bench.zig): no tier runs it.
     const script_bench = b.addExecutable(.{ .name = "script-bench", .root_module = b.createModule(.{
@@ -189,7 +189,7 @@ pub fn build(b: *std.Build) void {
         const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
             "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; " ++
                 "cd '{s}' 2>/dev/null || {{ echo 'consumers: no metal-vmm beside this checkout ({s})'; exit 1; }}; " ++
-                "echo '==> metal-vmm: shale --write .shale/queue_test.shale'; \"$bin\" --write --budget output_bytes=8388608 .shale/queue_test.shale > /dev/null",
+                "echo '==> metal-vmm: shale .shale/queue_test.shale'; \"$bin\" --budget output_bytes=8388608 .shale/queue_test.shale > /dev/null",
             .{ dir, dir },
         ) });
         run.addFileArg(runner.getEmittedBin());

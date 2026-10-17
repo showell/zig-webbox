@@ -30,17 +30,17 @@ fn refuses(cmd: []const u8, says: []const u8) !void {
 
 test "gate: the launch, every form the design names" {
     try passes("shale count.shale");
-    try passes("shale --write --verbose rename.shale from=old to=new");
-    try passes("shale --budget steps=99 --write x.shale");
+    try passes("shale --verbose rename.shale from=old to=new");
+    try passes("shale --budget steps=99 --verbose x.shale");
     try passes("/home/x/zig-webbox/zig-out/bin/shale a.shale");
-    try passes("cd ../dog-park && shale --write a.shale");
+    try passes("cd ../dog-park && shale a.shale");
     try passes("shale <<'SHALE'\nprint(1)\nSHALE");
-    try passes("cd /home/x && shale --write <<'END_IT'\nprint(\"a $b `c` ; | & < > ( ) * ?\")\nEND_IT  ");
-    try passes("shale --write n=3 <<'SHALE'\nprint(arg(\"n\", 0))\nSHALE\n");
+    try passes("cd /home/x && shale <<'END_IT'\nprint(\"a $b `c` ; | & < > ( ) * ?\")\nEND_IT  ");
+    try passes("shale n=3 <<'SHALE'\nprint(arg(\"n\", 0))\nSHALE\n");
 }
 
 test "gate: what it refuses, naming both forms" {
-    const both = "`shale [--write] [--verbose] [FILE] [NAME=VALUE]... <<'TAG'`";
+    const both = "`shale [--verbose] [FILE] [NAME=VALUE]... <<'TAG'`";
     try refuses("ls -la", both);
     try refuses("ls -la", "`# want: <tag>: <text>`");
     try refuses("shale -e 'print(1)'", both);
@@ -54,6 +54,8 @@ test "gate: what it refuses, naming both forms" {
     try refuses("shale --budget", both);
     try refuses("shale --budget steps", both);
     try refuses("shale --root here a.shale", both);
+    // No dry run, so no `--write` (Steve, 2026-10-17).
+    try refuses("shale --write a.shale", both);
     try refuses("cd a b && shale x.shale", both);
     try refuses("cd $HOME && shale x.shale", both);
     try refuses("shale a.shale\nrm x", both);
@@ -61,7 +63,7 @@ test "gate: what it refuses, naming both forms" {
 }
 
 test "gate: a heredoc's failure modes: unquoted, a lower-case tag, no closer, a closer met twice, text after it" {
-    const both = "`shale [--write] [--verbose] [FILE] [NAME=VALUE]... <<'TAG'`";
+    const both = "`shale [--verbose] [FILE] [NAME=VALUE]... <<'TAG'`";
     try refuses("shale <<SHALE\nprint(1)\nSHALE", both);
     try refuses("shale <<\"SHALE\"\nprint(1)\nSHALE", both);
     try refuses("shale <<'shale'\nprint(1)\nshale", both);
@@ -163,7 +165,7 @@ test "gate: the wrapper: a launch passes, a refusal refuses, an escape is logged
     const home = try std.fmt.allocPrint(testing.allocator, "{s}/.zig-cache/tmp/{s}", .{ here, &tmp.sub_path });
     defer testing.allocator.free(home);
     const bin = @import("shale_gate_options").shale_gate;
-    const launch = try wrapped(io, home, bin, "{\"session_id\":\"s\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"shale --write a.shale\"}}");
+    const launch = try wrapped(io, home, bin, "{\"session_id\":\"s\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"shale a.shale\"}}");
     defer testing.allocator.free(launch.err);
     try testing.expectEqual(@as(u8, 0), launch.code);
     const no = try wrapped(io, home, bin, "{\"session_id\":\"s\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls -la\"}}");
