@@ -88,6 +88,16 @@ pub fn build(b: *std.Build) void {
     // **ONLY THE TESTS NAMED** (-Dtest-filter=<text>): a change's own tests
     // in seconds, before the whole suite.
     const test_filter = b.option([]const u8, "test-filter", "run only the tests whose names contain this");
+    // **THE FIXTURE PROGRAM** `run`'s tests run (src/shale_fixture.zig,
+    // metal-vmm QUEUE 233): never /bin/sh. Its path reaches the tests as
+    // `shale_test_options.fixture`.
+    const fixture = b.addExecutable(.{ .name = "shale-fixture", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/shale_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const shale_options = b.addOptions();
+    shale_options.addOptionPath("fixture", fixture.getEmittedBin());
     for ([_][]const u8{ "src/store.zig", "src/counter.zig", "src/bus.zig", "src/mem_meter.zig", "src/host_facts.zig", "src/bind.zig", "src/webbox.zig", "src/webbox_linux.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
@@ -100,6 +110,7 @@ pub fn build(b: *std.Build) void {
         unit.root_module.addImport("webbox_linux", webbox_linux);
         unit.root_module.addImport("host_io", host_io);
         unit.root_module.addImport("script_test_options", script_options.createModule());
+        unit.root_module.addImport("shale_test_options", shale_options.createModule());
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
     test_step.dependOn(&b.addRunArtifact(signer_test).step);
