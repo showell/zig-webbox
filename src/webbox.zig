@@ -12,6 +12,9 @@
 /// (`start`, then `route` per request) around the application's own setup
 /// and route table; `Host` is what a host supplies.
 pub const site = @import("site.zig");
+/// When an application next needs to run, and the clock it is asked by
+/// (`Wake`, `Now`, `periodAfter`); `site` re-exports them.
+pub const wake = @import("wake.zig");
 /// When a request's body is read (before the turn or in it) and how long it
 /// may take: the one rule every host reads it by.
 pub const body = @import("body.zig");
@@ -87,6 +90,8 @@ test {
     _ = sse;
     _ = mem_meter;
     _ = host_facts;
+    _ = host_fetch;
+    _ = wake;
     _ = log_view;
     _ = admin_log;
     _ = traffic;
