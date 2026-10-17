@@ -54,6 +54,18 @@ fn ws(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
+/// Where a declaration ends for a move: its `;` or `}`, or the end of a
+/// `//` comment on its last line (`const b = 2; // why`), which is its own.
+/// A `///` there is the next declaration's doc comment, not this one's.
+fn endWithComment(src: []const u8, stop: usize) usize {
+    var i = stop;
+    while (i < src.len and (src[i] == ' ' or src[i] == '\t')) i += 1;
+    if (!std.mem.startsWith(u8, src[i..], "//")) return stop;
+    if (std.mem.startsWith(u8, src[i..], "///") and !std.mem.startsWith(u8, src[i..], "////")) return stop;
+    while (i < src.len and src[i] != '\n' and src[i] != '\r') i += 1;
+    return i;
+}
+
 fn refuse(a: std.mem.Allocator, comptime f: []const u8, args: anytype) error{OutOfMemory}!Outcome {
     return .{ .refused = try std.fmt.allocPrint(a, f, args) };
 }
@@ -100,10 +112,16 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
         if (mode == .doc_and_plain) if (d.comment_above) |c| {
             s = starts[c.first - 1];
         };
-        var e = d.stop;
+        const stop = endWithComment(from, d.stop);
+        var e = stop;
         while (e < from.len and ws(from[e])) e += 1;
-        try texts.append(a, from[s..d.stop]);
-        if (cuts.items.len > 0 and cuts.items[cuts.items.len - 1].e == s) cuts.items[cuts.items.len - 1].e = e else try cuts.append(a, .{ .s = s, .e = e });
+        try texts.append(a, from[s..stop]);
+        // A cut that starts at or before the last one's end joins it: the
+        // last one's whitespace ran up to an indented comment this one takes.
+        if (cuts.items.len > 0 and s <= cuts.items[cuts.items.len - 1].e) {
+            const last = &cuts.items[cuts.items.len - 1];
+            last.e = @max(last.e, e);
+        } else try cuts.append(a, .{ .s = s, .e = e });
     };
     // A cut to the file's end takes the whitespace before it too, and the
     // file keeps one newline (none, if nothing is left).
@@ -134,7 +152,7 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
         var n: usize = 0;
         for (td.decls) |d| if (d.name_form != .none and std.mem.eql(u8, d.name, name)) {
             n += 1;
-            at = d.stop;
+            at = endWithComment(to, d.stop);
         };
         if (n == 0) return refuse(a, "`after`: `{s}` is not a top-level declaration of `to`; nothing written", .{name});
         if (n > 1) return refuse(a, "`after`: `{s}` names {d} declarations of `to`; nothing written", .{ name, n });

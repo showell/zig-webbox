@@ -43,6 +43,17 @@ const essay =
     \\
 ;
 
+test "zig_rename and zig_move change the store: a background run refuses them, nothing written" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("a.zig", "const asks = 1;\npub const b = asks;\n");
+    try t.expectStop("zig_rename(\"a.zig\", \"asks\", \"wants\")", .background, .argument, "a background run only reads");
+    try t.expectStop("zig_move(\"a.zig\", \"b.zig\", {\"b\"})", .background, .argument, "a background run only reads");
+    try testing.expectEqualStrings("const asks = 1;\npub const b = asks;\n", try t.file("a.zig"));
+    try testing.expectError(error.FileNotFound, t.file("b.zig"));
+}
+
 test "zig_rename: identifiers only: not after `.`, not `@\"x\"`, not in strings, a test's name or comments; a longer name is another" {
     var t: T = undefined;
     try init(&t);
@@ -86,6 +97,8 @@ test "zig_rename: a qualified `to` in a declaration's place stops, naming the li
         .{ "fn g(o: ?u8) void {\n    if (o) |from| _ = from;\n}\n", "line 2" },
         .{ "fn g(o: []u8) void {\n    for (o) |*from| _ = from;\n}\n", "line 2" },
         .{ "fn g(o: []u8) void {\n    for (o, 0..) |x, from| _ = .{ x, from };\n}\n", "line 2" },
+        // A switch prong's capture.
+        .{ "fn g(u: union(enum) { a: u8 }) void {\n    switch (u) {\n        .a => |from| _ = from,\n    }\n}\n", "line 3" },
     };
     for (cases) |c| {
         try t.put("d.zig", c[0]);
@@ -97,10 +110,12 @@ test "zig_rename: a qualified `to` in a declaration's place stops, naming the li
     try t.put("f.zig", "fn from() u8 {\n    return 1;\n}\nconst S = struct {\n    from: u8,\n    b: u8 = from(),\n};\nconst E = enum { a, from };\nconst R = error{ a, from };\nconst U = union(enum) { from, b: u8 };\n");
     try testing.expectEqualStrings("2\t0", try lastLine(&t, "local r = zig_rename(\"f.zig\", \"from\", \"go\") print(r.renamed, r.left_in_comments)", .atomic));
     try testing.expectEqualStrings("fn go() u8 {\n    return 1;\n}\nconst S = struct {\n    from: u8,\n    b: u8 = go(),\n};\nconst E = enum { a, from };\nconst R = error{ a, from };\nconst U = union(enum) { from, b: u8 };\n", try t.file("f.zig"));
-    // A nested container's own declaration of that name is its member.
-    try t.put("n.zig", "const kept = 1;\nconst S = struct {\n    pub const kept = &outer;\n    const x = kept;\n};\nconst y = kept;\n");
-    try testing.expectEqualStrings("3\t0", try lastLine(&t, "local r = zig_rename(\"n.zig\", \"kept\", \"held\") print(r.renamed, r.left_in_comments)", .atomic));
-    try testing.expectEqualStrings("const held = 1;\nconst S = struct {\n    pub const kept = &outer;\n    const x = held;\n};\nconst y = held;\n", try t.file("n.zig"));
+    // A nested container's own declaration of that name is its member,
+    // reaching the outer one qualified, as Zig requires (linux_host.zig's
+    // `pub const kept_open = &host_file.kept_open;`).
+    try t.put("n.zig", "const file = @This();\nconst kept = 1;\nconst S = struct {\n    pub const kept = &file.kept;\n};\nconst y = kept + S.kept.*;\n");
+    try testing.expectEqualStrings("2\t0", try lastLine(&t, "local r = zig_rename(\"n.zig\", \"kept\", \"held\") print(r.renamed, r.left_in_comments)", .atomic));
+    try testing.expectEqualStrings("const file = @This();\nconst held = 1;\nconst S = struct {\n    pub const kept = &file.kept;\n};\nconst y = held + S.kept.*;\n", try t.file("n.zig"));
     // A tuple struct's members are types: uses.
     try t.put("tp.zig", "const P = u8;\nconst Q = struct { P, P };\n");
     try testing.expectEqualStrings("3\t0", try lastLine(&t, "local r = zig_rename(\"tp.zig\", \"P\", \"Pt\") print(r.renamed, r.left_in_comments)", .atomic));

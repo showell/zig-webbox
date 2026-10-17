@@ -131,6 +131,49 @@ test "zig_move: doc_and_plain takes the comment above; after puts it after a dec
     try testing.expectEqualStrings("const q = 2;\n", try t.file("q.zig"));
 }
 
+fn moveFor(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, names: []const []const u8, mode: zm.CommentMode, after: ?[]const u8) !zm.Moved {
+    var wants: std.ArrayList(zm.Want) = .empty;
+    for (names) |n| try wants.append(a, .{ .name = n });
+    return switch (try zm.move(a, from, to, wants.items, mode, after)) {
+        .done => |d| d,
+        .refused => |why| {
+            std.debug.print("refused: {s}\n", .{why});
+            return error.TestUnexpectedResult;
+        },
+    };
+}
+
+test "zig_move: an indented comment between two moved declarations joins their cuts (it sliced backwards)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try moveFor(a, "const a = 1;\n  // b\nconst b = 2;\n", "", &.{ "a", "b" }, .doc_and_plain, null);
+    try testing.expectEqualStrings("", m.from_now);
+    try testing.expectEqualStrings("const a = 1;\n\n  // b\nconst b = 2;\n", m.to_now);
+}
+
+test "zig_move: a comment on a declaration's last line goes with it, and `after` puts a block after the comment" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try moveFor(a, "const a = 1;\nconst b = 2; // why\nconst c = 3;\n", "", &.{"b"}, .doc, null);
+    try testing.expectEqualStrings("const a = 1;\nconst c = 3;\n", m.from_now);
+    try testing.expectEqualStrings("const b = 2; // why\n", m.to_now);
+    const n = try moveFor(a, "const b = 2;\n", "const x = 1; // x's\n\nconst y = 2;\n", &.{"b"}, .doc, "x");
+    try testing.expectEqualStrings("const x = 1; // x's\n\nconst b = 2;\n\nconst y = 2;\n", n.to_now);
+}
+
+test "zig_move: with the change budget room for one of its two writes, it writes neither" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("from.zig", "const a = 1;\n\nconst b = 2;\n");
+    // 999 of the 1,000 changes spent: one write left, and a move is two.
+    try t.expectStop("for i = 1, 999 do replace(\"spent.txt\", \"x\") end zig_move(\"from.zig\", \"to.zig\", {\"b\"})", .atomic, .budget, "change budget");
+    try testing.expectEqualStrings("const a = 1;\n\nconst b = 2;\n", try t.file("from.zig"));
+    try testing.expectError(error.FileNotFound, t.file("to.zig"));
+}
+
 test "zig_move: what stops it, with nothing written: a name not there, a name that is two, a name twice, an unnamed one, an `after` not there" {
     var t: T = undefined;
     try init(&t);

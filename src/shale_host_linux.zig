@@ -447,7 +447,6 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     const o = try readOpts(run, pos, args[1]);
     try run.charge(pos, argv.len);
 
-    // **A DRY RUN RUNS NO PROGRAM**, and attempt cannot catch it.
     if (run.host_runs >= runs_most) {
         run.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = .runs, .function = run.function, .trail = run.calls.items, .message = std.fmt.allocPrint(a, "{d} programs a run, the most: run the rest in another", .{runs_most}) catch "too many programs in one run" };
         return error.Stop;
@@ -508,14 +507,14 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     if (o.stdin != null and stdin == null) return run.fail(pos, .argument, "`run`'s stdin is a kept result: its `out` is not the program's output (lines left out, lines cut); run it with `whole = N` to pipe it", .{});
 
     // **THE STREAM'S OWN MEMORY**: what grows as the output arrives (the
-    // keep, `whole`'s buffer, the scrub's carry, the spawn's reads) grows
-    // by how the pipe's reads fall, which is the scheduler's. In the run's
-    // arena that made the arena's size the scheduler's too, and the gate,
-    // which holds the engines' arenas equal, failed a 141 KB `git show` at
-    // random. So it is here, and only the results go to the arena.
-    var stream = std.heap.ArenaAllocator.init(h.alloc);
-    defer stream.deinit();
-    const sa = stream.allocator();
+    // keep, `whole`'s buffer, the scrub's carry) grows by how the pipe's
+    // reads fall, which is the scheduler's. In the run's arena that made
+    // the arena's size the scheduler's too, and the gate, which holds the
+    // engines' arenas equal, failed a 141 KB `git show` at random. So it
+    // is the host's, live and capped (`Capped`), and only the results go
+    // to the arena.
+    var capped: Capped = .{ .backing = h.alloc, .most = run.budgets.arena_bytes };
+    const sa = capped.allocator();
     // The output's ends: the log, the keep or `whole`.
     var out: Out = .{ .alloc = sa };
     var log_file: ?std.Io.File = null;
@@ -539,6 +538,7 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
         f.close(run.io);
     };
     var whole_buf: std.ArrayList(u8) = .empty;
+    defer whole_buf.deinit(sa);
     var compiled: [2]?regex.Program = .{ null, null };
     var scratches: [2]?regex.Scratch = .{ null, null };
     var keeper: keep.Keep = undefined;
@@ -560,18 +560,20 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
         keeper = keep.Keep.init(sa, ko) catch return run.oom(pos);
         out.keeper = &keeper;
     }
+    defer if (out.keeper) |k| k.deinit();
     var scrub: Scrub = .{ .alloc = sa, .secrets = secrets.items, .next = &out };
+    defer scrub.carry.deinit(sa);
     var sink: Sink = .{ .host = h, .scrub = &scrub };
 
     run.host_runs += 1;
-    const outcome = h.spawn_fn(h.spawn_ctx, sa, .{ .argv = argv, .cwd = cwd, .env = env.items, .stdin = stdin, .timeout_ms = o.timeout_ms.? }, &sink) catch |e| switch (e) {
-        error.OutOfMemory => return run.oom(pos),
+    const outcome = h.spawn_fn(h.spawn_ctx, h.alloc, .{ .argv = argv, .cwd = cwd, .env = env.items, .stdin = stdin, .timeout_ms = o.timeout_ms.? }, &sink) catch |e| switch (e) {
+        error.OutOfMemory => return if (capped.hit) streamOver(run, pos, capped.most) else run.oom(pos),
         error.NotFound => return run.fail(pos, .host, "`run`: `{s}` is not found{s}", .{ argv[0], if (std.mem.indexOfScalar(u8, argv[0], '/') == null) " along PATH" else "" }),
         error.NotRunnable => return run.fail(pos, .host, "`run`: `{s}` is there but cannot be run (its permissions, or not a program)", .{argv[0]}),
         error.NoCwd => return run.fail(pos, .argument, "`run`: its cwd is not a folder that can be entered", .{}),
         error.Spawn => return run.fail(pos, .host, "`run`: the program could not be started (a pipe, a fork or a pidfd refused)", .{}),
     };
-    scrub.finish() catch return run.oom(pos);
+    scrub.finish() catch return if (capped.hit) streamOver(run, pos, capped.most) else run.oom(pos);
 
     // What the run spent: a step a 16 bytes read, as bulk work, in
     // read_bytes; and the filter's searches.
@@ -607,7 +609,8 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
         r.map.put(a, "whole", .{ .boolean = true }) catch return run.oom(pos);
         for ([_][]const u8{ "total_lines", "matched_lines", "kept_lines" }) |k| r.map.put(a, k, .{ .int = @intCast(lines) }) catch return run.oom(pos);
     } else {
-        const kept = keeper.finish() catch return run.oom(pos);
+        const kept = keeper.finish() catch return if (capped.hit) streamOver(run, pos, capped.most) else run.oom(pos);
+        defer sa.free(kept.out);
         try run.charge(pos, kept.work);
         r.map.put(a, "out", .{ .string = a.dupe(u8, kept.out) catch return run.oom(pos) }) catch return run.oom(pos);
         r.map.put(a, "total_lines", .{ .int = @intCast(kept.total) }) catch return run.oom(pos);
@@ -618,6 +621,65 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     // An interrupted shale stops here, after the program's group is gone.
     if (outcome.ended == .interrupted) return run.fail(pos, .host, "`run`: shale was told to stop (TERM or HUP) while `{s}` ran; it was ended", .{argv[0]});
     return .{ .table = r };
+}
+
+/// **WHAT A RUN'S STREAM HOLDS, LIVE AND CAPPED**: the host's allocator,
+/// every free given back, and at most `most` bytes live at once (the run's
+/// arena budget). A tail of 3 over a 10 GB log holds three lines; a keep
+/// that needs more than the budget stops the run (`streamOver`).
+const Capped = struct {
+    backing: std.mem.Allocator,
+    most: usize,
+    live: usize = 0,
+    /// Whether an allocation was refused for the cap, not by the backing.
+    hit: bool = false,
+
+    fn allocator(c: *Capped) std.mem.Allocator {
+        return .{ .ptr = c, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    fn fits(c: *Capped, more: usize) bool {
+        if (more <= c.most -| c.live) return true;
+        c.hit = true;
+        return false;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, al: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        if (!c.fits(len)) return null;
+        const p = c.backing.rawAlloc(len, al, ra) orelse return null;
+        c.live += len;
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        if (new_len > mem.len and !c.fits(new_len - mem.len)) return false;
+        if (!c.backing.rawResize(mem, al, new_len, ra)) return false;
+        c.live = c.live - mem.len + new_len;
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        if (new_len > mem.len and !c.fits(new_len - mem.len)) return null;
+        const p = c.backing.rawRemap(mem, al, new_len, ra) orelse return null;
+        c.live = c.live - mem.len + new_len;
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, mem: []u8, al: std.mem.Alignment, ra: usize) void {
+        const c: *Capped = @ptrCast(@alignCast(ctx));
+        c.backing.rawFree(mem, al, ra);
+        c.live -= mem.len;
+    }
+};
+
+fn streamOver(run: *Run, pos: ast.Pos, most: usize) Error {
+    run.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = .arena, .function = run.function, .trail = run.calls.items, .message = std.fmt.allocPrint(run.alloc, "`run`: what it holds of the output is past the arena budget ({d} bytes live): a smaller `before`, `head`, `tail` or `whole`", .{most}) catch "`run`: what it holds of the output is past the arena budget" };
+    return error.Stop;
 }
 
 fn countLines(s: []const u8) usize {
@@ -684,6 +746,26 @@ test "host: what run keeps costs the run's arena the same however its output arr
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "host: what run holds of a stream is its live bytes, capped by the arena budget: lines it drops are given back, and a keep that needs more stops" {
+    var t: T = undefined;
+    try t.init();
+    defer t.deinit();
+    // 20,000 lines of about 1 KB: 20 MB through the keep, more than the
+    // 16 MiB arena budget. With 100 lines of context held, it finishes: the
+    // lines dropped were given back.
+    const long = "x" ** 1000;
+    var r = t.runOnce("local r = host(\"run\", {\"shale-fixture\", \"lines\", \"20000\", \"" ++ long ++ "\"}, {timeout_ms = 60000, re = \"^nothing\", before = 100, tail = 1, width = 2000}) print(r.total_lines, r.kept_lines)", .atomic);
+    defer r.deinit();
+    if (r.stop) |s| std.debug.print("stopped: {s}\n", .{s.message});
+    try testing.expectEqualStrings("20000\t0\n", r.output);
+    // With 18,000 held (about 18 MB live), the budget stops it, named.
+    var big = t.runOnce("host(\"run\", {\"shale-fixture\", \"lines\", \"20000\", \"" ++ long ++ "\"}, {timeout_ms = 60000, re = \"^nothing\", before = 18000, tail = 1, width = 2000})", .atomic);
+    defer big.deinit();
+    const s = big.stop orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(script.diag.Class.budget, s.class);
+    try testing.expect(std.mem.indexOf(u8, s.message, "past the arena budget") != null);
 }
 
 test "host: run's options are the script's to say; what it is given wrong stops, saying what to give" {

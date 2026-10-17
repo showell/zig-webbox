@@ -254,7 +254,7 @@ pub fn identifiers(a: std.mem.Allocator, ts: []const Tok) error{OutOfMemory}![]c
             .pipe => {
                 if (in_capture) {
                     in_capture = false;
-                } else if (prev != null and (prev.? == .r_paren or prev.? == .keyword_else or prev.? == .keyword_catch) and isCapture(ts[i + 1 ..])) {
+                } else if (prev != null and (prev.? == .r_paren or prev.? == .keyword_else or prev.? == .keyword_catch or prev.? == .equal_angle_bracket_right) and isCapture(ts[i + 1 ..])) {
                     in_capture = true;
                 }
                 next_brace = .block;
