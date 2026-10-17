@@ -34,6 +34,7 @@ const Kept = bus.Kept;
 const mem_meter = @import("mem_meter.zig");
 const store = @import("store.zig");
 const host_facts = @import("host_facts.zig");
+const host_fetch = @import("host_fetch.zig");
 const free_space = @import("free_space.zig");
 const client_address = @import("client_address.zig");
 
@@ -62,6 +63,9 @@ pub const Host = struct {
     logs: ?host_facts.LogsSource = null,
     /// The host's console, for an application's lines (host_facts.say).
     say: ?host_facts.Say = null,
+    /// The host's fetch, for an application's one GET at a time
+    /// (host_fetch.zig); null: none offered.
+    fetch: ?host_fetch.Fetcher = null,
 };
 
 /// `App` declares, each required:
@@ -106,6 +110,7 @@ pub fn Site(comptime App: type) type {
             if (host.log) |l| host_facts.provideLog(l);
             if (host.logs) |l| host_facts.provideLogs(l);
             if (host.say) |l| host_facts.provideSay(l);
+            if (host.fetch) |f| host_fetch.provide(f);
             free_space.reader = switch (host.free_space) {
                 .reader => |r| r,
                 .unknown => null,

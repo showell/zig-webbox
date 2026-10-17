@@ -50,6 +50,8 @@ pub const script_route = @import("script_route.zig");
 pub const shale_suite = @import("shale_suite.zig");
 /// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
+/// One GET from the application, through its host (host_fetch.zig).
+pub const host_fetch = @import("host_fetch.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
 pub const log_view = @import("log_view.zig");
 /// `GET /admin/log`: that log as a page, its header and its filters, behind
