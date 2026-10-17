@@ -71,9 +71,11 @@ pub const Builtin = enum {
     count,
     reverse,
     take,
+    last,
     // the host
     now,
     arg,
+    fail,
     budget,
     yield,
     print,

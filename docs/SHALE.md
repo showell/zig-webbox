@@ -261,9 +261,27 @@ print(parity(4, true), parity(3, true))
 | `nil` | |
 | booleans | `true`, `false` |
 | integers | 64-bit and checked: overflow stops the script. Literals are decimal. The smallest, `-9223372036854775808`, is written with its minus; its magnitude alone is too big |
-| strings | bytes, `"..."` or `'...'`. The escapes are `\n \t \r \0 \xHH \\ \" \'`. A string ends on its line |
+| strings | bytes, `"..."` or `'...'`. The escapes are `\n \t \r \0 \xHH \\ \" \'`. A string ends on its line; a long string does not |
 | lists | `{1, 2}`, indexed from 1 |
 | maps | `{a = 1, ["b c"] = 2}`, read as `m.a` or `m["a"]`; keys are strings, kept in the order first set |
+
+**Long strings, for text that holds quotes and lines** (metal-vmm QUEUE
+232): `[=[ ... ]=]`, `[==[ ... ]==]`, a level of one or more `=`, closed by
+`]`, the same number of `=`, `]`. **A level is required**: `[[` is refused,
+since code being edited is full of `]]`. The bytes are the source's, raw:
+no escapes, a CRLF kept as its two bytes; a newline right after the opener
+is dropped (a CRLF one whole), and a newline before the closer is part of
+the string. A syntax error right after a long string says where it closed
+and the level that would hold what closed it.
+
+```shale
+local old = [=[
+if (x[i]] == "a\n") {
+]=]
+print(#old, sub(old, 1, 9), contains(old, "\\n"))
+-- prints:
+-- 22<TAB>if (x[i]]<TAB>true
+```
 
 `{}` takes its kind, list or map, from its first entry; using it as the
 other kind after that is an error. **Tables are shared, not copied:**
@@ -375,6 +393,7 @@ was in. The classes are:
 | `argument` | a builtin or function given the wrong arguments |
 | `store` | a store call failed (it names the path) |
 | `budget` | a budget ran out (it names which) |
+| `fail` | the script's own: `fail(msg)`, its message as given (QUEUE 232) |
 
 **How a stop reads,** on the runner and in the route's reply:
 
@@ -434,6 +453,10 @@ It gives back a map:
   column, in_function}` maps, out to the top level: the `attempt`
   itself is one of them, the call of `f`, and the calls before it.
 
+**It catches a `fail`** as any other error: `fail(msg)` is how a function
+says it could not do what it was asked, and `attempt` gives `class =
+"fail"`, `error = msg`.
+
 Two things it does not do:
 - **It never catches a budget.** A budget is the run's, not the call's, so
   a run that runs out stops wherever it is.
@@ -450,7 +473,8 @@ Two things it does not do:
 
 - floats and `/`;
 - `^`, hex literals and the bitwise operators;
-- long strings and long comments;
+- a long string or a block comment without a level (`[[ ... ]]`,
+  `--[[ ... ]]`);
 - decimal escapes (`\65`), `\u{...}`, `\z` and the rest;
 - `:` method calls;
 - `...`;
@@ -497,7 +521,10 @@ binop     = "or" | "and" | "==" | "~=" | "<" | "<=" | ">" | ">=" | ".."
 unop      = "not" | "-" | "#" ;
 ```
 
-`--` starts a comment that runs to the end of its line.
+`--` starts a comment that runs to the end of its line; `--[=[ ... ]=]`,
+at any level of `=` as a long string, is a block comment (`--[=x` is a
+line comment). A `STRING` is
+`"..."`, `'...'` or a long string, `[=[ ... ]=]` at any level of `=`.
 
 ## The builtins
 
@@ -545,7 +572,7 @@ the errors column says the rest.
 | `read_lines(p[, offset[, n]])` | `{lines, next, done}`: whole lines from `offset` | `argument` for `n` past the call-bytes cap or a line longer; `store` |
 | `line_at(p, offset)` | the line holding `offset`, or nil past the end | `argument` for a line past the call-bytes cap; `store` |
 | `grep(p, s)` | the lines holding `s`, as `{line, text}` | `argument` for a file past the call-bytes cap; `store` |
-| `edit(p, old, new[, opts])` | the number replaced, the diff printed first | `argument` for `old` not there, or there twice without `all`; as `replace` |
+| `edit(p, old, new[, opts])`, `edit(p, {{old, new}, ...})` | the number replaced, the diff printed first | `argument` for `old` not there, or there twice without `all`; as `replace` |
 | `count_lines(p[, offset[, n]])` | the lines in a file or a range | `argument` past the cap; `store` |
 | `count_in(p, s[, offset[, n]])` | `s`'s occurrences in a file or a range | `argument` for "" or past the cap; `store` |
 | `find_in(p, s[, offset[, n]])` | the first `s`'s 0-based offset, or nil | as `count_in` |
@@ -561,8 +588,8 @@ the errors column says the rest.
 | `like(s, pattern)` | a boolean | |
 | `match_path(path, pattern)` | a boolean | `argument` past 64 parts |
 | `between(s, a, b)` | the text between, or nil | |
-| `re_find(s, pattern)` | the leftmost match, `{at, text[, group]}`, or nil | `argument` for a pattern past 256 bytes or with what the subset leaves out |
-| `re_match(s, pattern)` | a boolean: whether `s` holds a match | as `re_find` |
+| `re_find(s, pattern[, {nocase}])` | the leftmost match, `{at, text[, group]}`, or nil | `argument` for a pattern past 256 bytes or with what the subset leaves out |
+| `re_match(s, pattern[, {nocase}])` | a boolean: whether `s` holds a match | as `re_find` |
 | `rep(s, n)` | `s`, `n` times | `argument` for `n` < 0 |
 | `substitute(s, old, new)` | `s` with each `old` replaced | `argument` for `old` = "" |
 | `path(a, b, ...)` | the parts joined with `/` | |
@@ -577,12 +604,15 @@ the errors column says the rest.
 | `push(l, x)` | nil | `type` for a map or for nil |
 | `sort(l)`, `sort(rows, key[, "asc" or "desc"])` | nil: in place | `type` for mixed kinds; `index` for a row with no `key`; `argument` for another order |
 | `take(l, n)` | a new list of the first `n` | `argument` for `n` < 0 |
+| `last(l, n)` | a new list of the last `n` | `argument` for `n` < 0 |
 | `reverse(l)` | nil: in place | |
 | `keys(m)`, `has_key(m, k)`, `count(t)` | a list; a boolean; an integer | |
+| `get(t, k[, default])` | `t[k]`, or `default` where there is none | `type` for a key of the wrong kind |
 | `now()`, `budget()` | the host's time; what is left | |
 | `print(...)` | nil | `type` for a list or map |
 | `yield()` | nil | |
 | `arg(name[, default])` | the run's value by that name, or `default` | `argument` for a value not of an integer or boolean default's kind |
+| `fail(msg)` | never returns: the run stops | `fail`, with `msg` |
 | `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function, trail}` | (the language's own: see `attempt`) |
 | the prelude's `walk_all(p, opts)`, `count_all(p, s)`, `find_next(p, s, at)` | every entry; every occurrence; the next one | as `walk`, `count_in`, `find_in` |
 
@@ -599,7 +629,7 @@ the errors column says the rest.
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
 | `read_lines(p[, offset[, n]])` | `{lines, next, done}`: the whole lines from byte `offset` (0 unset), at least `n` bytes (64 KiB unset) and on to the end of the line it stops in, so no line is cut; `lines` as `lines` splits them; `next` where the next part starts; `done` whether that is the file's end. `offset` is a line's start, as `next` is | a read; the part's bytes, and up to 512 past it for the last line's end; the whole part at most the call-bytes cap | `argument` for a negative offset, `n` under 1 or past the cap, or a line longer than the cap; `store` |
 | `grep(p, s)` | the lines of the file holding `s`, a literal, as `{line, text}`, `line` 1-based, in order, a line once however often it holds `s` | a read; the file whole, a step for 16 bytes, and each line kept a step a byte. At most the call-bytes cap: a bigger file goes through `read_lines` | `argument` for `s` empty or a file past the cap; `store` |
-| `edit(p, old, new[, {all, word}])` | the number of occurrences of `old` replaced by `new`; **the change's diff is printed first** (unified: `--- a/p`, `+++ b/p`, a hunk for the lines each occurrence is on). `old` must be in the file once, unless `all`; `word` takes only whole words (no letter, digit or `_` either side). Logged as `edit`; in a dry run the diff is all it does | a read, the file whole (at most the call-bytes cap), a step for 16 bytes; then `replace`'s change | `argument` for `old` empty, not there, or there more than once without `all`; as `read` and `replace` |
+| `edit(p, old, new[, {all, word}])` | the number of occurrences of `old` replaced by `new`; **the change's diff is printed first** (unified: `--- a/p`, `+++ b/p`, a hunk for the lines each occurrence is on). `old` must be in the file once, unless `all`; `word` takes only whole words (no letter, digit or `_` either side). Logged as `edit`; in a dry run the diff is all it does. **`edit(p, {{old = ..., new = ...[, all = true][, word = true]}, ...})`**, its list form (metal-vmm QUEUE 232): at most 64 edits a call, in sequence, each to the file as the one before left it, each held to the rules above; one diff, from the file as it was to the file as the last edit left it; one write. An edit that fails stops the run with nothing printed and nothing written, and its error says which edit it was | a read, the file whole (at most the call-bytes cap), a step for 16 bytes, each edit; then `replace`'s change | `argument` for `old` empty, not there, or there more than once without `all`, and for an edit with no `old` or `new` or another key; `type` for an edit not a map; as `read` and `replace` |
 | `line_at(p, offset)` | the whole line holding byte `offset`, without its newline (a newline is its own line's last byte); nil at the file's end or past it | a read; the line, read back and on from `offset` 512 bytes at a time, then once more whole | `argument` for a negative offset or a line longer than the call-bytes cap; `store` |
 | `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
 | `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
@@ -616,6 +646,9 @@ the errors column says the rest.
 - `like`: a pattern for the entries' names (`like` below). Folders are
   walked into whether they match or not.
 - `kind`: `"file"`, `"directory"` or `"other"`.
+- `skip`: a pattern (`like`'s) for names passed by whole: neither given
+  nor walked into, nor stat'ed (QUEUE 229: `skip = ".*"` passes by `.git`
+  and `.zig-cache`; the prelude's `glob` uses it).
 - `after`: where an earlier call's part ended (its `more` entry's path,
   or "" for the start). The walk goes on after it in its own order, the
   path there or not: each folder on it is listed again, and the walk
@@ -688,7 +721,8 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 
 ### Regular expressions
 
-**A small subset, and linear** (metal-vmm QUEUE 230; Steve, 2026-10-18).
+**A small subset, and linear** (metal-vmm QUEUES 230 and 232; Steve,
+2026-10-17).
 A field taken out of a line is one call, where `between`, `split` and a
 helper took three:
 
@@ -698,16 +732,18 @@ if m ~= nil then print(m.at, m.text, m.group) end
 print(re_match("  pub fn deadline(", "^\\s*pub fn"), re_match("x", "\\d"))
 local r = re_find("see tcp.zig:40 and gone.zig:1", "(\\w+\\.zig):\\d+")
 print(r.group, parse_int(sub(r.text, #r.group + 2)))
+print(re_find("error: test 4 FAILED", "\\b(fail|error|panic)", {nocase = true}).group)
 -- prints:
 -- 18<TAB>DEPARTS (bounded)<TAB>bounded
 -- true<TAB>false
 -- tcp.zig<TAB>40
+-- error
 ```
 
 | builtin | gives |
 |---|---|
-| `re_find(s, pattern)` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none: `if m == nil` (or `if m then`) |
-| `re_match(s, pattern)` | whether `s` holds a match, anywhere, as `grep` says of a line; `^` and `$` pin it to the whole |
+| `re_find(s, pattern[, {nocase = true}])` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none: `if m == nil` (or `if m then`). `nocase`: ASCII letters match either case |
+| `re_match(s, pattern[, {nocase = true}])` | whether `s` holds a match, anywhere, as `grep` says of a line; `^` and `$` pin it to the whole |
 
 | in a pattern | is |
 |---|---|
@@ -718,13 +754,20 @@ print(r.group, parse_int(sub(r.text, #r.group + 2)))
 | `\n`, `\t`, `\r` | a newline, a tab, a carriage return |
 | `*`, `+`, `?` | the part before, any number of times, at least once, or once or not; **each takes as much as it can** |
 | `^`, `$` | the string's start, its end |
-| `( ... )` | **one capture group a pattern**; it may repeat, `(ab)*`, and keeps its last turn |
+| `\b`, `\B` | a word's edge (a letter, digit or `_` on one side and not the other, or the string's end), and a place that is not one (QUEUE 232) |
+| `a\|b` | either, **the loosest** (`^error\|warn` is `^error` or `warn`), the leftmost alternative that matches taken first (QUEUE 232) |
+| `( ... )` | **one capture group a pattern**, which may hold alternatives, `(info\|warn)`; it may repeat, `(ab)*`, and keeps its last turn |
 
-**Refused, each by name** (`argument`, saying what to write instead): `|`
-(no alternation: a class is one byte of several), `{n,m}`, a second `(`,
-`(?...)` (no lookaround), `\1` (no backreferences), `\b`, lazy `*?`, a
-repetition repeated (`a**`), `[:alpha:]`, and a pattern of more than 256
-bytes. A pattern is written in a Shale string, so its `\` is written
+**`{nocase = true}`** folds ASCII letters when the pattern compiles (a step
+a byte more), so the search costs what it would without; a class is
+folded before its `^`, so `[^a]` takes neither `a` nor `A`, as Python's.
+The run's cache keeps a pattern's two compilations apart.
+
+**Refused, each by name** (`argument`, saying what to write instead):
+`{n,m}`, a second `(`, `(?...)` (no lookaround, no groups that do not
+capture), `\1` (no backreferences), `\b` inside a class, lazy `*?`, a
+repetition repeated (`a**`) or of a place (`\b+`), `[:alpha:]`, and a
+pattern of more than 256 bytes. A pattern is written in a Shale string, so its `\` is written
 `\\`: `"\\d+"` is the pattern `\d+`.
 
 **What it costs: linear, whatever the pattern.** A pattern compiles to a
@@ -737,10 +780,11 @@ cost 100,013 and 180,020 steps, and four times the string four times the
 steps (props_test). A backtracking engine's `(a*)*b` would take time
 exponential in the string; here no pattern can make a step count a lie.
 The match is the one a backtracking matcher would find first, tested
-against one on 20,000 random patterns and strings, with one rule of
-Thompson's: a loop's turn that matches nothing ends the loop as failed.
-Perl and Python take that turn, so on "a", `(a?)*`'s group here is "a",
-there "".
+against one on 20,000 random patterns and strings (alternatives, `\b`
+and `nocase` among them), with one rule of Thompson's: **a loop's turn
+that matches nothing ends the loop** (and is never followed by another).
+Perl and Python sometimes take one more turn after it, so on "a",
+`(a?)*`'s group here is "a", there "".
 
 ### Numbers
 
@@ -768,6 +812,7 @@ there "".
 | `sort(rows, key)` | a list of maps, in place, by each one's `key`: all integers or all strings. **Stable**: equal keys keep their order, so sorting by one key then another orders by both |
 | `sort(rows, key, "desc")` | the same, descending, **still stable**: equal keys keep their order (a sort then `reverse` reversed them). `"asc"` is the default |
 | `take(l, n)` | a new list of `l`'s first `n` items, or all of a shorter one: the top N of a sorted list |
+| `last(l, n)` | a new list of `l`'s last `n` items, in order, or all of a shorter one: the tail of a log's lines (QUEUE 232). A count below 0 is an error, as `take`'s: a count gone negative never quietly becomes a tail |
 | `reverse(l)` | in place |
 | `keys(m)` | a map's keys, in the order first set |
 | `has_key(m, k)` | whether `m` has `k` |
@@ -782,6 +827,7 @@ there "".
 | `budget()` | a map of what is left of `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output`, so a script can stop at a point of its own (the other budgets are not in it) |
 | `print(...)` | scalars only. It evaluates every argument first, joins them with tabs, and ends with a newline: `print()` is an empty line, `print(nil, true)` is `nil<TAB>true` |
 | `arg(name[, default])` | the value the run was given as `name` (the runner's `name=value`), or `default` (nil unset): a script's inputs. An integer or boolean default reads the value as one (`true`, `false`, `1`, `0`); any other, the string. The live site's route gives no values |
+| `fail(msg)` | the run stops here, class `fail`, `msg` its message: one line and its trail, as any stop (QUEUE 232). The script's own assertion: `if #found == 0 then fail("no config under " .. dir) end`. `attempt` catches it; the CLI exits 1 on it |
 | `yield()` | nil: a collection point, where the run keeps only the values it still reaches (see "The VM"). When a run pauses is the host's to say, never the script's |
 
 ## The prelude
@@ -1348,9 +1394,12 @@ holds every source of the module.
 
 ## What was decided, and what was refused
 
-- **No dry run.** Scripts just run (Steve).
-- **No effects beyond the store.** No network, no clock but `now()`, no
-  host.
+- **A dry run on Linux only.** On the sites a script just runs (Steve);
+  the Linux `shale` runs dry unless `--write` (QUEUE 229, `Mode.dry_run`).
+- **On metal, no effects beyond the store.** No network, no clock but
+  `now()`, no host. (The dogfood design gives Linux's Shale more, behind
+  one seam, metal's unchanged: zig-webbox
+  `docs/designs/DESIGN-shale-dogfood.md`.)
 - **A step a byte for a builtin's work, and a step for 16 bytes of bulk
   byte work** (Steve, 209): reads, scans and the haystacks of searches.
   A search also pays a step a place it stops and for its compares, after
@@ -1365,8 +1414,9 @@ holds every source of the module.
 - **No remove from a list or a map.** A list only grows, which is what
   lets `for x in` walk it in place.
 - **No floats, no closures.** Patterns only as the regular expressions'
-  linear subset, `re_find` and `re_match` (Steve, 2026-10-18: "yes to
-  regex"): no alternation, one group, no backtracking.
+  linear subset, `re_find` and `re_match` (Steve, 2026-10-17: "yes to
+  regex"; alternation, `\b` and `nocase` with the dogfood design): one
+  group, no backreferences, no backtracking.
 - **Offsets in files are 0-based; positions in strings are 1-based.** The
   first are the site's (sidecars count bytes from 0); the second are
   Lua's.

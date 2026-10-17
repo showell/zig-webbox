@@ -20,6 +20,9 @@ pub const Class = enum {
     budget,
     /// A store call failed.
     store,
+    /// The script's own stop: `fail(msg)`, its message as given (the
+    /// design, final; metal-vmm QUEUE 232). `attempt` catches it.
+    fail,
 };
 
 pub const Budget = enum {

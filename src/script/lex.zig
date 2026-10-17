@@ -1,5 +1,5 @@
 //! **THE LEXER**: Lua's tokens, and a refusal by name for each of Lua's
-//! that this language does not take (long strings, floats, `/`, `:`, `...`,
+//! that this language does not take (a long string without a level, floats, `/`, `:`, `...`,
 //! bitwise operators, `goto`, `repeat`).
 
 const std = @import("std");
@@ -69,7 +69,12 @@ pub const Token = struct {
     /// 9223372036854775808: too big for 64 bits, but the magnitude of the
     /// smallest integer, which a `-` before it makes (the parser's).
     min_magnitude: bool = false,
+    /// A long string's level and where its closer is (QUEUE 232): what a
+    /// syntax error right after it says.
+    long: ?Long = null,
 };
+
+pub const Long = struct { level: u32, close_line: u32, close_column: u32 };
 
 pub const Error = struct {
     line: u32,
@@ -142,8 +147,28 @@ pub const Lexer = struct {
             if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
                 _ = self.bump();
             } else if (c == '-' and self.peekAt(1) == '-') {
-                if (self.peekAt(2) == '[' and (self.peekAt(3) == '[' or self.peekAt(3) == '='))
-                    return self.fail(self.line, self.column, true, "long comments (`--[[ ... ]]`) are not in this language: start each line with `--`");
+                if (self.peekAt(2) == '[' and self.peekAt(3) == '[')
+                    return self.fail(self.line, self.column, true, "a long comment needs a level: `--[=[ ... ]=]` (code is full of `]]`), or start each line with `--`");
+                if (self.peekAt(2) == '[' and self.peekAt(3) == '=') {
+                    // **A BLOCK COMMENT** (the design, final): `--` and a
+                    // long string's opener; `--[=x` is a line comment.
+                    var n: usize = 3;
+                    while (self.peekAt(n) == '=') n += 1;
+                    if (self.peekAt(n) == '[') {
+                        const line = self.line;
+                        const column = self.column;
+                        _ = self.bump(); // -
+                        _ = self.bump(); // -
+                        _ = self.bump(); // [
+                        _ = self.longString(line, column) catch {
+                            const level = n - 3;
+                            var closer: [64]u8 = undefined;
+                            const message = std.fmt.allocPrint(self.alloc, "a long comment with no `{s}` to close it", .{closerText(&closer, @intCast(level))}) catch "a long comment that is never closed";
+                            return self.fail(line, column, false, message);
+                        };
+                        continue;
+                    }
+                }
                 while (self.at < self.src.len and self.src[self.at] != '\n') _ = self.bump();
             } else return;
         }
@@ -182,7 +207,8 @@ pub const Lexer = struct {
             ',' => .comma,
             ';' => .semicolon,
             '[' => blk: {
-                if (two == '[' or two == '=') return self.fail(line, column, true, "long strings (`[[ ... ]]`) are not in this language: use \"...\" with \\n");
+                if (two == '[') return self.fail(line, column, true, "a long string needs a level: `[=[ ... ]=]` (code being edited is full of `]]`)");
+                if (two == '=') return self.longString(line, column);
                 break :blk .lbracket;
             },
             '/' => blk: {
@@ -256,6 +282,43 @@ pub const Lexer = struct {
         return .{ .tag = .int, .text = text, .line = line, .column = column, .int = value };
     }
 
+    /// **A LONG STRING** (QUEUE 232): `[=[ ... ]=]`, `[==[ ... ]==]`, a
+    /// level of one or more `=`, closed by the same level. Its bytes are the
+    /// source's, raw (no escapes, a CRLF kept), but for a newline right after
+    /// the opener, dropped. Its line and column advance through it, so what
+    /// follows is placed right. The `[` is taken.
+    fn longString(self: *Lexer, line: u32, column: u32) error{Lex}!Token {
+        var level: u32 = 0;
+        while (self.peekAt(0) == '=') : (level += 1) _ = self.bump();
+        if (self.peekAt(0) != '[') return self.fail(line, column, true, "`[=` opens a long string, `[=[ ... ]=]`: a `[` must follow its `=`s");
+        _ = self.bump();
+        if (self.peekAt(0) == '\r' and self.peekAt(1) == '\n') {
+            _ = self.bump();
+            _ = self.bump();
+        } else if (self.peekAt(0) == '\n') _ = self.bump();
+        const start = self.at;
+        while (self.at < self.src.len) {
+            if (self.src[self.at] == ']') {
+                var n: u32 = 0;
+                while (self.peekAt(1 + n) == '=') n += 1;
+                if (n == level and self.peekAt(1 + n) == ']') {
+                    const text = self.src[start..self.at];
+                    const long: Long = .{ .level = level, .close_line = self.line, .close_column = self.column };
+                    for (0..level + 2) |_| _ = self.bump();
+                    return .{ .tag = .string, .text = text, .line = line, .column = column, .long = long };
+                }
+            }
+            _ = self.bump();
+        }
+        var closer: [64]u8 = undefined;
+        return self.failLong(line, column, closerText(&closer, level));
+    }
+
+    fn failLong(self: *Lexer, line: u32, column: u32, closer: []const u8) error{Lex} {
+        const message = std.fmt.allocPrint(self.alloc, "a long string with no `{s}` to close it", .{closer}) catch "a long string that is never closed";
+        return self.fail(line, column, false, message);
+    }
+
     fn string(self: *Lexer, line: u32, column: u32) error{ Lex, OutOfMemory }!Token {
         const quote = self.bump();
         var out: std.ArrayList(u8) = .empty;
@@ -297,6 +360,24 @@ pub const Lexer = struct {
     }
 };
 
+/// A long string's closer at `level`, `]==]`, or as much of it as fits.
+pub fn closerText(buf: []u8, level: u32) []const u8 {
+    const n = @min(level, buf.len - 2);
+    buf[0] = ']';
+    @memset(buf[1..][0..n], '=');
+    buf[n + 1] = ']';
+    return buf[0 .. n + 2];
+}
+
+/// The opener a level up, `[===[`, or as much of it as fits.
+pub fn openerText(buf: []u8, level: u32) []const u8 {
+    const n = @min(level, buf.len - 2);
+    buf[0] = '[';
+    @memset(buf[1..][0..n], '=');
+    buf[n + 1] = '[';
+    return buf[0 .. n + 2];
+}
+
 const testing = std.testing;
 
 fn tags(src: []const u8) ![]Tag {
@@ -337,8 +418,8 @@ test "lex: each Lua construct this language refuses is refused by name, where it
         .{ .src = "s:upper()", .says = "method" },
         .{ .src = "::top::", .says = "labels" },
         .{ .src = "f(...)", .says = "varargs" },
-        .{ .src = "x = [[long]]", .says = "long strings" },
-        .{ .src = "--[[ long\ncomment ]]", .says = "long comments" },
+        .{ .src = "x = [[long]]", .says = "a long string needs a level" },
+        .{ .src = "--[[ long\ncomment ]]", .says = "a long comment needs a level" },
         .{ .src = "goto done", .says = "goto" },
         .{ .src = "repeat x = 1 until x", .says = "repeat" },
         .{ .src = "x = a & b", .says = "bitwise" },
@@ -388,4 +469,120 @@ test "lex: plain errors: an unclosed string, a string across a line, a number to
         try testing.expectEqual(case.line, e.line);
         try testing.expectEqual(case.column, e.column);
     }
+}
+
+test "lex: long strings, a level of `=` each (QUEUE 232): `]]` and a lower closer inside, the first newline dropped, bytes raw, the lines after placed right" {
+    const cases = [_]struct { src: []const u8, text: []const u8 }{
+        .{ .src = "[=[a]]b]=]", .text = "a]]b" },
+        .{ .src = "[==[x ]=] y]]]==]", .text = "x ]=] y]]" },
+        .{ .src = "[===[]==]]===]", .text = "]==]" },
+        // The first newline after the opener is dropped; one before the
+        // closer is the string's.
+        .{ .src = "[=[\nline one\nline two\n]=]", .text = "line one\nline two\n" },
+        // Raw: no escapes, and a CRLF is its two bytes.
+        .{ .src = "[=[a\\n\"b\r\nc]=]", .text = "a\\n\"b\r\nc" },
+        .{ .src = "[=[]=]", .text = "" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), case.src);
+        const t = try lx.next();
+        try testing.expectEqual(Tag.string, t.tag);
+        try testing.expectEqualStrings(case.text, t.text);
+        try testing.expectEqual(Tag.eof, (try lx.next()).tag);
+    }
+    // A token after a long string of three lines is on its own line.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var lx = Lexer.init(arena.allocator(), "x = [=[\none\ntwo]=] y\nz");
+    _ = try lx.next();
+    _ = try lx.next();
+    const s = try lx.next();
+    try testing.expectEqual(@as(u32, 1), s.line);
+    try testing.expectEqual(@as(u32, 5), s.column);
+    try testing.expectEqual(@as(u32, 3), s.long.?.close_line);
+    try testing.expectEqual(@as(u32, 4), s.long.?.close_column);
+    const y = try lx.next();
+    try testing.expectEqual(@as(u32, 3), y.line);
+    try testing.expectEqual(@as(u32, 8), y.column);
+    try testing.expectEqual(@as(u32, 4), (try lx.next()).line);
+}
+
+test "lex: a long string that is never closed, or an opener that is not one, is an error at the opener" {
+    for ([_]struct { src: []const u8, says: []const u8 }{
+        .{ .src = "x = [=[abc]]", .says = "with no `]=]` to close it" },
+        .{ .src = "x = [==[abc]=]", .says = "with no `]==]` to close it" },
+        .{ .src = "x = [=a", .says = "`[=` opens a long string" },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), case.src);
+        _ = try lx.next();
+        _ = try lx.next();
+        try testing.expectError(error.Lex, lx.next());
+        errdefer std.debug.print("{s}: {s}\n", .{ case.src, lx.err.?.message });
+        try testing.expect(std.mem.indexOf(u8, lx.err.?.message, case.says) != null);
+        try testing.expectEqual(@as(u32, 5), lx.err.?.column);
+    }
+}
+
+test "lex: a block comment is `--` and a long string's opener, any level (the design, final): what it holds is passed by, the lines after placed right" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var lx = Lexer.init(arena.allocator(), "x --[=[ a ]] b\n c ]=] y --[==[ ]=] ]==]\nz --[=x is a line comment\nw --[ too\nv");
+    for ([_]struct { []const u8, u32, u32 }{ .{ "x", 1, 1 }, .{ "y", 2, 8 }, .{ "z", 3, 1 }, .{ "w", 4, 1 }, .{ "v", 5, 1 } }) |want| {
+        const t = try lx.next();
+        try testing.expectEqualStrings(want[0], t.text);
+        try testing.expectEqual(want[1], t.line);
+        try testing.expectEqual(want[2], t.column);
+    }
+    try testing.expectEqual(Tag.eof, (try lx.next()).tag);
+    // Never closed: an error at the comment's start.
+    var bad = Lexer.init(arena.allocator(), "x = 1\n  --[=[ never closed ]]");
+    _ = try bad.next();
+    _ = try bad.next();
+    _ = try bad.next();
+    try testing.expectError(error.Lex, bad.next());
+    try testing.expectEqual(@as(u32, 2), bad.err.?.line);
+    try testing.expectEqual(@as(u32, 3), bad.err.?.column);
+    try testing.expect(std.mem.indexOf(u8, bad.err.?.message, "a long comment with no `]=]`") != null);
+}
+
+test "lex: random sources of brackets, `=`, `-`, quotes and newlines end in a token stream or a clean error, never a panic, every place in the source (the design: fuzzed first)" {
+    var prng = std.Random.DefaultPrng.init(2322);
+    const rand = prng.random();
+    // Bytes, and the pieces of openers and closers, so long strings and
+    // block comments form, nest, cross and end mid-closer.
+    const pieces = [_][]const u8{ "[", "]", "=", "-", "\n", "\"", "a", " ", "\\", "\r", "[=[", "]=]", "[==[", "]==]", "--[=[", "--[[", "]]", "--" };
+    var buf: [96]u8 = undefined;
+    var long_seen: usize = 0;
+    for (0..200_000) |_| {
+        var len: usize = 0;
+        for (0..rand.uintAtMost(usize, 24)) |_| {
+            const p = pieces[rand.uintLessThan(usize, pieces.len)];
+            if (len + p.len > buf.len) break;
+            @memcpy(buf[len..][0..p.len], p);
+            len += p.len;
+        }
+        const src = buf[0..len];
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), src);
+        errdefer std.debug.print("source \"{f}\"\n", .{std.zig.fmtString(src)});
+        var last_line: u32 = 1;
+        while (true) {
+            const t = lx.next() catch {
+                const e = lx.err.?;
+                try testing.expect(e.line >= 1 and e.line <= last_line + std.mem.count(u8, src, "\n"));
+                break;
+            };
+            try testing.expect(t.line >= last_line);
+            last_line = t.line;
+            if (t.long != null) long_seen += 1;
+            if (t.tag == .eof) break;
+        }
+    }
+    // The alphabet makes long strings, not only errors.
+    try testing.expect(long_seen > 100);
 }

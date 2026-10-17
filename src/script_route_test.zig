@@ -467,3 +467,32 @@ test "a background run owns its source: the request's memory gone, the run goes 
         return error.TestUnexpectedResult;
     }
 }
+
+test "THE ROUTE'S REPLY, WHOLE, FROZEN (the dogfood design: its four readers, dog-park's test_shale.mjs, metal-vmm's script-refused.shape, judge_gopher.py and angry-gopher's tests, see nothing change)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var buf: [4096]u8 = undefined;
+    // Finished, with output and an effect.
+    var o = try f.send(try f.body(f.kp, "test.example", 1, now + 600, "print(\"a-\" .. 1)\nremove(\"chat/a.md\")\nprint(#ls(\"chat\"))\n"));
+    defer o.deinit();
+    try testing.expectEqualStrings(
+        \\a-1
+        \\1
+        \\── effects (1) ──
+        \\remove chat/a.md: ok
+        \\── finished (37 steps)
+        \\
+    , try Fixture.reply(&o, &buf));
+    // Stopped in a function, called from another: the trail's lines.
+    var s = try f.send(try f.body(f.kp, "test.example", 2, now + 600, "function g(x) return x + {} end\nfunction f() return g(1) end\nprint(\"before\")\nf()\n"));
+    defer s.deinit();
+    try testing.expectEqualStrings(
+        \\before
+        \\── effects (0) ──
+        \\── stopped at seq 2:1:24 (in `g`): type: `+` takes integers, and its right is an empty table (21 steps)
+        \\   called from seq 2:2:21 (in `f`)
+        \\   called from seq 2:4:1
+        \\
+    , try Fixture.reply(&s, &buf));
+}

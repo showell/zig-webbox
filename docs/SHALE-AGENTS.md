@@ -36,10 +36,12 @@ default that is an integer or a boolean reads the value as one.
 within one; hidden names like `.git` and `.zig-cache` left out),
 `grep(p, s)` (the lines holding a literal, numbered), `read_lines` and
 `count_lines` for a file of any size, `re_find(s, pattern)` and
-`re_match` (regular expressions, a linear-time subset with one capture
-group), `between(s, a, b)` (the text after one string and before the
-next), `edit(p, old, new[, {all, word}])`
-(a literal replaced, its diff printed), `walk` with `skip`, and the
+`re_match` (regular expressions, a linear-time subset: `|`, `\b`, one
+capture group, `{nocase = true}`), `between(s, a, b)` (the text after one string and before the
+next), `edit(p, old, new[, {all, word}])` (a literal replaced, its diff
+printed) and `edit(p, {{old = ..., new = ...}, ...})` (several in sequence,
+one diff, one write, none made if any fails), long strings (`[=[ ... ]=]`,
+raw, for text that holds quotes and lines), `walk` with `skip`, and the
 language's own `split`, `words`, `contains`, `sort`, `table` and maps. The
 whole language is [`SHALE.md`](SHALE.md).
 
@@ -175,6 +177,54 @@ with `word`: the name is a literal, so no pattern. Shale shows the diff
 way its `old` does not pin down (`old` twice, without `all`) is refused, and
 says so, before anything is changed.
 
+### Two edits to one file, each asserted, one write
+
+```shale
+local n = edit("src/tcp.zig", {
+  {old = [=[
+fn check() void {
+    props.always(@src(), true, "tcp: what is sent was queued", .{});
+}]=], new = [=[
+fn check(queued: bool) void {
+    props.always(@src(), queued, "tcp: what is sent was queued", .{});
+}]=]},
+  {old = "// DEPARTS (simpler): no SACK.", new = "// DEPARTS (simpler): no SACK, no window scaling."},
+})
+print(n .. " edits")
+-- prints:
+-- --- a/src/tcp.zig
+-- +++ b/src/tcp.zig
+-- @@ -4,1 +4,1 @@
+-- -// DEPARTS (simpler): no SACK.
+-- +// DEPARTS (simpler): no SACK, no window scaling.
+-- @@ -6,3 +6,3 @@
+-- -fn check() void {
+-- -    props.always(@src(), true, "tcp: what is sent was queued", .{});
+-- -}
+-- +fn check(queued: bool) void {
+-- +    props.always(@src(), queued, "tcp: what is sent was queued", .{});
+-- +}
+-- 2 edits
+```
+
+```python
+import pathlib
+p = pathlib.Path("src/tcp.zig"); s = p.read_text()
+for old, new in [('fn check() void {\n    props.always(@src(), true, "tcp: what is sent was queued", .{});\n}',
+                  'fn check(queued: bool) void {\n    props.always(@src(), queued, "tcp: what is sent was queued", .{});\n}'),
+                 ("// DEPARTS (simpler): no SACK.", "// DEPARTS (simpler): no SACK, no window scaling.")]:
+    assert s.count(old) == 1, old
+    s = s.replace(old, new)
+p.write_text(s)
+```
+
+**Uses** `edit`'s list form and long strings: each `old` is held to being
+there exactly once, in the file as the edit before left it; one diff is
+printed, and the file is written once, or not at all if any edit fails.
+**About even**, and Shale's prints the diff before anything is written (and
+writes nothing without `--write`). The text goes in as it is, quotes and
+lines and all, with no escaping.
+
 ### A doc's `file:line` references, checked
 
 ```shale
@@ -215,11 +265,11 @@ follows the name in the match.
 
 ## Where Shale is worse, said plainly
 
-- **Regular expressions are a subset**: one capture group, no `|`, no
-  `{n,m}`, no lookaround, no backreferences (each refused by name). Two
-  fields from one match are the group and what follows it in the match;
-  a choice between words is a call for each. In return no pattern makes a
-  search slower than linear, and its cost is known before it runs.
+- **Regular expressions are a subset**: one capture group, no `{n,m}`, no
+  lookaround, no backreferences (each refused by name). Two fields from one
+  match are the group and what follows it in the match. In return no
+  pattern makes a search slower than linear, and its cost is known before
+  it runs.
 - **A file is read whole by `grep` and `edit`**, at most the call-bytes cap
   (1 MiB): a bigger one goes through `read_lines` a part at a time.
 - **Step budgets are real.** A walk of a large tree, or a script that loops

@@ -4,8 +4,10 @@
 //! checked at compile time to name every builtin exactly once. The
 //! arguments' helpers every topic shares are here too.
 //!
-//! The topics: the store (`builtins_store.zig`), text
-//! (`builtins_text.zig`), lists and maps (`builtins_lists.zig`), time and
+//! The topics: the store (`builtins_store.zig`, with its reading, walking
+//! and changing in `builtins_read.zig`, `builtins_walk.zig` and
+//! `builtins_change.zig`), text (`builtins_text.zig`), regular expressions
+//! (`builtins_regex.zig`), lists and maps (`builtins_lists.zig`), time and
 //! the host (`builtins_time.zig`), formatting (`builtins_format.zig`), and
 //! numbers (`builtins_numbers.zig`).
 //! Every builtin charges steps in proportion to the work it does.

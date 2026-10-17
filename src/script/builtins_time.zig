@@ -16,6 +16,7 @@ const spec = bi.spec;
 pub const specs = [_]bi.Spec{
     spec(.now, 0, 0, now),
     spec(.arg, 1, 2, givenArg),
+    spec(.fail, 1, 1, failWith),
     spec(.budget, 0, 0, budget),
     spec(.yield, 0, 0, yield),
     spec(.date, 1, 1, date),
@@ -32,6 +33,15 @@ fn now(run: *Run, _: ast.Pos, _: []const Value) Error!Value {
 /// once edited into its source. A default that is an integer or a boolean
 /// reads the value as one (`true`, `false`, `1`, `0`), and a value that
 /// is none is an `argument` error; any other default, the string as given.
+/// **`fail(msg)`** (the design, final; metal-vmm QUEUE 232): the run stops
+/// here with class `fail` and `msg` as its message, one line and its
+/// trail, as any stop; `attempt` catches it. A script's own assertion.
+fn failWith(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const msg = try bi.stringArg(run, pos, .fail, args[0], "its message");
+    try run.charge(pos, msg.len);
+    return run.fail(pos, .fail, "{s}", .{msg});
+}
+
 fn givenArg(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const name = try bi.stringArg(run, pos, .arg, args[0], "its name");
     try run.charge(pos, name.len);
