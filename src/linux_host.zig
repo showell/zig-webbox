@@ -181,18 +181,31 @@ pub fn Server(comptime S: type) type {
         /// 211, Steve's model: "on Linux, one runner thread takes the turn
         /// for each slice"): the site's `between` under the turn, then the
         /// turn let go, and taken again only once no handler waits for it,
-        /// so a request arriving mid-run waits at most one slice. With
-        /// nothing to do, it sleeps `between_idle_ms`. A mutex makes no
-        /// promise of fairness, so the waiting handlers are counted.
+        /// so a request arriving mid-run waits at most one slice. A mutex
+        /// makes no promise of fairness, so the waiting handlers are counted.
+        ///
+        /// **THEN IT SLEEPS UNTIL IT IS WANTED** (zig-metal-unikernel's
+        /// docs/designs/DESIGN-sleep.md), as the bare-metal host does: until
+        /// the site's wake (`.at`), or, `.idle`, until something happens. The
+        /// doorbell (`between_bell`) is rung by every handler's end and by a
+        /// stop; its count is read before `between` is called, so a ring
+        /// that comes while the thread decides to sleep has changed it, and
+        /// the wait returns at once.
         fn betweenLoop(io: Io, stop: *const std.atomic.Value(bool)) void {
             while (!stop.load(.acquire)) {
+                const rung = between_bell.load(.acquire);
                 turn.lockUncancelable(io);
-                const more = S.between(io, nowOf(io)) == .more;
+                const wake = S.between(io, nowOf(io));
                 turn.unlock(io);
                 // A handler waiting goes first: checked every millisecond,
                 // not spun on (the box's cold review: a core burned).
                 while (turn_waiting.load(.acquire) > 0 and !stop.load(.acquire)) sleepMs(io, 1) catch return;
-                if (!more) sleepMs(io, between_idle_ms) catch return;
+                if (stop.load(.acquire)) return;
+                switch (wake) {
+                    .more => {},
+                    .at => |at| io.futexWaitTimeout(u32, &between_bell.raw, rung, .{ .deadline = .{ .raw = .{ .nanoseconds = at }, .clock = .awake } }) catch return,
+                    .idle => io.futexWait(u32, &between_bell.raw, rung) catch return,
+                }
             }
         }
 
@@ -429,6 +442,9 @@ pub fn Server(comptime S: type) type {
             http.held_body = null;
             sent.in_turn = false;
             turn.unlock(io);
+            // The request may have started work between requests (a
+            // background run): the thread that does it is woken to look.
+            ringBetween(io);
             // Out now, outside the turn: until it has gone, this connection
             // reads no next head, so answers never pile up unread.
             hold.release() catch {
@@ -1272,9 +1288,23 @@ fn takeTurn(io: Io) void {
     _ = turn_waiting.fetchSub(1, .acq_rel);
 }
 
-/// How long the work between requests sleeps when there is none.
-pub const between_idle_ms: u64 = 50;
 var never_stop: std.atomic.Value(bool) = .init(false);
+
+/// **THE BETWEEN THREAD'S DOORBELL** (`betweenLoop`): a count, rung by a
+/// handler's end and a stop, which the thread's futex waits on.
+var between_bell: std.atomic.Value(u32) = .init(0);
+
+fn ringBetween(io: Io) void {
+    _ = between_bell.fetchAdd(1, .release);
+    io.futexWake(u32, &between_bell.raw, 1);
+}
+
+/// Stops a between thread: the flag, then the bell, so a thread asleep
+/// until a far wake, or until anything, sees it at once.
+fn stopBetween(io: Io, stop: *std.atomic.Value(bool)) void {
+    stop.store(true, .release);
+    ringBetween(io);
+}
 
 /// **ONE HANDLER AT A TIME**: held while `route` runs, so no two handlers
 /// interleave, as on the bare-metal host, where one loop runs each to its
@@ -1476,6 +1506,13 @@ const TestSite = struct {
         // Whether the body the handler reads is the one the host held, not
         // a copy (170.5): "same", or "copied".
         const t = try http.target(req, alloc);
+        // A background run started by a request, as a script route starts
+        // one: three slices, stepped by the between thread.
+        if (std.mem.eql(u8, t, "/start-run")) {
+            slices_left.store(3, .release);
+            try req.respond("started\n", .{ .keep_alive = false });
+            return null;
+        }
         if (std.mem.eql(u8, t, "/same") or std.mem.eql(u8, t, "/upload-same")) {
             const held = http.held_body;
             const got = (try http.readLimitedBody(req, alloc, bodyLimit(t))) orelse return null;
@@ -2377,7 +2414,7 @@ test "linux_host: a request that arrives mid-run waits at most one slice of the 
     var stop: std.atomic.Value(bool) = .init(false);
     const runner = try std.Thread.spawn(.{}, TestHost.betweenLoop, .{ io, &stop });
     defer {
-        stop.store(true, .release);
+        stopBetween(io, &stop);
         runner.join();
         TestSite.slices_left.store(0, .release);
     }
@@ -2413,9 +2450,9 @@ test "linux_host: the work between requests is first stepped on the starting thr
     var stop: std.atomic.Value(bool) = .init(false);
     TestHost.startBetween(io, &stop);
     defer {
-        stop.store(true, .release);
-        // The thread sleeps at most `between_idle_ms` before it sees the stop.
-        sleepMs(io, 2 * between_idle_ms) catch {};
+        // The stop rings the bell: the thread, asleep until anything, sees it.
+        stopBetween(io, &stop);
+        sleepMs(io, 20) catch {};
         TestSite.slices_left.store(0, .release);
     }
     try std.testing.expectEqual(std.Thread.getCurrentId(), TestSite.first_between_thread.load(.acquire));
@@ -2424,6 +2461,119 @@ test "linux_host: the work between requests is first stepped on the starting thr
     var waited: u32 = 0;
     while (TestSite.slices_run.load(.acquire) < 3 and waited < 100) : (waited += 1) sleepMs(io, 10) catch {};
     try std.testing.expectEqual(@as(u32, 3), TestSite.slices_run.load(.acquire));
+}
+
+test "linux_host: a request that starts a run wakes the between thread from its idle sleep, and the run is stepped (DESIGN-sleep.md)" {
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    TestSite.slices_left.store(0, .release);
+    TestSite.slices_run.store(0, .release);
+    var stop: std.atomic.Value(bool) = .init(false);
+    const runner = try std.Thread.spawn(.{}, TestHost.betweenLoop, .{ io, &stop });
+    defer {
+        stopBetween(io, &stop);
+        runner.join();
+        TestSite.slices_left.store(0, .release);
+    }
+    // Idle: nothing to do, so the thread sleeps until something happens.
+    sleepMs(io, 50) catch {};
+    try std.testing.expectEqual(@as(u32, 0), TestSite.slices_run.load(.acquire));
+    var c = try bench.client("GET /start-run HTTP/1.1\r\nHost: x\r\n\r\n");
+    try c.listen(io);
+    try std.testing.expect(c.answer.within(io, 2000));
+    c.end(io);
+    // The handler's end rang the bell: the three slices, within half a
+    // second (each is `between_slice_ms`), not never.
+    var waited: u32 = 0;
+    while (TestSite.slices_run.load(.acquire) < 3 and waited < 100) : (waited += 1) sleepMs(io, 5) catch {};
+    try std.testing.expectEqual(@as(u32, 3), TestSite.slices_run.load(.acquire));
+}
+
+/// A site whose `between` asks for a wake at `due`, and counts its calls
+/// and when they came: the between thread's sleep, by counts.
+const WakeSite = struct {
+    pub const Started = struct {};
+    pub fn start(_: Io, _: anytype) !Started {
+        return .{};
+    }
+    pub fn bodyLimit(_: []const u8) u64 {
+        return 0;
+    }
+    pub fn route(_: *std.http.Server.Request, _: Io, _: std.mem.Allocator, _: *bus.Bus) !?bus.Kept {
+        return null;
+    }
+    var due: std.atomic.Value(i64) = .init(0);
+    var calls: std.atomic.Value(u32) = .init(0);
+    /// Calls before `due`, after the first; and the first call at or after it.
+    var early: std.atomic.Value(u32) = .init(0);
+    var first_after: std.atomic.Value(i64) = .init(0);
+    pub fn between(_: Io, now: @import("webbox").site.Now) @import("webbox").site.Wake {
+        const n = calls.fetchAdd(1, .acq_rel);
+        const d = due.load(.acquire);
+        const t: i64 = @intCast(now.awake_ns);
+        if (t < d) {
+            if (n > 0) _ = early.fetchAdd(1, .acq_rel);
+            return .{ .at = d };
+        }
+        _ = first_after.cmpxchgStrong(0, t, .acq_rel, .acquire);
+        return .idle;
+    }
+    fn reset(io: Io, in_ns: i64) void {
+        calls.store(0, .release);
+        early.store(0, .release);
+        first_after.store(0, .release);
+        due.store(@as(i64, @intCast(Io.Clock.now(.awake, io).nanoseconds)) + in_ns, .release);
+    }
+};
+const WakeHost = Server(WakeSite);
+
+test "linux_host: the between thread sleeps until the site's wake: no call before it, one at or after it, then none (DESIGN-sleep.md)" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    WakeSite.reset(io, 100 * std.time.ns_per_ms);
+    var stop: std.atomic.Value(bool) = .init(false);
+    const runner = try std.Thread.spawn(.{}, WakeHost.betweenLoop, .{ io, &stop });
+    defer runner.join();
+    defer stopBetween(io, &stop);
+    sleepMs(io, 250) catch {};
+    // The first call asked for the wake; the second came at it; then idle.
+    try std.testing.expectEqual(@as(u32, 0), WakeSite.early.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), WakeSite.calls.load(.acquire));
+    const late_ms = @divTrunc(WakeSite.first_after.load(.acquire) - WakeSite.due.load(.acquire), std.time.ns_per_ms);
+    try std.testing.expect(late_ms >= 0);
+    // Reported, bounded loosely: a loaded 2-core box is no place to gate ms.
+    if (late_ms > 1000) {
+        std.debug.print("the wake came {d} ms late\n", .{late_ms});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "linux_host: a handler's end rings the between thread awake from a far wake, and a stop ends it at once (DESIGN-sleep.md)" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    WakeSite.reset(io, 60 * std.time.ns_per_s);
+    var stop: std.atomic.Value(bool) = .init(false);
+    const runner = try std.Thread.spawn(.{}, WakeHost.betweenLoop, .{ io, &stop });
+    var waited: u32 = 0;
+    while (WakeSite.calls.load(.acquire) < 1 and waited < 200) : (waited += 1) sleepMs(io, 5) catch {};
+    try std.testing.expectEqual(@as(u32, 1), WakeSite.calls.load(.acquire));
+    // A handler's turn, and its end.
+    takeTurn(io);
+    turn.unlock(io);
+    ringBetween(io);
+    waited = 0;
+    while (WakeSite.calls.load(.acquire) < 2 and waited < 200) : (waited += 1) sleepMs(io, 5) catch {};
+    try std.testing.expectEqual(@as(u32, 2), WakeSite.calls.load(.acquire));
+    // Still a minute from its wake: a stop ends the thread now, not then.
+    const began = Io.Clock.now(.awake, io).nanoseconds;
+    stopBetween(io, &stop);
+    runner.join();
+    const took_ms = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began, std.time.ns_per_ms);
+    try std.testing.expect(took_ms < 1000);
 }
 
 // ── keep-alive (metal-vmm QUEUE 213) ────────────────────────────────────────
