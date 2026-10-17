@@ -30,6 +30,53 @@ This page is in three parts:
 It ends with what was decided and what was refused. The code is
 `src/script/`.
 
+## Before you send a script: the author's checklist
+
+The traps the cookbook's scripts fell into on the live site, each with
+what avoids it:
+
+1. **Guard every budget a loop spends.** A loop over a walk or a file's
+   parts runs until something stops it; let it be you. Walk with
+   `walk_upto(p, opts, keep)`, which stops before the reads would leave
+   fewer than `keep`, and guard each entry's work with `room_for({reads =
+   1, read_bytes = n})`. Print what you have and `resume after <path>`
+   (a `const START` takes it back), never nothing.
+2. **Gather, then print? Print what you have when stopped.** A run that
+   stops on a budget keeps its output so far: a script that gathers
+   everything and prints at the end prints nothing at all.
+3. **The index traps.** `l[0]` and `l[#l + 1]` are errors, and so is
+   `m.k` for a key that is not there. On data you did not write, `get(t,
+   k, default)` never stops the run; `has_key(m, k)` asks first.
+4. **`parse_int` over `tonumber` for data.** `tonumber("log-x")` stops the
+   whole report on one stray file; `parse_int` gives nil, and you decide.
+5. **Read a `more` entry's `kind` first.** A `walk` part ends with `{kind
+   = "more"}` when there is more: its path is where the next goes on, not
+   a file. `walk_all` and `walk_upto` leave it out for you.
+6. **A line is not 200 bytes.** `read(p, f, 200)` cuts a long line;
+   `line_at(p, offset)` gives the whole line around an offset, and
+   `read_lines` whole lines a part at a time.
+7. **Look before you change, and run it dry first.** On Linux, `shale`
+   without `--write` logs every change and makes none; `edit` shows its
+   diff.
+
+When a run stops, its report names the line, and the calls that led
+there:
+
+```text
+── stopped at seq 12:18:14 (in `the prelude's walk_all`): budget reads: the store-read budget (count) ran out (134718 steps)
+   called from seq 12:31:15 (in `sizes`)
+   called from seq 12:40:1
+```
+
+**Where it runs, and what it may do there:**
+
+| where | modes | its budgets |
+|---|---|---|
+| lynrummy.com (`POST /admin/script`, angry-gopher's `admin_script`) | atomic (changes, holds the turn); background (reads only, in slices) | atomic: 2,000,000 steps, 500 reads, 16 MiB read, 100 changes, 8 MiB arena; background: the same but 10,000 reads |
+| Dog Park (`POST /admin/script`, its `src/play/shale.zig`) | background only: an atomic run is refused | 50,000,000 steps, 10,000 reads, 256 MiB read, no changes, 8 MiB arena |
+| an installed suite (`src/shale_suite.zig`) | background, on a schedule | the application's background budgets, its output at most 64 KiB |
+| Linux, `shale` | dry unless `--write`; then atomic | Shale's defaults (the budgets' table), each settable with `--budget NAME=N` |
+
 ## A first script, step by step
 
 Every block of Shale on this page runs as a test, on a store shaped like
