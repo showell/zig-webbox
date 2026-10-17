@@ -1,7 +1,7 @@
 # Design: Shale, dogfooded (Claude without bash or Python)
 
 **Status: final, after six rounds** (five, and a sixth by a metal-only adversary) (the box
-and cold reviewers, 2026-10-18). No code yet for the host; the core pieces that
+and cold reviewers, 2026-10-17). No code yet for the host; the core pieces that
 have not moved since round 1 are CC's now (metal-vmm QUEUE 232). Steve: five
 rounds, then a sixth "who only cares about the metal use case" to attack
 anything on the Linux side that seems crufty, whose pushback is mostly vetoed
@@ -10,7 +10,7 @@ detail); then CC builds the rest.
 
 ## The thought experiment
 
-Steve, 2026-10-18: ban Claude from running bash and Python, which forces us to
+Steve, 2026-10-17: ban Claude from running bash and Python, which forces us to
 dogfood Shale. Fall back to bash or Python only where Shale cannot do the job
 yet, and then **either queue the missing feature or justify why it is out of
 Shale's scope**. A litmus test: "if we're reaching for Python, then why not do
@@ -21,7 +21,7 @@ repo of its own may come later. Bootstrap: `shale` on bash's search path.
 
 ## Who writes Shale
 
-**A well-meaning agent, who makes mistakes** (Steve, 2026-10-18). So the
+**A well-meaning agent, who makes mistakes** (Steve, 2026-10-17). So the
 design is not paranoid about hostile scripts (no defences against a lexer
 denial of service), but careful about slips: a mistake must end in a clear
 stop, never a wrong answer, a panic, or damage. That is the test for every
@@ -233,7 +233,7 @@ most 200 ms and stop reading. **The keep is a pure file:** the first N lines,
 a ring of the last M, each cut at `width`, the counts: memory bounded by
 `(N+M)·width`. About 900 lines and 500 of tests.
 
-**Chunk 0's experiment, done (the box, 2026-10-18):** a script that traps and
+**Chunk 0's experiment, done (the box, 2026-10-17):** a script that traps and
 logs every signal, with one child in its process group and one in a session
 of its own, run under a 4-second Bash timeout.
 - **Claude Code does not kill a Bash call past its timeout: it moves it to
@@ -287,7 +287,7 @@ asserted, one write, every literal multi-line.
   is part of the string. **`--[==[ ... ]==]` is a block comment**, as Lua's;
   `--[[` is refused as `[[` is, and `--[=x` is a line comment. **The fuzz
   corpus covers it before it lands.** Not against an attacker: Shale's authors
-  are well-meaning agents (Steve, 2026-10-18: "we don't have to be paranoid
+  are well-meaning agents (Steve, 2026-10-17: "we don't have to be paranoid
   about lexer denial-of-service attacks"), but they make mistakes (an unclosed
   long string, a wrong level, end of file inside a closer), and on metal a
   lexer bug is a kernel panic where a clean stop was owed.
@@ -408,7 +408,7 @@ clock are re-pinned, saying so.
 Remembered rules fail; this one is enforced.
 
 - **Who is held to it: top-level Claude and CC; local cold agents are
-  exempt** (Steve, 2026-10-18: "We will probably exempt local cold agents from
+  exempt** (Steve, 2026-10-17: "We will probably exempt local cold agents from
   needing to learn shale. Top-level Claude and CC should be able to amortize
   the learning curve"). So the hook should tell a subagent's call from the
   top-level one's: **unverified whether PreToolUse's input says so** (an
@@ -483,7 +483,7 @@ accepted changes take that back down:
 image's size before and after** (round 6: the script module alone would miss
 what the store and the route carry).
 
-## The queue, in Shale (Steve, 2026-10-18)
+## The queue, in Shale (Steve, 2026-10-17)
 
 The queue Claude and CC share (metal-vmm's `QUEUE.md`, `QUEUE-ARCHIVE.md`,
 `FEEDBACK.md`) is edited by hand today, through anchored python edits, and its
