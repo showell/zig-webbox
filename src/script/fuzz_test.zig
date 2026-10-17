@@ -95,7 +95,8 @@ fn soup(r: std.Random, alloc: std.mem.Allocator) ![]u8 {
     return out.items;
 }
 
-test "fuzz: every random or mutated source ends, finished or stopped, inside its budgets and its root" {
+test "expensive fuzz: fuzz: every random or mutated source ends, finished or stopped, inside its budgets and its root" {
+    if (!@import("script_test_options").expensive) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -144,7 +145,8 @@ test "fuzz: every random or mutated source ends, finished or stopped, inside its
     try testing.expect(stopped.get(.syntax) + stopped.get(.refused) < corpus.len + options.fuzz_runs);
 }
 
-test "fuzz: the same source, store and now give the same output, the same stop and the same effects, byte for byte" {
+test "expensive fuzz: fuzz: the same source, store and now give the same output, the same stop and the same effects, byte for byte" {
+    if (!@import("script_test_options").expensive) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var threaded = std.Io.Threaded.init(testing.allocator, .{});

@@ -487,7 +487,7 @@ pub fn Server(comptime S: type) type {
                     return false;
                 };
                 defer {
-                    watched.done.store(true, .release);
+                    watched.end(io);
                     watcher.join();
                 }
                 bus.serveKeptCounted(hub, kept, &sw.interface, &watched.writes);
@@ -704,14 +704,24 @@ const WriteWatch = struct {
     stream: net.Stream,
     ms: u64,
     writes: std.atomic.Value(u64) = .init(0),
-    done: std.atomic.Value(bool) = .init(false),
+    /// Woken as well as stored: the watcher waits on it, so the stream's end
+    /// is not held for the rest of a step (a quarter of the deadline).
+    state: std.atomic.Value(State) = .init(.watching),
+
+    const State = enum(u32) { watching, ended };
+
+    fn end(self: *WriteWatch, io: Io) void {
+        self.state.store(.ended, .release);
+        io.futexWake(State, &self.state.raw, 1);
+    }
 
     fn run(self: *WriteWatch, io: Io) void {
         const step = @max(self.ms / 4, 10);
         var last = self.writes.load(.acquire);
         var still: u64 = 0;
-        while (!self.done.load(.acquire)) {
-            Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(@intCast(step)) }, io) catch {};
+        while (self.state.load(.acquire) == .watching) {
+            io.futexWaitTimeout(State, &self.state.raw, .watching, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(@intCast(step)) } }) catch {};
+            if (self.state.load(.acquire) == .ended) return;
             const now = self.writes.load(.acquire);
             if (now != last or now % 2 == 0) {
                 last = now;
@@ -2305,6 +2315,29 @@ test "linux_host: a kept stream whose reader stays connected but stops reading e
         bench.hub.publish("test-stream", big);
         Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(20) }, io) catch {};
     }
+    try std.testing.expectEqual(@as(usize, 0), heldStreams(io));
+}
+
+test "linux_host: a kept stream's connection is let go as its client hangs up, not at its write watcher's next look" {
+    // The watcher looks every quarter of the write deadline (7.5 s); the
+    // stream's end must not wait for it, nor hold the stream's slot.
+    bus.Subscriber.keepalive_ms = 200;
+    defer bus.Subscriber.keepalive_ms = bus.Subscriber.keepalive_s * std.time.ms_per_s;
+    var bench: Bench = undefined;
+    try bench.init();
+    defer bench.deinit();
+    const io = bench.threaded.io();
+    var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nx");
+    var waited: u32 = 0;
+    while (heldStreams(io) < 1 and waited < 2000) : (waited += 10) {
+        Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), heldStreams(io));
+    const from = Io.Clock.now(.awake, io);
+    c.end(io);
+    const ms = @divFloor(from.durationTo(Io.Clock.now(.awake, io)).nanoseconds, std.time.ns_per_ms);
+    errdefer std.debug.print("let go after {d} ms\n", .{ms});
+    try std.testing.expect(ms < 1000);
     try std.testing.expectEqual(@as(usize, 0), heldStreams(io));
 }
 

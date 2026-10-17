@@ -149,6 +149,9 @@ pub const Finder = struct {
         return .{ .run = run, .pos = pos, .needle = needle };
     }
 
+    /// The compares a search does between two charges (whole steps of them).
+    const batch_compares = 64 * 1024;
+
     /// Where the needle first is in `hay` at or after `from`.
     pub fn find(f: *const Finder, hay: []const u8, from: usize) Error!?usize {
         const n = f.needle;
@@ -158,15 +161,30 @@ pub const Finder = struct {
         var at = from;
         var stops: u64 = 0;
         var compared: u64 = 0;
+        // **PAID AS IT GOES** (the box, 2026-10-17): a near-match search
+        // does haystack x needle compares, so one charged at its end did all
+        // of them before a budget could stop it (8 billion at 300,000 and
+        // 30,000 bytes). Each batch of compares is charged when it is done,
+        // whole steps of it, so a budget stops the search within a batch and
+        // a needle; the total charged is what it was.
+        var paid_stops: u64 = 0;
+        var paid_compared: u64 = 0;
         const found: ?usize = while (std.mem.indexOfScalarPos(u8, hay, at, n[0])) |i| {
             stops += 1;
             if (hay.len - i < n.len) break null;
             compared += n.len - 1;
             if (std.mem.eql(u8, hay[i + 1 ..][0 .. n.len - 1], n[1..])) break i;
             at = i + 1;
+            if (compared - paid_compared >= batch_compares) {
+                const whole = (compared - paid_compared) / bi.bytes_per_step * bi.bytes_per_step;
+                f.run.tally(stops - paid_stops + whole);
+                try f.run.charge(f.pos, stops - paid_stops + whole / bi.bytes_per_step);
+                paid_stops = stops;
+                paid_compared += whole;
+            }
         } else null;
-        f.run.tally((if (found) |i| i + n.len else hay.len) -| from + stops + compared);
-        try f.run.charge(f.pos, stops + (std.math.divCeil(u64, compared, bi.bytes_per_step) catch unreachable));
+        f.run.tally((if (found) |i| i + n.len else hay.len) -| from + (stops - paid_stops) + (compared - paid_compared));
+        try f.run.charge(f.pos, stops - paid_stops + (std.math.divCeil(u64, compared - paid_compared, bi.bytes_per_step) catch unreachable));
         return found;
     }
 };

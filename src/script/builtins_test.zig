@@ -231,7 +231,8 @@ test "builtins: every builtin's work is charged, so one call cannot hide a milli
     try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
 }
 
-test "builtins: a change on the disk is in the effects log, however little arena is left (every limit swept)" {
+test "expensive sweep: builtins: a change on the disk is in the effects log, however little arena is left (every limit swept)" {
+    if (!@import("script_test_options").expensive) return error.SkipZigTest;
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -575,24 +576,45 @@ test "builtins: a search pays for its matches and its compares: dense matches co
 test "builtins: a long near-match needle pays for its compares: each search stops at the step budget, quickly, instead of running for seconds" {
     // At 208's first cut each of these did haystack x needle work for a
     // step a haystack byte: tens of seconds inside the budget. Now every
-    // compare is charged, so the budget ends each one soon.
+    // compare is charged, so the budget ends each one soon. The sizes keep
+    // the two apart: the setup takes about 12,000 steps, a search charged
+    // per compare about 572,000, one charged per haystack byte (the bug)
+    // about 22,000, and the budget is 50,000.
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
-    const big = try testing.allocator.alloc(u8, 300_000);
+    const big = try testing.allocator.alloc(u8, 10_000);
     defer testing.allocator.free(big);
     @memset(big, 'a');
     try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/as.txt", .data = big });
     const calls = [_][]const u8{ "find(hay, needle)", "contains(hay, needle)", "substitute(hay, needle, \"x\")", "split(hay, needle)", "count_in(\"as.txt\", needle)", "find_in(\"as.txt\", needle)" };
     for (calls) |call| {
         var src: [256]u8 = undefined;
-        var r = f.run(try std.fmt.bufPrint(&src, "local hay = rep(\"a\", 300000) local needle = rep(\"a\", 30000) .. \"b\" local x = {s}", .{call}), .{ .steps = 2_000_000 });
+        var r = f.run(try std.fmt.bufPrint(&src, "local hay = rep(\"a\", 10000) local needle = rep(\"a\", 1000) .. \"b\" local x = {s}", .{call}), .{ .steps = 50_000 });
         defer r.deinit();
         errdefer std.debug.print("{s}\n", .{call});
         try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
     }
     // Matches found where they are.
-    try f.expectOutput("print(count_in(\"as.txt\", rep(\"a\", 30000)), find(rep(\"ab\", 5), \"bab\"))", "10\t2\n");
+    try f.expectOutput("print(count_in(\"as.txt\", rep(\"a\", 1000)), find(rep(\"ab\", 5), \"bab\"))", "10\t2\n");
+}
+
+test "builtins: a search the budget stops did about the budget's worth of work, not the whole haystack-by-needle search first" {
+    // A near-match search does haystack x needle compares; it was charged
+    // when it ended, so a budget stopped it only after all of them (8
+    // billion at 300,000 and 30,000 bytes, seconds in one call on metal).
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const budget: u64 = 200_000;
+    var r = f.run("local hay = rep(\"a\", 100000) local needle = rep(\"a\", 10000) .. \"b\" local x = find(hay, needle)", .{ .steps = budget });
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Budget.steps, r.stop.?.budget.?);
+    // At most 40 units of work a step (charge_test's bound), and one batch
+    // of compares (64 KiB) and one needle past it: about 8 million, where
+    // the whole search is 900 million.
+    errdefer std.debug.print("work {d}\n", .{r.work});
+    try testing.expect(r.work <= budget * 40 + 64 * 1024 + 10_001);
 }
 
 test "builtins: every scan of a run reuses one buffer: five hundred files scanned cost no more arena than one" {

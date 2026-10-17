@@ -244,6 +244,7 @@ test {
     _ = @import("builtins_cookbook_test.zig");
     _ = @import("examples_test.zig");
     _ = @import("portable_test.zig");
+    _ = @import("lex_fuzz_test.zig");
     _ = builtins;
     _ = @import("fuzz_test.zig");
     _ = @import("charge_test.zig");

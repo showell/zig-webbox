@@ -20,6 +20,7 @@ in, its log (`~/.local/state/shale/wants.tsv`) feeds this file instead.
 | 2026-10-17 | http-status | `curl -s -o /dev/null -w "%{http_code}"` after publishing each essay | `run` of curl and its kept line; later `http_get` |
 | 2026-10-17 | doc-check | five cold agents audited every doc in seven repos by hand; each listed checks a script could run every time: every cited path and `file:N` resolves, in this repo or a named sibling; every tracked doc is linked from the README; a README names no release tag or short hash; no "Steve, DATE" later than its line's commit; each table of names (builtins, knobs, routes, env vars, budgets, `/version` fields, build steps, scripts) equals the code's list | `git_ls_files`, `walk`, `re_find` over docs and source, `run` of `git log -1 --format=%cs`; one Shale script per repo in `.shale/`, run by its gate |
 | 2026-10-17 | queue-check | the metal-vmm audit found duplicate numbers in QUEUE-ARCHIVE.md (99, 101, B14, B16, B23, P1), done items in the live queue, a stale "continue from 225", sections out of order | QUEUE 233 item 6's `queue_check`, with those duplicates as its fixtures |
+| 2026-10-17 | walk-more-trap | on v33's prod, `walk("chat", {like = "*.md"})` ended with a `more` entry whose path was a `.png`; my script took it for a transcript (SHALE.md's checklist says to read `kind` first; I didn't) | a filtered walk's `more` entry still trips a careful author: name it so it can't be taken for a match (a `resume` field on the walk's result, not an entry), or make `like` apply to it |
 
 ## Out of scope
 

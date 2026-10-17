@@ -86,11 +86,30 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     // **THE SCRIPT FUZZER'S COUNT** (src/script/fuzz_test.zig): a few hundred
     // sources in the tests, as many as asked for with -Dscript-fuzz.
-    const script_options = b.addOptions();
-    script_options.addOption(u32, "fuzz_runs", b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400);
+    const fuzz_runs = b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400;
+    // **THE EXPENSIVE ONES HUNT, NO GATE PAYS FOR THEM** (Steve, 2026-10-17:
+    // fuzzers are for bug-hunting expeditions; each bug found becomes a
+    // targeted unit test): a test named `expensive fuzz: ...` or `expensive
+    // sweep: ...` is skipped by `zig build test` and counted as skipped, and
+    // `zig build fuzz` runs those and nothing else.
+    const options_of = struct {
+        fn make(bb: *std.Build, runs: u32, expensive: bool) *std.Build.Module {
+            const o = bb.addOptions();
+            o.addOption(u32, "fuzz_runs", runs);
+            o.addOption(bool, "expensive", expensive);
+            return o.createModule();
+        }
+    }.make;
+    const fuzz_step = b.step("fuzz", "The expensive fuzzes and sweeps (tests named `expensive ...`), for a bug hunt; no gate runs them");
     // **ONLY THE TESTS NAMED** (-Dtest-filter=<text>): a change's own tests
     // in seconds, before the whole suite.
     const test_filter = b.option([]const u8, "test-filter", "run only the tests whose names contain this");
+    // **EACH TEST'S TIME** (-Dtest-timing, tools/timing_runner.zig): every
+    // test's wall time, slowest first, so a suite's cost has names.
+    const timing: ?std.Build.Step.Compile.TestRunner = if (b.option(bool, "test-timing", "print each test's time, slowest first") orelse false)
+        .{ .path = b.path("tools/timing_runner.zig"), .mode = .simple }
+    else
+        null;
     // **THE FIXTURE PROGRAM** `run`'s tests run (src/shale_fixture.zig,
     // metal-vmm QUEUE 233): never /bin/sh. Its path reaches the tests as
     // `shale_test_options.fixture`.
@@ -108,15 +127,58 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(path),
             .target = target,
             .optimize = optimize,
-        }), .filters = if (test_filter) |t| b.dupeStrings(&.{t}) else &.{} });
+        }), .filters = if (test_filter) |t| b.dupeStrings(&.{t}) else &.{}, .test_runner = timing });
         // A file of the Linux host reaches the portable half as the module;
         // a file of the library, by path.
         unit.root_module.addImport("webbox", webbox);
         unit.root_module.addImport("webbox_linux", webbox_linux);
         unit.root_module.addImport("host_io", host_io);
-        unit.root_module.addImport("script_test_options", script_options.createModule());
+        unit.root_module.addImport("script_test_options", options_of(b, fuzz_runs, false));
         unit.root_module.addImport("shale_test_options", shale_options.createModule());
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+    // The expensive tests are all reached from webbox.zig's test block.
+    const hunt = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/webbox.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = b.dupeStrings(&.{"expensive "}), .test_runner = timing });
+    hunt.root_module.addImport("webbox", webbox);
+    hunt.root_module.addImport("webbox_linux", webbox_linux);
+    hunt.root_module.addImport("host_io", host_io);
+    hunt.root_module.addImport("script_test_options", options_of(b, fuzz_runs, true));
+    hunt.root_module.addImport("shale_test_options", shale_options.createModule());
+    fuzz_step.dependOn(&b.addRunArtifact(hunt).step);
     test_step.dependOn(&b.addRunArtifact(signer_test).step);
+
+    // **THE APPLICATIONS, BUILT ON THIS TREE** (the box's essay "checks that
+    // stopped checking", 2026-10-17): a webbox change broke angry-gopher's
+    // checks for 14 hours, and the kernel's build and angry-gopher's again
+    // the same day, each found only when someone ran that repo's checks.
+    // `zig build consumers` runs each application's own, against this
+    // checkout (they name it by path, `../zig-webbox`), one at a time,
+    // cheapest first. A sibling that is not there fails the step by name.
+    // Not in `test`: it needs the siblings, and minutes. Run before a webbox
+    // change is pushed to master.
+    const consumers = b.step("consumers", "Each application's own checks against this tree: the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
+    const here = b.build_root.path orelse ".";
+    var prev: ?*std.Build.Step = null;
+    for ([_]struct { repo: []const u8, cmd: []const u8 }{
+        .{ .repo = "observatory", .cmd = "zig build test" },
+        .{ .repo = "dog-park", .cmd = "zig build test" },
+        .{ .repo = "zig-metal-unikernel", .cmd = "zig build gopher" },
+        .{ .repo = "angry-gopher", .cmd = "./ops/check_zig" },
+    }) |c| {
+        const dir = b.pathJoin(&.{ here, "..", c.repo });
+        const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
+            "cd '{s}' 2>/dev/null || {{ echo 'consumers: no {s} beside this checkout ({s})'; exit 1; }}; " ++
+                "echo '==> {s}: {s}'; env -u ZIG_PROGRESS {s}",
+            .{ dir, c.repo, dir, c.repo, c.cmd, c.cmd },
+        ) });
+        run.has_side_effects = true;
+        run.stdio = .inherit;
+        if (prev) |p| run.step.dependOn(p);
+        prev = &run.step;
+    }
+    consumers.dependOn(prev.?);
 }
