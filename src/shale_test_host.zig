@@ -8,6 +8,7 @@ const script = webbox.script;
 const testing = std.testing;
 const Host = @import("shale_host_linux.zig").Host;
 const fixture = @import("shale_test_options").fixture;
+const shale_exe = @import("shale_test_options").shale;
 
 var out_buf: [64 * 1024]u8 = undefined;
 
@@ -33,7 +34,8 @@ pub const T = struct {
         t.root = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}", .{ here, &t.tmp.sub_path });
         const fixture_abs = if (std.fs.path.isAbsolute(fixture)) fixture else try std.fmt.allocPrint(a, "{s}/{s}", .{ here, fixture });
         t.path_env = try std.fmt.allocPrint(a, "PATH={s}:/usr/bin:/bin", .{std.fs.path.dirname(fixture_abs).?});
-        t.host = .{ .alloc = testing.allocator, .root_abs = t.root, .cwd_abs = try a.dupe(u8, here), .env = try a.dupe([]const u8, &.{t.path_env}) };
+        const reaper = if (std.fs.path.isAbsolute(shale_exe)) shale_exe else try std.fmt.allocPrint(a, "{s}/{s}", .{ here, shale_exe });
+        t.host = .{ .alloc = testing.allocator, .root_abs = t.root, .cwd_abs = try a.dupe(u8, here), .env = try a.dupe([]const u8, &.{t.path_env}), .reaper = reaper };
     }
 
     pub fn deinit(t: *T) void {

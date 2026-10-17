@@ -16,6 +16,29 @@ function real(path)
   return host("real", path)
 end
 
+-- **A LONG JOB** (`job_start`): a program that outlives this run, its
+-- output in `opts.log` and its record in `<log>.job`, under a detached
+-- reaper. A later run finds it by that record's path.
+function job_start(argv, opts)
+  return host("job_start", argv, opts)
+end
+
+-- Whether a job (or the one whose record is at that path) still runs.
+function job_alive(job)
+  return host("job_alive", job)
+end
+
+-- A job stopped: TERM to its group, 2 seconds, then KILL; whether it ran.
+function job_stop(job)
+  return host("job_stop", job)
+end
+
+-- Until a job ends, a file holds a string, or the time runs out:
+-- `{ended = "exited" | "found" | "timeout"[, code]}`.
+function job_wait(job, opts)
+  return host("job_wait", job, opts)
+end
+
 -- **THE `&&` OF A SHELL CHAIN**: `r` when its program exited 0; else its
 -- output printed, and a failure naming the program and how it ended.
 function must(r)

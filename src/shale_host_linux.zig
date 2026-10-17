@@ -183,6 +183,9 @@ pub const Host = struct {
     mounts_from: []const u8 = "~/.config/shale/mounts",
     /// The environment a program inherits, `K=V` each (`ZIG_PROGRESS` out).
     env: []const []const u8 = &.{},
+    /// The program a job runs under (`shale` itself, `--reap`): null, no
+    /// jobs.
+    reaper: ?[]const u8 = null,
     spawn_fn: Spawn = realSpawn,
     spawn_ctx: ?*anyopaque = null,
     records: std.ArrayList(Record) = .empty,
@@ -196,7 +199,7 @@ pub const Host = struct {
         return .{ .host = .{ .ctx = h, .call = call }, .path_hook = .{ .ctx = h, .resolve = resolve } };
     }
 
-    fn record(h: *Host, comptime fmt: []const u8, args: anytype) void {
+    pub fn record(h: *Host, comptime fmt: []const u8, args: anytype) void {
         const line = std.fmt.allocPrint(h.alloc, fmt, args) catch return;
         h.records.append(h.alloc, .{ .line = line }) catch h.alloc.free(line);
     }
@@ -239,7 +242,7 @@ fn resolve(ctx: *anyopaque, run: *Run, pos: ast.Pos, path: []const u8) Error!?[]
 }
 
 /// The run's own root, absolute.
-fn rootOf(h: *Host, run: *Run, pos: ast.Pos) Error![]const u8 {
+pub fn rootOf(h: *Host, run: *Run, pos: ast.Pos) Error![]const u8 {
     return absolute(h, run, pos, std.mem.trimEnd(u8, run.root, "/"));
 }
 
@@ -249,7 +252,7 @@ fn absolute(h: *Host, run: *Run, pos: ast.Pos, p: []const u8) Error![]const u8 {
 }
 
 /// A Shale path's OS path, through the mounts or the root, made absolute.
-fn osPath(h: *Host, run: *Run, pos: ast.Pos, v: Value, allow_root: bool) Error![]const u8 {
+pub fn osPath(h: *Host, run: *Run, pos: ast.Pos, v: Value, allow_root: bool) Error![]const u8 {
     const p = try script.builtins_store.pathArg(run, pos, .host, v, allow_root);
     return absolute(h, run, pos, std.mem.trimEnd(u8, p.full, "/"));
 }
@@ -263,6 +266,7 @@ fn call(ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []cons
         return .{ .string = try osPath(h, run, pos, args[0], true) };
     }
     if (std.mem.eql(u8, name, "run")) return runProgram(h, run, pos, args);
+    if (std.mem.startsWith(u8, name, "job_")) return @import("shale_host_jobs.zig").call(h, run, pos, name, args);
     return run.fail(pos, .host, "`{s}`: not on this host", .{name});
 }
 
@@ -273,6 +277,17 @@ const refused = [_]struct { []const []const u8, []const u8 }{
     .{ &.{ "head", "tail", "grep", "sed", "awk", "gawk", "cut", "sort", "uniq", "wc", "cat", "tr" }, "a text tool: Shale's builtins and run's own filter and keep do this" },
     .{ &.{ "env", "xargs", "timeout", "nice", "nohup", "setsid", "stdbuf", "time" }, "a wrapper that runs another program: run that program, with run's own options" },
 };
+
+/// **WHAT `run` AND `job_start` REFUSE**, without a `want`: the lists
+/// above, by basename, and a program by path that git does not track.
+pub fn refuse(h: *Host, run: *Run, pos: ast.Pos, who: []const u8, argv0: []const u8, cwd: []const u8, want: ?[]const u8) Error!void {
+    if (want != null) return;
+    const base = baseName(argv0);
+    for (refused) |group| for (group[0]) |n| if (std.mem.eql(u8, n, base))
+        return run.fail(pos, .refused, "`{s}` of `{s}`: {s}; {{want = \"tag: why\"}} to run it anyway", .{ who, base, group[1] });
+    if (std.mem.indexOfScalar(u8, argv0, '/') != null and !try tracked(h, run, pos, argv0, cwd))
+        return run.fail(pos, .refused, "`{s}` of `{s}`: a program by path that git does not track (a script just written?); {{want = \"tag: why\"}} to run it anyway", .{ who, argv0 });
+}
 
 fn baseName(argv0: []const u8) []const u8 {
     var b = std.fs.path.basename(argv0);
@@ -305,21 +320,21 @@ const Opts = struct {
     want: ?[]const u8 = null,
 };
 
-fn intOpt(run: *Run, pos: ast.Pos, k: []const u8, x: Value) Error!u64 {
+pub fn intOpt(run: *Run, pos: ast.Pos, k: []const u8, x: Value) Error!u64 {
     return switch (x) {
         .int => |n| if (n < 0) run.fail(pos, .argument, "`run`: its `{s}` must be 0 or more, not {d}", .{ k, n }) else @intCast(n),
         else => run.fail(pos, .type, "`run`: its `{s}` must be an integer, not {s}", .{ k, x.typeName() }),
     };
 }
 
-fn strOpt(run: *Run, pos: ast.Pos, k: []const u8, x: Value) Error![]const u8 {
+pub fn strOpt(run: *Run, pos: ast.Pos, k: []const u8, x: Value) Error![]const u8 {
     return switch (x) {
         .string => |s| s,
         else => run.fail(pos, .type, "`run`: its `{s}` must be a string, not {s}", .{ k, x.typeName() }),
     };
 }
 
-fn mapOpt(run: *Run, pos: ast.Pos, k: []const u8, x: Value) Error!*script.value.Table {
+pub fn mapOpt(run: *Run, pos: ast.Pos, k: []const u8, x: Value) Error!*script.value.Table {
     return switch (x) {
         .table => |t| if (t.kind == .list) run.fail(pos, .type, "`run`: its `{s}` must be a map, not a list", .{k}) else t,
         else => run.fail(pos, .type, "`run`: its `{s}` must be a map, not {s}", .{ k, x.typeName() }),
@@ -436,14 +451,7 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     }
 
     const cwd = if (o.cwd) |c| try osPath(h, run, pos, c, true) else try rootOf(h, run, pos);
-    // What it refuses, without a `want`.
-    const base = baseName(argv[0]);
-    if (o.want == null) {
-        for (refused) |group| for (group[0]) |n| if (std.mem.eql(u8, n, base))
-            return run.fail(pos, .refused, "`run` of `{s}`: {s}; {{want = \"tag: why\"}} to run it anyway", .{ base, group[1] });
-        if (std.mem.indexOfScalar(u8, argv[0], '/') != null and !try tracked(h, run, pos, argv[0], cwd))
-            return run.fail(pos, .refused, "`run` of `{s}`: a program by path that git does not track (a script just written?); {{want = \"tag: why\"}} to run it anyway", .{argv[0]});
-    }
+    try refuse(h, run, pos, "run", argv[0], cwd, o.want);
 
     // The environment: inherited, `env` added, `secrets` read in.
     var env: std.ArrayList([]const u8) = .empty;

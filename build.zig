@@ -101,6 +101,8 @@ pub fn build(b: *std.Build) void {
     }) });
     const shale_options = b.addOptions();
     shale_options.addOptionPath("fixture", fixture.getEmittedBin());
+    // The jobs' reaper is `shale` itself (`shale --reap`): its tests run it.
+    shale_options.addOptionPath("shale", runner.getEmittedBin());
     for ([_][]const u8{ "src/store.zig", "src/counter.zig", "src/bus.zig", "src/mem_meter.zig", "src/host_facts.zig", "src/bind.zig", "src/webbox.zig", "src/webbox_linux.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),

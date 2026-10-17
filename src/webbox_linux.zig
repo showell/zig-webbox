@@ -21,6 +21,8 @@ pub const shale_keep = @import("shale_keep.zig");
 pub const shale_spawn = @import("shale_spawn.zig");
 /// Shale's Linux host: `run`, `real`, mounts, behind the core's seam.
 pub const shale_host_linux = @import("shale_host_linux.zig");
+/// Jobs: programs that outlive the run, under a detached reaper.
+pub const shale_jobs = @import("shale_jobs.zig");
 
 test {
     _ = linux_host;
@@ -31,6 +33,8 @@ test {
     _ = shale_keep;
     _ = shale_spawn;
     _ = shale_host_linux;
+    _ = shale_jobs;
     _ = @import("shale_prelude_linux_test.zig");
     _ = @import("shale_prelude_git_test.zig");
+    _ = @import("shale_jobs_test.zig");
 }

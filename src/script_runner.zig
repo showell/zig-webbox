@@ -41,6 +41,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer err.flush() catch {};
 
     const argv = try init.minimal.args.toSlice(arena);
+    // **THE REAPER** (`shale --reap ...`): a job's, detached by
+    // `job_start`; its environment is the job's.
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "--reap")) {
+        const env = try shale_host.baseEnv(arena, init.environ_map);
+        return linux.shale_jobs.reapMain(arena, argv[2..], env);
+    }
     var args_buf: [64]script.Arg = undefined;
     var why_buf: [512]u8 = undefined;
     const c = switch (cli.parse(argv[1..], init.environ_map.get("SHALE_ROOT"), &args_buf, &why_buf)) {
@@ -96,6 +102,7 @@ pub fn main(init: std.process.Init) !u8 {
         .mounts = mounts.mounts,
         .mounts_from = mounts.from,
         .env = try shale_host.baseEnv(arena, init.environ_map),
+        .reaper = reaperPath(arena),
     };
     defer host.deinit();
     const seam = host.options();
@@ -122,4 +129,12 @@ pub fn main(init: std.process.Init) !u8 {
     for (host.records.items, records) |r, *line| line.* = r.line;
     try cli.printReport(&result, cli.scriptName(c), preludes, .{ .verbose = c.verbose, .dry_run = c.mode == .dry_run, .records = records, .budgets = c.budgets }, err);
     return if (result.finished()) 0 else 1;
+}
+
+/// This program's own path, for the jobs' reaper: `/proc/self/exe`.
+fn reaperPath(a: std.mem.Allocator) ?[]const u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.os.linux.readlink("/proc/self/exe", &buf, buf.len);
+    if (std.os.linux.errno(n) != .SUCCESS) return null;
+    return a.dupe(u8, buf[0..n]) catch null;
 }
