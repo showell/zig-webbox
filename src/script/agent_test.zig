@@ -232,3 +232,29 @@ test "docs/SHALE-AGENTS.md: every shale block runs on the checkout, as a dry run
     try testing.expectEqual(@as(usize, 0), wrong);
     try testing.expect(all.len >= 5);
 }
+
+test "agent: a result says what the run took of its store budgets, as the Linux tool prints it" {
+    var t: Tree = undefined;
+    try t.init();
+    defer t.deinit();
+    var r = t.run("local a = ls(\"\") local b = ls(\"src\") local c = read(\"README.md\")", .{});
+    defer r.deinit();
+    try testing.expectEqual(@as(u64, 3), r.reads);
+    try testing.expectEqual(@as(u64, 4), r.read_bytes);
+    try testing.expectEqual(@as(u64, 0), r.changes);
+    var w = t.run("replace(\"x.txt\", \"hi\") mkdir(\"d\")", .{ .mode = .dry_run });
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, 2), w.changes);
+}
+
+test "agent: between gives the text after one string and before the next, or nil" {
+    var t: Tree = undefined;
+    try t.init();
+    defer t.deinit();
+    try t.expectOutput(
+        \\print(between("// DEPARTS (bounded): four", "DEPARTS (", ")"))
+        \\print(between("props.always(@src(), x, \"tcp: a b\", .{})", "\"", "\""))
+        \\print(between("a=1;b=2", "b=", ""), between("abc", "", "b"), between("abc", "x", "c"), between("abc", "a", "x"))
+        \\print(between("((x))", "(", ")"))
+    , .{}, "bounded\ntcp: a b\n2\ta\tnil\tnil\n(x\n");
+}

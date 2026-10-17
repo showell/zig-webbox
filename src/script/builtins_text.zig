@@ -30,6 +30,7 @@ pub const specs = [_]bi.Spec{
     spec(.lower, 1, 1, cased(.lower)),
     spec(.like, 2, 2, like),
     spec(.match_path, 2, 2, matchPath),
+    spec(.between, 3, 3, between),
     spec(.tostring, 1, 1, tostring),
     spec(.tonumber, 1, 1, tonumber),
     spec(.parse_int, 1, 1, parseInt),
@@ -349,6 +350,27 @@ fn parseInt(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     run.tally(str.len);
     const n = bi.parseInteger(std.mem.trim(u8, str, " \t\r\n")) orelse return .nil;
     return .{ .int = n };
+}
+
+/// **`between(s, a, b)`** (CC's own, after QUEUE 229's cookbook): the text
+/// after the first `a` in `s` and before the first `b` after it, or nil
+/// when either is not there. `a` of "" is `s`'s start, `b` of "" its end.
+/// What a field's extraction needs without regular expressions: the
+/// reason in `DEPARTS (bounded):`, a call's first string literal.
+fn between(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const s = try bi.stringArg(run, pos, .between, args[0], "its first argument");
+    const a = try bi.stringArg(run, pos, .between, args[1], "what it starts after");
+    const b = try bi.stringArg(run, pos, .between, args[2], "what it ends before");
+    const fa = try Finder.init(run, pos, a);
+    const start = (try fa.find(s, 0) orelse return .nil) + a.len;
+    if (b.len == 0) {
+        try run.charge(pos, s.len);
+        return .{ .string = s[start..] };
+    }
+    const fb = try Finder.init(run, pos, b);
+    const end = try fb.find(s, start) orelse return .nil;
+    try bi.chargeBytes(run, pos, end + b.len);
+    return .{ .string = s[start..end] };
 }
 
 /// **`match_path(path, pattern)`** (QUEUE 229, chunk 4): whether a path

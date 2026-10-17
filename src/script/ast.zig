@@ -48,6 +48,7 @@ pub const Builtin = enum {
     match_path,
     basename,
     strip_suffix,
+    between,
     // numbers
     min,
     max,

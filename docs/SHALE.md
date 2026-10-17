@@ -556,6 +556,7 @@ the errors column says the rest.
 | `trim`, `upper`, `lower` `(s)` | strings | |
 | `like(s, pattern)` | a boolean | |
 | `match_path(path, pattern)` | a boolean | `argument` past 64 parts |
+| `between(s, a, b)` | the text between, or nil | |
 | `rep(s, n)` | `s`, `n` times | `argument` for `n` < 0 |
 | `substitute(s, old, new)` | `s` with each `old` replaced | `argument` for `old` = "" |
 | `path(a, b, ...)` | the parts joined with `/` | |
@@ -646,6 +647,7 @@ the bytes compared there a step for 16 (see "What a builtin costs").
 | `sub(s, i[, j])` | Lua's: 1-based, inclusive, negatives counted from the end, clamped |
 | `trim(s)`, `upper(s)`, `lower(s)` | ASCII only |
 | `like(s, pattern)` | whether the whole of `s` matches: `*` is any run of bytes, `?` is one byte, any other byte is itself. Every byte looked at is a step, so a pattern that backtracks a long string runs out of steps |
+| `between(s, a, b)` | the text after the first `a` in `s` and before the first `b` after it, or nil when either is not there; `a` of "" is the start, `b` of "" the end: `between(line, "DEPARTS (", ")")`. A field's extraction, without regular expressions |
 | `match_path(path, pattern)` | whether a path matches a glob, part by part on `/`: `**` is any number of parts, none included; in any other part `*` and `?` are `like`'s, never across a `/`. `src/**/*.zig` is every `.zig` under `src`, `src/tcp*.zig` only those in it. The prelude's `glob` uses it |
 | `rep(s, n)` | `s`, `n` times over; charged before it is made |
 | `substitute(s, old, new)` | every `old` replaced by `new`, left to right, none overlapping; `old` = "" is an error |

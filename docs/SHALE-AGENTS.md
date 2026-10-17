@@ -18,6 +18,10 @@ there to stay safe is what an agent wants on Linux too:**
   directory): no `..`, no absolute paths, no host, no clock but what it is
   handed. A script cannot reach what it was not given.
 
+`shale` ends by saying what the run used of each budget (`── used: 52374
+of 5000000 steps, 12 of 10000 reads, ...`), so the cost of a script is
+known before a bigger run finds the edge.
+
 ```sh
 zig build                      # zig-out/bin/shale
 shale count.shale dir=src      # dry: changes logged, none made
@@ -31,7 +35,8 @@ default that is an integer or a boolean reads the value as one.
 **What it has for code:** `glob(pattern)` (`**` any folders, `*` and `?`
 within one; hidden names like `.git` and `.zig-cache` left out),
 `grep(p, s)` (the lines holding a literal, numbered), `read_lines` and
-`count_lines` for a file of any size, `edit(p, old, new[, {all, word}])`
+`count_lines` for a file of any size, `between(s, a, b)` (the text after
+one string and before the next), `edit(p, old, new[, {all, word}])`
 (a literal replaced, its diff printed), `walk` with `skip`, and the
 language's own `split`, `words`, `contains`, `sort`, `table` and maps. The
 whole language is [`SHALE.md`](SHALE.md).
@@ -49,7 +54,7 @@ local by = {}
 local total = 0
 for p in glob("src/tcp*.zig") do
   for m in grep(p, "DEPARTS (") do
-    local reason = split(split(m.text, "DEPARTS (")[2], ")")[1]
+    local reason = between(m.text, "DEPARTS (", ")")
     by[reason] = get(by, reason, 0) + 1
     total = total + 1
   end
@@ -102,8 +107,8 @@ About even. `count_lines` counts a last line without its newline, as `wc
 ```shale
 for p in glob("src/**/*.zig") do
   for m in grep(p, "props.always(") do
-    local q = split(m.text, "\"")
-    if #q >= 3 then print(p .. ":" .. m.line, q[2]) end
+    local message = between(m.text, "\"", "\"")
+    if message ~= nil then print(p .. ":" .. m.line, message) end
   end
 end
 -- prints:
@@ -119,9 +124,9 @@ for p in sorted(pathlib.Path("src").rglob("*.zig")):
             print(f"{p}:{i}\t{m.group(1)}")
 ```
 
-Shale has no regular expressions: the first string literal is the second
-piece of a `split` on `"`, which an escaped quote inside the message would
-break. For this tree it holds; a regex would hold for more.
+Shale has no regular expressions: the first string literal is what is
+`between` the first two `"`, which an escaped quote inside the message
+would cut short. For this tree it holds; a regex would hold for more.
 
 ### A symbol renamed across a tree, its diff first
 
@@ -201,7 +206,8 @@ after `.zig:` is a seven-line function, and taking the name is two
 ## Where Shale is worse, said plainly
 
 - **No regular expressions** (a question for Steve, in metal-vmm's
-  FEEDBACK). Extracting a field is `split`, `words`, `sub` and a helper.
+  FEEDBACK). Extracting a field is `between`, `split`, `words` and `sub`;
+  a run of digits is a helper.
 - **A file is read whole by `grep` and `edit`**, at most the call-bytes cap
   (1 MiB): a bigger one goes through `read_lines` a part at a time.
 - **Step budgets are real.** A walk of a large tree, or a script that loops

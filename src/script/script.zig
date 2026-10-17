@@ -42,6 +42,11 @@ pub const Result = struct {
     /// stopped: a run has no rollback, so this says what it changed.
     effects: []const Effect,
     steps: u64,
+    /// What the run took of its store budgets (the Linux tool says so at
+    /// its end: a run's cost, beside what it was allowed).
+    reads: u64 = 0,
+    read_bytes: u64 = 0,
+    changes: u64 = 0,
     /// The work counted in tests (`interp.Run.work`); 0 outside them.
     work: u64 = 0,
     /// The most Zig stack the parse or the walk took, in bytes (docs/SHALE.md,
@@ -208,6 +213,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     result.output = out[0..r.out_len];
     result.effects = r.effects.items;
     result.steps = r.steps;
+    result.reads = r.reads;
+    result.read_bytes = r.read_bytes;
+    result.changes = r.changes;
     result.collections = r.collections;
     result.tried_change = r.tried_change;
     result.work = r.work;

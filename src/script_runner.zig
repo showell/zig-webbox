@@ -63,6 +63,9 @@ pub fn main(init: std.process.Init) !u8 {
     try w.writeAll(result.output);
     try w.flush();
     try script.report(&result, c.file orelse "-e", err);
+    // **WHAT IT COST**, beside what it was allowed: an agent sees how near a
+    // budget a script ran before the next run finds the edge.
+    try err.print("── used: {d} of {d} steps, {d} of {d} reads, {d} of {d} read bytes, {d} of {d} output bytes\n", .{ result.steps, c.budgets.steps, result.reads, c.budgets.reads, result.read_bytes, c.budgets.read_bytes, result.output.len, c.budgets.output_bytes });
     if (c.mode == .dry_run and result.effects.len > 0)
         try err.print("── a dry run: {d} change{s} logged, none made; --write makes them\n", .{ result.effects.len, if (result.effects.len == 1) "" else "s" });
     return if (result.finished()) 0 else 1;
