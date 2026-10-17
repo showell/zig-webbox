@@ -35,6 +35,7 @@ const linux_config = @import("linux_config.zig");
 const linux_durable = @import("linux_durable.zig");
 const linux_fetch = @import("linux_fetch.zig");
 const linux_writes = @import("linux_writes.zig");
+const linux_streams = @import("linux_streams.zig");
 
 /// The environment variables a host reads, named whole by the application,
 /// so a search for one finds where it is read.
@@ -464,7 +465,7 @@ pub fn Server(comptime S: type) type {
             // A stream the handler kept is route's answer, served here, on
             // this connection's own task, until its client goes away; on an
             // error route has dropped it (metal-vmm QUEUE 157(a)).
-            // **AT MOST `streams_most` HELD** (metal-vmm QUEUE 184): each
+            // **AT MOST `linux_streams.streams_most` HELD** (metal-vmm QUEUE 184): each
             // held a task and its buffers for as long as its client stayed,
             // with no count; a member could open them until no thread was
             // left. One more ends the oldest, as the kernel's do: a browser
@@ -475,8 +476,8 @@ pub fn Server(comptime S: type) type {
                 return req.head.keep_alive and said.whole and !said.close and server.reader.state == .ready;
             };
             {
-                const held_stream = holdStream(io, stream);
-                defer letGoStream(io, held_stream);
+                const held_stream = linux_streams.holdStream(io, stream);
+                defer linux_streams.letGoStream(io, held_stream);
                 // **ITS WRITES WATCHED** (198.6): a write under way and
                 // unmoved past the deadline has its socket shut, so it fails
                 // and the stream ends. A stream with no watcher is not
@@ -620,57 +621,6 @@ fn readWhole(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?
 }
 
 const Raced = union(enum) { read: void, watch: void };
-
-/// The most streams held at once (184), as the kernel's default, and a test's own.
-pub const streams_most: usize = 64;
-pub var streams_most_for_test: ?usize = null;
-var held_streams: [streams_most]?struct { stream: net.Stream, since: u64 } = @splat(null);
-var held_lock: Io.Mutex = .init;
-var held_count: u64 = 0;
-
-const Held = struct { slot: usize, ticket: u64 };
-
-/// A slot for a stream about to be served; the oldest ended to make room.
-fn holdStream(io: Io, stream: net.Stream) Held {
-    held_lock.lockUncancelable(io);
-    defer held_lock.unlock(io);
-    const most = @min(streams_most_for_test orelse streams_most, streams_most);
-    held_count += 1;
-    var free: ?usize = null;
-    var oldest: usize = 0;
-    for (held_streams[0..most], 0..) |h, i| {
-        if (h) |x| {
-            if (held_streams[oldest] == null or x.since < held_streams[oldest].?.since) oldest = i;
-        } else if (free == null) free = i;
-    }
-    const i = free orelse at: {
-        // Its socket shut: its writes fail, and its task lets the slot go.
-        held_streams[oldest].?.stream.shutdown(io, .both) catch {};
-        break :at oldest;
-    };
-    held_streams[i] = .{ .stream = stream, .since = held_count };
-    return .{ .slot = i, .ticket = held_count };
-}
-
-/// A stream's slot given back, unless a newer stream has taken it.
-fn letGoStream(io: Io, h: Held) void {
-    held_lock.lockUncancelable(io);
-    defer held_lock.unlock(io);
-    if (held_streams[h.slot]) |x| if (x.since == h.ticket) {
-        held_streams[h.slot] = null;
-    };
-}
-
-/// How many streams are held now, for tests.
-fn heldStreams(io: Io) usize {
-    held_lock.lockUncancelable(io);
-    defer held_lock.unlock(io);
-    var n: usize = 0;
-    for (held_streams) |h| if (h != null) {
-        n += 1;
-    };
-    return n;
-}
 
 /// The most a request's head may take to arrive whole (184), and a test's own.
 pub const head_ms: u64 = 10_000;
@@ -2061,10 +2011,10 @@ test "linux_host: a kept stream whose reader stays connected but stops reading e
     var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nx");
     defer c.end(io);
     var waited: u32 = 0;
-    while (heldStreams(io) < 1 and waited < 2000) : (waited += 10) {
+    while (linux_streams.heldStreams(io) < 1 and waited < 2000) : (waited += 10) {
         Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), heldStreams(io));
+    try std.testing.expectEqual(@as(usize, 1), linux_streams.heldStreams(io));
     // The reader reads nothing more. Events far past what the sockets
     // buffer: the host's write blocks, and a write with no deadline blocks
     // for good (the mailbox's overflow is only looked at between writes).
@@ -2072,11 +2022,11 @@ test "linux_host: a kept stream whose reader stays connected but stops reading e
     defer std.testing.allocator.free(big);
     @memset(big, 'e');
     waited = 0;
-    while (heldStreams(io) > 0 and waited < 5000) : (waited += 20) {
+    while (linux_streams.heldStreams(io) > 0 and waited < 5000) : (waited += 20) {
         bench.hub.publish("test-stream", big);
         Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(20) }, io) catch {};
     }
-    try std.testing.expectEqual(@as(usize, 0), heldStreams(io));
+    try std.testing.expectEqual(@as(usize, 0), linux_streams.heldStreams(io));
 }
 
 test "linux_host: a kept stream's connection is let go as its client hangs up, not at its write watcher's next look" {
@@ -2090,16 +2040,16 @@ test "linux_host: a kept stream's connection is let go as its client hangs up, n
     const io = bench.threaded.io();
     var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n\r\nx");
     var waited: u32 = 0;
-    while (heldStreams(io) < 1 and waited < 2000) : (waited += 10) {
+    while (linux_streams.heldStreams(io) < 1 and waited < 2000) : (waited += 10) {
         Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
     }
-    try std.testing.expectEqual(@as(usize, 1), heldStreams(io));
+    try std.testing.expectEqual(@as(usize, 1), linux_streams.heldStreams(io));
     const from = Io.Clock.now(.awake, io);
     c.end(io);
     const ms = @divFloor(from.durationTo(Io.Clock.now(.awake, io)).nanoseconds, std.time.ns_per_ms);
     errdefer std.debug.print("let go after {d} ms\n", .{ms});
     try std.testing.expect(ms < 1000);
-    try std.testing.expectEqual(@as(usize, 0), heldStreams(io));
+    try std.testing.expectEqual(@as(usize, 0), linux_streams.heldStreams(io));
 }
 
 test "linux_host: at most streams_most streams are held: one more ends the oldest, as the kernel does (metal-vmm QUEUE 184)" {
@@ -2107,8 +2057,8 @@ test "linux_host: at most streams_most streams are held: one more ends the oldes
     // send: pinged every 200 ms, not every 25 s, the test's end is not a wait.
     bus.Subscriber.keepalive_ms = 200;
     defer bus.Subscriber.keepalive_ms = bus.Subscriber.keepalive_s * std.time.ms_per_s;
-    streams_most_for_test = 2;
-    defer streams_most_for_test = null;
+    linux_streams.streams_most_for_test = 2;
+    defer linux_streams.streams_most_for_test = null;
     var bench: Bench = undefined;
     try bench.init();
     defer bench.deinit();
@@ -2128,7 +2078,7 @@ test "linux_host: at most streams_most streams are held: one more ends the oldes
             tail[3] = one[0];
         }
         var waited: u32 = 0;
-        while (heldStreams(io) < @min(k + 1, 2) and waited < 2000) : (waited += 10) {
+        while (linux_streams.heldStreams(io) < @min(k + 1, 2) and waited < 2000) : (waited += 10) {
             Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromMilliseconds(10) }, io) catch {};
         }
     }
@@ -2145,7 +2095,7 @@ test "linux_host: at most streams_most streams are held: one more ends the oldes
         };
     }
     try std.testing.expect(ended);
-    try std.testing.expectEqual(@as(usize, 2), heldStreams(io));
+    try std.testing.expectEqual(@as(usize, 2), linux_streams.heldStreams(io));
 }
 
 test "linux_host: /admin/host says how many syncs of the data failed, and how many kept streams ended at their write's deadline (metal-vmm QUEUE 198.6)" {
