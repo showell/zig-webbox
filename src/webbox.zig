@@ -56,6 +56,9 @@ pub const host_facts = @import("host_facts.zig");
 /// The library's number parses that no request reaches, for an
 /// application's request-edge check (edge_sites.zig).
 pub const edge_sites = @import("edge_sites.zig");
+/// A Zig file's `@import`s and `@embedFile`s, from Zig's parser: the library
+/// check's reading, and Shale's `zig_imports` on Linux.
+pub const zig_refs = @import("zig_refs.zig");
 /// One GET from the application, through its host (host_fetch.zig).
 pub const host_fetch = @import("host_fetch.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
@@ -96,6 +99,7 @@ test {
     _ = host_facts;
     _ = host_fetch;
     _ = edge_sites;
+    _ = zig_refs;
     _ = wake;
     _ = log_view;
     _ = admin_log;

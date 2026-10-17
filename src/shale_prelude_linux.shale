@@ -204,6 +204,13 @@ function zig_move(from, to, names, opts?)
   return host("zig_move", from, to, packed)
 end
 
+-- **A ZIG FILE'S `@import`s AND `@embedFile`s** (metal-vmm QUEUE 235, 3),
+-- from Zig's parser, in source order: each `{kind = "import" | "embed",
+-- target, name, line, file = "found" | "missing" | "module"}`.
+function zig_imports(path)
+  return host("zig_imports", path)
+end
+
 -- A new file: refused if one is there already.
 function create(p, text)
   if exists(p) then fail("`create`: " .. p .. " is there already: `edit` or `replace` it") end

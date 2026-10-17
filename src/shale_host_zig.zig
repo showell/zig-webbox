@@ -318,6 +318,43 @@ pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .table = t };
 }
 
+/// **`host("zig_imports", path)`**: a Zig file's `@import`s and
+/// `@embedFile`s, from Zig's parser (webbox's zig_refs.zig, library_test's
+/// reading too), in source order: `{kind, target, name, line, file}`, the
+/// file `found` or `missing` beside the importer, or a `module` (a target
+/// with no extension). Charged: the read, the copy, a step a token and a
+/// node, and a step a call for its look at the file.
+pub fn imports(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    if (args.len != 1) return run.fail(pos, .argument, "`zig_imports` takes a path, given {d} arguments", .{args.len});
+    const a = run.alloc;
+    const p = try script.builtins_store.pathArg(run, pos, .host, args[0], false);
+    const src = (try readZig(run, pos, p, false)).?;
+    const got = switch (webbox.zig_refs.refs(a, src) catch return run.oom(pos)) {
+        .ok => |ok| ok,
+        .parse_error => |line| return run.fail(pos, .argument, "`zig_imports`: {s} does not parse as Zig: line {d}", .{ p.rel, line }),
+    };
+    try run.charge(pos, got.tokens + got.nodes + got.refs.len);
+    const dir = std.fs.path.dirnamePosix(p.full) orelse ".";
+    const list = try run.newTable(pos);
+    list.kind = .list;
+    for (got.refs) |r| {
+        const file: []const u8 = if (std.fs.path.extension(r.target).len == 0) "module" else file: {
+            const full = std.fs.path.resolvePosix(a, &.{ dir, r.target }) catch return run.oom(pos);
+            const st = webbox.store.statOrNull(run.io, a, full) catch |e| return script.builtins_store.storeFailed(run, pos, .host, r.target, e);
+            break :file if (st != null) "found" else "missing";
+        };
+        const m = try run.newTable(pos);
+        m.kind = .map;
+        try put(run, pos, m, "kind", .{ .string = @tagName(r.kind) });
+        try put(run, pos, m, "target", .{ .string = r.target });
+        try put(run, pos, m, "name", .{ .string = r.name });
+        try put(run, pos, m, "line", .{ .int = @intCast(r.line) });
+        try put(run, pos, m, "file", .{ .string = file });
+        list.list.append(a, .{ .table = m }) catch return run.oom(pos);
+    }
+    return .{ .table = list };
+}
+
 fn linesOpt(run: *Run, pos: ast.Pos, v: Value) Error!?Lines {
     const m = switch (v) {
         .nil => return null,

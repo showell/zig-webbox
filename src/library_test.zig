@@ -27,6 +27,10 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = @import("host_io").Io;
+const zig_refs = @import("zig_refs.zig");
+
+/// What a reading of a file could not parse, said with the problems.
+var parse_problems: std.ArrayList([]const u8) = .empty;
 
 const Root = struct { file: []const u8, may: []const []const u8 };
 
@@ -35,21 +39,23 @@ const roots = [_]Root{
     .{ .file = "webbox_linux.zig", .may = &.{ "std", "builtin", "host_io", "webbox" } },
 };
 
-/// Every `@import("x")` or `@embedFile("x")` target in `text`, a call split
-/// over lines included, one inside a `//` comment left out.
+/// Every `@import("x")` or `@embedFile("x")` target in `text`, from Zig's
+/// parser (zig_refs.zig, the reading Shale's `zig_imports` shares, metal-vmm
+/// QUEUE 235): a call split over lines is one, a comment's or a string's is
+/// none. A file the parser refuses is a problem of its own. This file's two
+/// other readers stay its own: a root's `pub const NAME = @import("....zig")`
+/// names (`namedModules`) and its `test {` block.
 fn refs(a: std.mem.Allocator, text: []const u8, comptime call: []const u8) ![]const []const u8 {
+    const kind: zig_refs.Kind = if (comptime std.mem.eql(u8, call, "@import")) .import else .embed;
+    const all = switch (try zig_refs.refs(a, try a.dupeZ(u8, text))) {
+        .ok => |ok| ok.refs,
+        .parse_error => |line| {
+            parse_problems.append(a, std.fmt.allocPrint(a, "a file does not parse as Zig at line {d}", .{line}) catch return error.OutOfMemory) catch return error.OutOfMemory;
+            return &.{};
+        },
+    };
     var out: std.ArrayList([]const u8) = .empty;
-    var at: usize = 0;
-    while (std.mem.indexOfPos(u8, text, at, call ++ "(")) |i| {
-        at = i + call.len + 1;
-        const line_start = if (std.mem.lastIndexOfScalar(u8, text[0..i], '\n')) |n| n + 1 else 0;
-        if (std.mem.indexOf(u8, text[line_start..i], "//") != null) continue;
-        var j = at;
-        while (j < text.len and std.ascii.isWhitespace(text[j])) j += 1;
-        if (j >= text.len or text[j] != '"') continue;
-        const end = std.mem.indexOfScalarPos(u8, text, j + 1, '"') orelse continue;
-        try out.append(a, text[j + 1 .. end]);
-    }
+    for (all) |r| if (r.kind == kind) try out.append(a, r.target);
     return out.toOwnedSlice(a);
 }
 
@@ -201,6 +207,8 @@ fn problems(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
         if (ri == 0) portable = seen.items;
     }
     try out.appendSlice(a, try orphanTests(io, a, dir));
+    try out.appendSlice(a, parse_problems.items);
+    parse_problems = .empty;
     return out.toOwnedSlice(a);
 }
 
@@ -231,7 +239,9 @@ test "library: its check finds each kind of mistake, on planted trees" {
     const clean_root = "pub const a = @import(\"a.zig\");\npub const s = @import(\"sub/s.zig\");\n\ntest {\n    _ = a;\n    _ = s;\n}\n";
     try w(tmp.dir, "webbox.zig", clean_root);
     try w(tmp.dir, "webbox_linux.zig", "pub const l = @import(\"l.zig\");\n\ntest {\n    _ = l;\n}\n");
-    try w(tmp.dir, "a.zig", "const std = @import(\"std\");\nconst p = @embedFile(\"prelude.shale\");\n");
+    // A multiline string that holds an import is no import (the text
+    // reader before 235 took it for one).
+    try w(tmp.dir, "a.zig", "const std = @import(\"std\");\nconst p = @embedFile(\"prelude.shale\");\nconst doc =\n    \\\\@import(\"../users.zig\")\n;\n");
     try w(tmp.dir, "sub/s.zig", "const t = @import(\"t.zig\");\n// const u = @import(\"../users.zig\");\n");
     try w(tmp.dir, "sub/t.zig", "const io = @import(\n    \"host_io\",\n);\n");
     try w(tmp.dir, "l.zig", "const webbox = @import(\"webbox\");\nconst fixture = @import(\"l_test_options\").fixture;\n");

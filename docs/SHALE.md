@@ -1163,7 +1163,8 @@ SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
   `~/.config/shale/mounts` (`name = /abs/path` or `name = ~/path` a line).
 - **The preludes after the core's**: the Linux prelude (`run`, `must`,
   `re_lines`, `head_lines`, `tail_lines`, `grep_all`, `unique`, `newest`,
-  `create`, `edits_all`, `zig_rename`, `zig_decls` and `zig_move` (Zig's
+  `create`, `edits_all`, `zig_rename`, `zig_decls`, `zig_move` and
+  `zig_imports` (Zig's
   tokenizer and parser, over the host's calls of those names), and the jobs, `job_start`, `job_alive`, `job_stop`
   and `job_wait`: SHALE-AGENTS.md), the git prelude (`git_status`,
   `git_log`, `git_commit`, ...), the repo's

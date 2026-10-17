@@ -98,6 +98,11 @@ has none of it):
   its `target`, the value `from` gives it). `uses_left` is the code's uses
   only: mentions in comments are yours. Not reported: a method called
   through a value (`hold.begin()`), a name through an `@This()` alias.
+  `zig_imports(p)` lists a Zig file's `@import`s and `@embedFile`s, from
+  Zig's parser (a split call is one, a comment's or a string's none):
+  `{kind, target, name, line, file}`, `file` being `"found"` or
+  `"missing"` beside it, or `"module"` (no extension: `std`, `host_io`).
+  It is library_test.zig's reading too (webbox's `zig_refs`).
   `zig_rename` and `zig_move` read identifiers one way
   (`shale_zig_ast.identifiers`): a field, an enum's member or a nested
   container's own declaration of the name is another thing, and
