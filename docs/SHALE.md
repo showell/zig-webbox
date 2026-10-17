@@ -468,7 +468,8 @@ Two things it does not do:
 
 - floats and `/`;
 - `^`, hex literals and the bitwise operators;
-- a long string without a level (`[[ ... ]]`), and long comments;
+- a long string or a block comment without a level (`[[ ... ]]`,
+  `--[[ ... ]]`);
 - decimal escapes (`\65`), `\u{...}`, `\z` and the rest;
 - `:` method calls;
 - `...`;
@@ -515,7 +516,9 @@ binop     = "or" | "and" | "==" | "~=" | "<" | "<=" | ">" | ">=" | ".."
 unop      = "not" | "-" | "#" ;
 ```
 
-`--` starts a comment that runs to the end of its line. A `STRING` is
+`--` starts a comment that runs to the end of its line; `--[=[ ... ]=]`,
+at any level of `=` as a long string, is a block comment (`--[=x` is a
+line comment). A `STRING` is
 `"..."`, `'...'` or a long string, `[=[ ... ]=]` at any level of `=`.
 
 ## The builtins
