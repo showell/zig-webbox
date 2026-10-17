@@ -580,3 +580,19 @@ test "every cookbook script that walks, past what the site's reads reach, goes o
         try testing.expectEqual(total, sum);
     }
 }
+
+test "example: a count cache torn into words, or into nothing, is read as no cache: chat_topics and stale_caches report it and go on (QUEUE 229)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "log-x 4000\n" });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/hello.count", .data = "\n" });
+    for ([_][]const u8{ chat_topics, stale_caches }) |src| {
+        var r = f.runAt(src, 1791936000, &out_buf);
+        defer r.deinit();
+        errdefer std.debug.print("{s}\n", .{r.output});
+        try finished(&r);
+        try testing.expect(std.mem.indexOf(u8, r.output, "plans") != null);
+    }
+}

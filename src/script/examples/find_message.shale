@@ -23,7 +23,8 @@ function message(path, at)
   local before = read(path, from, at - from)
   local pieces = split(before, "MSG_")
   local head = lines(pieces[#pieces])
-  return {id = "MSG_" .. head[1], from = sub(head[2], 7), date = sub(head[3], 7)}
+  -- A message torn or too long for the window has fewer lines: "?".
+  return {id = "MSG_" .. get(head, 1, "?"), from = sub(get(head, 2, "from: ?"), 7), date = sub(get(head, 3, "date: ?"), 7)}
 end
 
 local part = walk_upto("chat", {like = "*.md", kind = "file", after = START}, budget().reads // 2)

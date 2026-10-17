@@ -31,6 +31,7 @@ pub const specs = [_]bi.Spec{
     spec(.like, 2, 2, like),
     spec(.tostring, 1, 1, tostring),
     spec(.tonumber, 1, 1, tonumber),
+    spec(.parse_int, 1, 1, parseInt),
     spec(.rep, 2, 2, rep),
     spec(.substitute, 3, 3, substitute),
     spec(.path, 1, bi.most_args, path),
@@ -329,6 +330,24 @@ fn tonumber(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     try run.charge(pos, str.len);
     run.tally(str.len);
     return .{ .int = bi.parseInteger(str) orelse return run.fail(pos, .argument, "`tonumber`: \"{s}\" is not an integer (an optional `-`, then decimal digits)", .{str[0..@min(str.len, 40)]}) };
+}
+
+/// **`parse_int(s)`** (QUEUE 229, chunk 3): the integer `s` says, its
+/// blanks around it (spaces, tabs, `\r`, `\n`) let be, or nil for anything
+/// else: a torn line, a word, a number past 64 bits. For data a script did
+/// not write, where `tonumber`'s stop would end the whole report. nil is
+/// nil and an integer itself, so a missing field reads as no number.
+fn parseInt(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const str = switch (args[0]) {
+        .nil => return .nil,
+        .int => return args[0],
+        .string => |s| s,
+        else => return run.fail(pos, .type, "`parse_int` takes a string (or nil, or an integer), not {s}", .{args[0].typeName()}),
+    };
+    try run.charge(pos, str.len);
+    run.tally(str.len);
+    const n = bi.parseInteger(std.mem.trim(u8, str, " \t\r\n")) orelse return .nil;
+    return .{ .int = n };
 }
 
 /// **`like(s, pattern)`**: whether the whole of `s` matches `pattern`, where

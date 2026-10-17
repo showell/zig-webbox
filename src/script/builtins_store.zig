@@ -26,6 +26,8 @@ pub const specs = [_]bi.Spec{
     spec(.is_dir, 1, 1, isDir),
     spec(.read, 1, 3, read),
     spec(.read_or, 2, 2, readOr),
+    spec(.read_lines, 1, 3, readLines),
+    spec(.line_at, 2, 2, lineAt),
     spec(.count_lines, 1, 3, countLines),
     spec(.count_in, 2, 4, scanner(.count)),
     spec(.find_in, 2, 4, scanner(.find)),
@@ -209,6 +211,123 @@ fn readSized(run: *Run, pos: ast.Pos, b: B, p: Path, size: u64, offset: u64, n: 
     run.read_bytes += got;
     try bi.chargeBytes(run, pos, got);
     return .{ .string = buf[0..got] };
+}
+
+// ── lines of a file, a part at a time (QUEUE 229, chunk 3) ──────────────
+
+/// What `read_lines` brings when it is not told: 64 KiB, or the cap.
+const read_lines_part: u64 = 64 * 1024;
+
+/// How much `read_lines` and `line_at` read at a time past where they
+/// were asked, to find a line's end or start.
+const line_piece: u64 = 512;
+
+/// **`read_lines(p[, offset[, n]])`**: the whole lines from byte `offset`
+/// (0-based; 0 unset), as `lines` splits them: at least `n` bytes (64 KiB
+/// unset), and on to the end of the line it stops in, so no line is cut.
+/// `{lines, next, done}`: `next` is where the next part starts, `done`
+/// whether that is the file's end. One store read for the call; the bytes
+/// a read's, the whole part at most the call-bytes cap. `offset` is a line's
+/// start, as a `next` is: one inside a line gives the line's rest.
+fn readLines(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const b: B = .read_lines;
+    const p = try pathArg(run, pos, b, args[0], false);
+    const offset: u64 = if (args.len > 1) blk: {
+        const o = try bi.intArg(run, pos, b, args[1], "its offset");
+        if (o < 0) return run.fail(pos, .argument, "`read_lines`: offset {d} is before the file's start", .{o});
+        break :blk @intCast(o);
+    } else 0;
+    const cap = run.budgets.call_bytes;
+    const n: u64 = if (args.len > 2) blk: {
+        const x = try bi.intArg(run, pos, b, args[2], "its count of bytes");
+        if (x < 1) return run.fail(pos, .argument, "`read_lines`: a part of {d} bytes: it brings at least 1", .{x});
+        break :blk @intCast(x);
+    } else @min(read_lines_part, cap);
+    if (n > cap) return run.fail(pos, .argument, "`read_lines` brings at most {d} bytes in one call, and this asks {d}: a smaller part, and `next` to go on", .{ cap, n });
+    try countRead(run, pos);
+    const size = try fileSize(run, pos, b, p);
+    const start = @min(offset, size);
+    const a = run.alloc;
+    var got: std.ArrayList(u8) = .empty;
+    got.appendSlice(a, (try readSized(run, pos, b, p, size, start, n)).string) catch return run.oom(pos);
+    var end = start + got.items.len;
+    // **NO LINE CUT**: on, a piece at a time, to the end of the last one.
+    if (end < size and got.items[got.items.len - 1] != '\n') while (true) {
+        if (end - start >= cap) return lineTooLong(run, pos, b, start, cap);
+        const piece = (try readSized(run, pos, b, p, size, end, @min(line_piece, cap - (end - start)))).string;
+        if (piece.len == 0) break;
+        if (std.mem.indexOfScalar(u8, piece, '\n')) |i| {
+            got.appendSlice(a, piece[0 .. i + 1]) catch return run.oom(pos);
+            end += i + 1;
+            break;
+        }
+        got.appendSlice(a, piece) catch return run.oom(pos);
+        end += piece.len;
+        if (end == size) break;
+    };
+    const out = try run.newTable(pos);
+    const list = try run.newTable(pos);
+    list.kind = .list;
+    try run.charge(pos, got.items.len);
+    var rest: []const u8 = got.items;
+    while (rest.len > 0) {
+        const nl = std.mem.indexOfScalar(u8, rest, '\n');
+        const line = if (nl) |i| rest[0..i] else rest;
+        list.list.append(a, .{ .string = line }) catch return run.oom(pos);
+        run.tally(line.len + 1);
+        rest = if (nl) |i| rest[i + 1 ..] else "";
+    }
+    out.kind = .map;
+    out.map.put(a, "lines", .{ .table = list }) catch return run.oom(pos);
+    out.map.put(a, "next", .{ .int = @intCast(end) }) catch return run.oom(pos);
+    out.map.put(a, "done", .{ .boolean = end >= size }) catch return run.oom(pos);
+    return .{ .table = out };
+}
+
+fn lineTooLong(run: *Run, pos: ast.Pos, b: B, at: u64, cap: u64) Error {
+    return run.fail(pos, .argument, "`{s}`: the line at offset {d} runs past {d} bytes, the most one call brings", .{ @tagName(b), at, cap });
+}
+
+/// **`line_at(p, offset)`**: the whole line holding byte `offset`, without
+/// its newline (a newline is its line's last byte), or nil at the file's end
+/// or past it. Read back and on from `offset` a piece at a time; the line
+/// at most the call-bytes cap. One store read for the call.
+fn lineAt(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const b: B = .line_at;
+    const p = try pathArg(run, pos, b, args[0], false);
+    const o = try bi.intArg(run, pos, b, args[1], "its offset");
+    if (o < 0) return run.fail(pos, .argument, "`line_at`: offset {d} is before the file's start", .{o});
+    const offset: u64 = @intCast(o);
+    try countRead(run, pos);
+    const size = try fileSize(run, pos, b, p);
+    if (offset >= size) return .nil;
+    const cap = run.budgets.call_bytes;
+    const piece_most = @min(line_piece, cap);
+    // Back to the line's start: just past the newline before `offset`.
+    var lo = offset;
+    while (lo > 0) {
+        const take = @min(lo, piece_most);
+        const piece = (try readSized(run, pos, b, p, size, lo - take, take)).string;
+        if (std.mem.lastIndexOfScalar(u8, piece, '\n')) |i| {
+            lo = lo - take + i + 1;
+            break;
+        }
+        lo -= take;
+        if (offset - lo >= cap) return lineTooLong(run, pos, b, offset, cap);
+    }
+    // On to its end: its newline, or the file's end.
+    var hi = offset;
+    while (hi < size) {
+        const piece = (try readSized(run, pos, b, p, size, hi, @min(piece_most, size - hi))).string;
+        if (std.mem.indexOfScalar(u8, piece, '\n')) |i| {
+            hi += i;
+            break;
+        }
+        hi += piece.len;
+        if (hi - lo > cap) return lineTooLong(run, pos, b, offset, cap);
+    }
+    if (hi - lo > cap) return lineTooLong(run, pos, b, offset, cap);
+    return readSized(run, pos, b, p, size, lo, hi - lo);
 }
 
 // ── scanning a file without holding it ───────────────────────────────────

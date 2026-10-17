@@ -32,11 +32,9 @@ end
 -- A cache's first line as {count, size}; both -1 when it is not two
 -- numbers, as the server reads a torn one.
 function cache(text)
-  local first = lines(text)
-  if #first == 0 then return {count = -1, size = -1} end
-  local w = words(first[1])
+  local w = words(get(lines(text), 1, ""))
   if #w ~= 2 then return {count = -1, size = -1} end
-  return {count = tonumber(w[1]), size = tonumber(w[2])}
+  return {count = parse_int(w[1]) or -1, size = parse_int(w[2]) or -1}
 end
 
 -- now() is 0 where the host gives no clock (the Linux runner): then

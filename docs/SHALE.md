@@ -479,6 +479,8 @@ the errors column says the rest.
 | `exists(p)`, `is_dir(p)` | booleans | `store` (never for absence) |
 | `read(p[, offset[, n]])` | a file, or its part | `argument` past the call-bytes cap; `budget read_bytes`; `store` |
 | `read_or(p, default)` | a file, or `default` when nothing is there | as `read`; a folder is `store` |
+| `read_lines(p[, offset[, n]])` | `{lines, next, done}`: whole lines from `offset` | `argument` for `n` past the call-bytes cap or a line longer; `store` |
+| `line_at(p, offset)` | the line holding `offset`, or nil past the end | `argument` for a line past the call-bytes cap; `store` |
 | `count_lines(p[, offset[, n]])` | the lines in a file or a range | `argument` past the cap; `store` |
 | `count_in(p, s[, offset[, n]])` | `s`'s occurrences in a file or a range | `argument` for "" or past the cap; `store` |
 | `find_in(p, s[, offset[, n]])` | the first `s`'s 0-based offset, or nil | as `count_in` |
@@ -498,6 +500,7 @@ the errors column says the rest.
 | `basename(p)`, `strip_suffix(s, t)` | strings | |
 | `tostring(v)` | a scalar's text | `type` for a list or map |
 | `tonumber(s)` | an integer | `argument` for anything but digits |
+| `parse_int(s)` | an integer, or nil | none: anything but an integer is nil |
 | `min`, `max` `(a, b[, c[, d]])` | integers | `argument` for one or more than four |
 | `abs(n)` | an integer | `arithmetic` for the smallest |
 | `date(seconds)`, `seconds(text)` | each other's inverse | `argument` out of range or unreadable |
@@ -524,6 +527,8 @@ the errors column says the rest.
 | `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `argument` for a file over the call-bytes cap (1 MiB): read it in parts; `budget read_bytes` when the file is longer than what is left; `store` |
 | `read_or(p, default)` | the whole file, or `default` when nothing is at `p` | one read: where `exists` then `read` was two; its bytes as `read`'s | as `read`; a folder is `store` |
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
+| `read_lines(p[, offset[, n]])` | `{lines, next, done}`: the whole lines from byte `offset` (0 unset), at least `n` bytes (64 KiB unset) and on to the end of the line it stops in, so no line is cut; `lines` as `lines` splits them; `next` where the next part starts; `done` whether that is the file's end. `offset` is a line's start, as `next` is | a read; the part's bytes, and up to 512 past it for the last line's end; the whole part at most the call-bytes cap | `argument` for a negative offset, `n` under 1 or past the cap, or a line longer than the cap; `store` |
+| `line_at(p, offset)` | the whole line holding byte `offset`, without its newline (a newline is its own line's last byte); nil at the file's end or past it | a read; the line, read back and on from `offset` 512 bytes at a time, then once more whole | `argument` for a negative offset or a line longer than the call-bytes cap; `store` |
 | `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
 | `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
 | `find_in(p, s[, offset[, n]])` | the 0-based offset of the first `s`, a `read` offset, or nil; of a range, the first that starts in it, so a file found in parts gives what the whole file's would | as `count_in`, stopping at the first | as `count_in` |
@@ -580,6 +585,7 @@ the bytes compared there a step for 16 (see "What a builtin costs").
 | `substitute(s, old, new)` | every `old` replaced by `new`, left to right, none overlapping; `old` = "" is an error |
 | `tostring(v)` | a scalar's text, as `print` writes it |
 | `tonumber(s)` | an optional `-` and decimal digits; anything else is an `argument` error |
+| `parse_int(s)` | the integer `s` says, the blanks around it let be (spaces, tabs, `\r`, `\n`), or nil for anything else: a word, a torn line, a number past 64 bits. nil gives nil and an integer itself, so a field that is missing (`get`) reads as no number. For data the script did not write |
 | `path(a, b, ...)` | the parts (one to four) joined with `/`, each "" left out, so "" is the root: `path("", "top.txt")` is `top.txt` |
 | `basename(p)` | what follows the last `/`, or all of `p` |
 | `strip_suffix(s, t)` | `s` without `t` at its end, or `s` as it is |
@@ -635,6 +641,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 | `reverse(l)` | in place |
 | `keys(m)` | a map's keys, in the order first set |
 | `has_key(m, k)` | whether `m` has `k` |
+| `get(t, k[, default])` | `t[k]`, a map's value or a list's item, or `default` (nil unset) where there is none: no stop for a missing key or an index out of range. A key of the wrong kind for the table is still a `type` error |
 | `count(t)` | a map's entries, or a list's length (`#` works for lists and strings) |
 
 ### The host and output
@@ -720,34 +727,44 @@ print(found, count_all("chat/channels/general/sessions/plans.md", "MSG_"))
 -- 40<TAB>40
 ```
 
-**A big file's lines, a part at a time:** `read(p, offset, n)` cuts lines
-at a part's end, so carry the cut line into the next part. Here, the lines
-holding `from:`, in parts of 512 bytes:
+**A big file's lines, a part at a time,** with `read_lines`: each part is
+whole lines, at least the bytes asked and on to the end of the line it
+stops in, and says where the next starts. Here, the lines holding `from:`,
+in parts of 512 bytes:
 
 ```shale
 function lines_with(path, s, part)
-  local size = stat(path).size
   local n = 0
-  local carry = ""
   local at = 0
-  while at < size do
-    local text = carry .. read(path, at, part)
-    at = at + part
-    local ls = lines(text)
-    carry = ""
-    if at < size and not ends_with(text, "\n") then
-      carry = ls[#ls]
-      ls = take(ls, #ls - 1)
-    end
-    for l in ls do
+  while true do
+    local r = read_lines(path, at, part)
+    for l in r.lines do
       if contains(l, s) then n = n + 1 end
     end
+    if r.done then return n end
+    at = r.next
   end
-  return n
 end
 print(lines_with("chat/channels/general/sessions/plans.md", "from:", 512))
 -- prints:
 -- 40
+```
+
+**Data a script did not write** (a log, a sidecar, a line torn by a crash)
+stops a report on its first odd line if it is read strictly. Three
+builtins read it leniently: `parse_int(s)` is an integer or nil where
+`tonumber` stops the run; `get(t, k, default)` is `t[k]` or the default,
+never a missing key's stop; `line_at(p, offset)` is the whole line around
+an offset a search found:
+
+```shale
+local fields = words("2026-10-17 GET /x 200 log-x")
+print(parse_int(get(fields, 4, "")), parse_int(get(fields, 5, "")), get(fields, 9, "none"))
+local at = find_in("chat/channels/general/sessions/plans.md", "message 7,")
+print(line_at("chat/channels/general/sessions/plans.md", at))
+-- prints:
+-- 200<TAB>nil<TAB>none
+-- message 7, a line of it
 ```
 
 ## The store

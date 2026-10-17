@@ -21,6 +21,7 @@ pub const specs = [_]bi.Spec{
     spec(.take, 2, 2, take),
     spec(.keys, 1, 1, keys),
     spec(.has_key, 2, 2, hasKey),
+    spec(.get, 2, 3, get),
     spec(.count, 1, 1, count),
 };
 
@@ -73,6 +74,33 @@ fn hasKey(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     try run.charge(pos, k.len);
     run.tally(k.len);
     return .{ .boolean = t.map.contains(k) };
+}
+
+/// **`get(t, k[, default])`** (QUEUE 229, chunk 3): a map's value at the
+/// string `k`, or a list's item at the integer `k`, or `default` (nil
+/// unset) where there is none: `t[k]` that never stops the run for a
+/// missing key or an index out of range. A key of the wrong kind for the
+/// table is still the error indexing gives.
+fn get(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const fallback: Value = if (args.len > 2) args[2] else .nil;
+    const t = switch (args[0]) {
+        .table => |t| t,
+        else => return run.fail(pos, .type, "`get` takes a map or a list, not {s}", .{args[0].typeName()}),
+    };
+    switch (args[1]) {
+        .int => |k| {
+            if (t.kind == .map) return run.fail(pos, .type, "`get`: a map's keys are strings: this one is a map, given an integer", .{});
+            if (k < 1 or k > t.list.items.len) return fallback;
+            return t.list.items[@intCast(k - 1)];
+        },
+        .string => |k| {
+            if (t.kind == .list) return run.fail(pos, .type, "`get`: a list's keys are integers: this one is a list, given a string", .{});
+            try run.charge(pos, k.len);
+            run.tally(k.len);
+            return t.map.get(k) orelse fallback;
+        },
+        else => return run.fail(pos, .type, "`get`: a key must be an integer (a list) or a string (a map), not {s}", .{args[1].typeName()}),
+    }
 }
 
 /// **`count(t)`**: a map's entries, or a list's length (`#l` too).

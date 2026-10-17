@@ -16,11 +16,12 @@ function label(path)
   return parts[2] .. " " .. sid
 end
 
--- The cache's count, or -1 for no cache (or one torn: no newline).
+-- The cache's count, or -1 for no cache, or one torn: no newline, or a
+-- first word that is no number.
 function cached(md)
   local text = read_or(strip_suffix(md, ".md") .. ".count", nil)
   if text == nil or not ends_with(text, "\n") then return -1 end
-  return tonumber(words(lines(text)[1])[1])
+  return parse_int(get(words(get(lines(text), 1, "")), 1)) or -1
 end
 
 local rows = {}

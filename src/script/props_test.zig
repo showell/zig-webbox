@@ -336,3 +336,66 @@ fn checkTable(out: []const u8, cells: []const [4][]const u8, ints: []const bool,
     }
     try testing.expectEqual(cells.len, r);
 }
+
+test "property: read_lines over a file, in parts of any size, gives lines(read(the whole file)), each line whole (QUEUE 229)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var prng = std.Random.DefaultPrng.init(229);
+    const rand = prng.random();
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (0..60) |round| {
+        text.clearRetainingCapacity();
+        // Lines of 0 to 40 bytes, sometimes no newline at the end, and
+        // sometimes no line at all.
+        const n_lines = rand.uintAtMost(usize, 30);
+        for (0..n_lines) |_| {
+            const len = rand.uintAtMost(usize, 40);
+            for (0..len) |_| try text.append(testing.allocator, "abc \t\r"[rand.uintLessThan(usize, 6)]);
+            try text.append(testing.allocator, '\n');
+        }
+        if (rand.boolean() and text.items.len > 0) _ = text.pop();
+        try f.put("t.txt", text.items);
+        const part = 1 + rand.uintAtMost(usize, 64);
+        var src_buf: [1024]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf,
+            \\local whole = lines(read_or("t.txt", ""))
+            \\local got = {{}}
+            \\local at = 0
+            \\local parts = 0
+            \\while true do
+            \\  local r = read_lines("t.txt", at, {d})
+            \\  for l in r.lines do push(got, l) end
+            \\  parts = parts + 1
+            \\  if r.done then break end
+            \\  if r.next <= at then print("no progress at " .. at) break end
+            \\  at = r.next
+            \\end
+            \\local ok = #got == #whole
+            \\if ok then for i = 1, #got do if got[i] ~= whole[i] then ok = false end end end
+            \\if ok then print("ok") else print(join(got, "|") .. " ~= " .. join(whole, "|")) end
+        , .{part});
+        errdefer std.debug.print("round {d}, parts of {d}\n", .{ round, part });
+        try f.expectOk(src, "read_lines");
+    }
+}
+
+test "property: line_at at every offset of a file is the line lines(read(whole)) has there" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.put("t.txt", "one\n\ntwo words\nlast");
+    try f.expectOk(
+        \\local whole = read("t.txt")
+        \\local ls = lines(whole)
+        \\local line = 1
+        \\local ok = true
+        \\for at = 0, #whole - 1 do
+        \\  if line_at("t.txt", at) ~= ls[line] then ok = false print("at " .. at) end
+        \\  if sub(whole, at + 1, at + 1) == "\n" then line = line + 1 end
+        \\end
+        \\if line_at("t.txt", #whole) ~= nil then ok = false end
+        \\if ok then print("ok") end
+    , "line_at");
+}
