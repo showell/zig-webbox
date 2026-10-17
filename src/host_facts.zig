@@ -41,6 +41,44 @@ pub fn facts(io: Io, alloc: Alloc) ![]const Fact {
     };
 }
 
+// ── the application's lines, on the host's console ──────────────────────────
+
+/// Where an application's line goes: metal's serial console (which its kept
+/// log, and so /admin/log, holds), Linux's standard error.
+pub const Say = *const fn (line: []const u8) void;
+
+var say_to: ?Say = null;
+
+/// The host calls it once at startup.
+pub fn provideSay(s: Say) void {
+    say_to = s;
+}
+
+/// **AN APPLICATION'S LINE ON THE HOST'S CONSOLE**: one line, without its
+/// newline, which the host adds (the sleeper's wakes, the Observatory's
+/// polls). Both hosts provide one; with none (a unit test's site, started
+/// with no host), the line goes nowhere.
+pub fn say(line: []const u8) void {
+    if (say_to) |s| s(line);
+}
+
+test "host_facts: an application's line goes to the console the host gave, and nowhere before" {
+    const Caught = struct {
+        var last: []const u8 = "";
+        fn put(line: []const u8) void {
+            last = line;
+        }
+    };
+    const was = say_to;
+    defer say_to = was;
+    say_to = null;
+    say("before any host");
+    try std.testing.expectEqualStrings("", Caught.last);
+    provideSay(Caught.put);
+    say("wake 1");
+    try std.testing.expectEqualStrings("wake 1", Caught.last);
+}
+
 // ── the host's own log ──────────────────────────────────────────────────────
 
 /// A host's log, newest last, or null when it keeps none it can show.

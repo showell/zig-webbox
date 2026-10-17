@@ -100,6 +100,7 @@ pub fn Server(comptime S: type) type {
                 .free_space = space,
                 .trusted_proxy = env.get(options.env.trusted_proxy) orelse options.default_trusted_proxy,
                 .facts = linuxFacts,
+                .say = sayToStderr,
             });
             report(&started);
             // **NO RESPONSE BEFORE ITS WRITES ARE DURABLE** (HOST.md): the
@@ -1351,6 +1352,12 @@ pub fn freeSpaceAt(path: []const u8) ?free_space.Space {
 
 var host_name: []const u8 = "";
 var started_unix: i64 = 0;
+
+/// An application's line (host_facts.say), on standard error with the
+/// host's own.
+fn sayToStderr(line: []const u8) void {
+    std.debug.print("{s}\n", .{line});
+}
 
 /// Both clocks, for `between` (site.zig's `Now`).
 fn nowOf(io: Io) @import("webbox").site.Now {

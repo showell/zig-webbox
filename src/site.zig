@@ -60,6 +60,8 @@ pub const Host = struct {
     log: ?host_facts.Log = null,
     /// The host's whole log, both boots, for /admin/log (189.3).
     logs: ?host_facts.LogsSource = null,
+    /// The host's console, for an application's lines (host_facts.say).
+    say: ?host_facts.Say = null,
 };
 
 /// `App` declares, each required:
@@ -103,6 +105,7 @@ pub fn Site(comptime App: type) type {
             if (host.facts) |f| host_facts.provide(f);
             if (host.log) |l| host_facts.provideLog(l);
             if (host.logs) |l| host_facts.provideLogs(l);
+            if (host.say) |l| host_facts.provideSay(l);
             free_space.reader = switch (host.free_space) {
                 .reader => |r| r,
                 .unknown => null,
