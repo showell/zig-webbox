@@ -222,12 +222,22 @@ fn editFile(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .int = @intCast(replaced_n) };
 }
 
+/// Whether this host prints a diff as one line (`Diffs.summary`): metal's
+/// `host_io` does not say so, and its image compiles none of it.
+const summary_on = @hasDecl(@import("host_io"), "shale_diff_summary") and @import("host_io").shale_diff_summary;
+
 /// **THE DIFF**, unified: `--- a/p`, `+++ b/p`, then a hunk for each run of
 /// lines a span touches (spans on lines that meet share one), its old lines
-/// `-` and its new ones `+`, numbered as the files have them.
+/// `-` and its new ones `+`, numbered as the files have them. **In
+/// `summary`** (metal-vmm QUEUE 234) the same walk, charged the same, and
+/// one line for all of it: `edit p: N hunks, -O +N lines`.
 fn writeDiff(run: *Run, pos: ast.Pos, rel: []const u8, was: []const u8, now: []const u8, spans: []const Span) Error!void {
     const a = run.alloc;
-    try run.write(pos, std.fmt.allocPrint(a, "--- a/{s}\n+++ b/{s}\n", .{ rel, rel }) catch return run.oom(pos));
+    const summary = summary_on and run.diffs == .summary;
+    var hunks: usize = 0;
+    var lines_old: i64 = 0;
+    var lines_new: i64 = 0;
+    if (!summary) try run.write(pos, std.fmt.allocPrint(a, "--- a/{s}\n+++ b/{s}\n", .{ rel, rel }) catch return run.oom(pos));
     var k: usize = 0;
     // How many more lines the new file has than the old, before this hunk.
     var shift: i64 = 0;
@@ -256,12 +266,19 @@ fn writeDiff(run: *Run, pos: ast.Pos, rel: []const u8, was: []const u8, now: []c
         const n_old: i64 = @intCast(std.mem.count(u8, before_text, "\n") + 1);
         const n_new: i64 = @intCast(std.mem.count(u8, after_text, "\n") + 1);
         try run.charge(pos, before_text.len + after_text.len);
-        try run.write(pos, std.fmt.allocPrint(a, "@@ -{d},{d} +{d},{d} @@\n", .{ line, n_old, line + shift, n_new }) catch return run.oom(pos));
-        try writeLines(run, pos, "-", before_text);
-        try writeLines(run, pos, "+", after_text);
+        if (summary) {
+            hunks += 1;
+            lines_old += n_old;
+            lines_new += n_new;
+        } else {
+            try run.write(pos, std.fmt.allocPrint(a, "@@ -{d},{d} +{d},{d} @@\n", .{ line, n_old, line + shift, n_new }) catch return run.oom(pos));
+            try writeLines(run, pos, "-", before_text);
+            try writeLines(run, pos, "+", after_text);
+        }
         shift += n_new - n_old;
         k = j;
     }
+    if (summary) try run.write(pos, std.fmt.allocPrint(a, "edit {s}: {d} hunk{s}, -{d} +{d} lines\n", .{ rel, hunks, if (hunks == 1) "" else "s", lines_old, lines_new }) catch return run.oom(pos));
 }
 
 /// The offset of the newline that ends the line `i` is in, or the end.

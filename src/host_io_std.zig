@@ -9,3 +9,7 @@ pub const Io = @import("std").Io;
 /// with an operating system takes them (the Linux host's, a repo's, a
 /// user's); metal's `host_io` says nothing, and its parse compiles none.
 pub const shale_preludes = true;
+/// **A DIFF AS ONE LINE** (metal-vmm QUEUE 234): the Linux CLI prints a
+/// change's diff as a summary unless `--verbose`; metal prints every diff
+/// in full and compiles no summary.
+pub const shale_diff_summary = true;

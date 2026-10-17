@@ -23,7 +23,9 @@ there to stay safe is what an agent wants on Linux too:**
 run used of four, steps, reads, read bytes and output bytes (`── used:
 52374 of 5000000 steps, 12 of 10000 reads, ...`), so a script near an edge
 is known before a bigger run finds it;
-`--verbose` says so always, with the effects and the programs run. With
+`--verbose` says so always, with the effects and the programs run. An
+`edit`'s diff is one line, `edit p: 3 hunks, -4 +5 lines`, unless
+`--verbose`, which prints it in full. With
 no file and no `-e`, the script is stdin (`shale <<'SHALE'`).
 
 ```sh
