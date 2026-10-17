@@ -343,6 +343,8 @@ fn familyName(comptime A: type, target: []const u8) []const u8 {
 /// `between` (wake.zig).
 pub const Wake = @import("wake.zig").Wake;
 pub const Now = @import("wake.zig").Now;
+/// A period's next time, scheduled from when it was due (wake.zig).
+pub const periodAfter = @import("wake.zig").periodAfter;
 
 /// **AN APPLICATION'S `between`, AS EITHER SHAPE**: one that answers `Wake`
 /// is handed both clocks; one that answers `bool` (whether there is more)

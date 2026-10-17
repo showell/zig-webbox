@@ -1,6 +1,6 @@
 //! **WHAT `between` ANSWERS, AND WHAT IT IS HANDED** (zig-metal-unikernel's
 //! docs/designs/DESIGN-sleep.md). Part of the `webbox` library, re-exported
-//! by site.zig. A file of its own, with no imports, so zig-metal-unikernel's
+//! by site.zig. A file of its own, importing only std in its test, so zig-metal-unikernel's
 //! tier 0 holds a byte-for-byte copy (its src/pinned/webbox_wake.zig) and
 //! needs no checkout of this one.
 
@@ -22,3 +22,21 @@ pub const Wake = union(enum) {
 /// forward and is what `Wake.at` is in, and the wall clock in Unix seconds,
 /// which a script's `.now` and a log line read.
 pub const Now = struct { awake_ns: i96, unix_s: i64 };
+
+/// **A PERIOD'S NEXT TIME**: the one after `at`, a period on, or, when `now`
+/// is already past that (a wake missed whole), the first period boundary
+/// after `now`. Scheduled from when it was due, never from when it ran, so
+/// lateness never accumulates (the sleeper's wakes, the Observatory's polls).
+pub fn periodAfter(at: i96, period: i96, now: i96) i96 {
+    const next_at = at + period;
+    if (next_at > now) return next_at;
+    return at + period * (@divFloor(now - at, period) + 1);
+}
+
+test "wake: a period's next time comes from when it was due, and past a missed one, the next boundary" {
+    const testing = @import("std").testing;
+    const s = 1_000_000_000;
+    try testing.expectEqual(@as(i96, 120 * s), periodAfter(60 * s, 60 * s, 60 * s + 400));
+    try testing.expectEqual(@as(i96, 240 * s), periodAfter(60 * s, 60 * s, 200 * s));
+    try testing.expectEqual(@as(i96, 180 * s), periodAfter(60 * s, 60 * s, 120 * s));
+}
