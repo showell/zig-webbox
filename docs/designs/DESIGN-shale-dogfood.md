@@ -1,6 +1,6 @@
 # Design: Shale, dogfooded (Claude without bash or Python)
 
-**Status: round 5 of 5, a sixth to come by a metal-only adversary** (the box
+**Status: final, after six rounds** (five, and a sixth by a metal-only adversary) (the box
 and cold reviewers, 2026-10-18). No code yet for the host; the core pieces that
 have not moved since round 1 are CC's now (metal-vmm QUEUE 232). Steve: five
 rounds, then a sixth "who only cares about the metal use case" to attack
@@ -66,45 +66,54 @@ Read, Grep, Edit or Write tools). Two real bash bugs in those stretches go
 away: `cmd | tail -3 && next` testing tail's exit code, and `setsid ... & P=$!`
 taking the wrong PID. What round 5 found missing is in this version.
 
-## The architecture: one core, a host's table
+## The architecture: one core, a narrow seam
+
+(Round 6, the metal adversary, narrowed this seam; its record is under
+"Rounds".)
 
 - **The core is unchanged and identical on both hosts:** the lexer, the
   parser, both engines (`gate_test.zig` holds them identical), the budgets,
-  the store, text, regex, lists.
-- **What reaches outside is a host's table, at runtime.** Six builtins (`run`,
-  `real`, `job_start`, `job_alive`, `job_stop`, `job_wait`) join the closed
-  builtin enum, so its completeness check stays; each forwards its raw
-  arguments to `Options.host: ?*const Host`, function pointers the host
-  supplies (as webbox's `host_facts` and `host_fetch` are), **so all of
-  `run`'s option parsing lives in the host, none on metal.** Metal passes
-  null: each stops with class `host` ("`run`: not on this host"). No comptime
-  switch.
-- **Preludes, layered, later shadowing nothing:** the core prelude (both
-  hosts); the Linux host's prelude, its text in the Linux host
-  (`@embedFile`d there) and indexed at runtime by the same lazy loader (`git_*`,
-  `must`, `create`, `edits_all`, `re_lines`, `head_lines`, `tail_lines`,
-  `unique`, `newest`): metal's image carries none of it; and **a user's
-  prelude**, `~/.config/shale/prelude.shale` (`SHALE_PRELUDE` pins it in
-  tests), for one user's own policy and defaults. A later prelude may not
-  redefine an earlier one's name: a stop, naming both.
-- **The Linux table lives outside `src/script/`**, split at the 1000-line rule
+  the store and its FAT names, text, regex, lists. **`script.report` is
+  frozen** by a golden test of a whole route reply: the route's four readers
+  (dog-park `test_shale.mjs`, metal-vmm `script-refused.shape`,
+  `judge_gopher.py`, angry-gopher's tests) see nothing change.
+- **One builtin reaches outside: `host(name, ...)`.** It forwards to
+  `Options.host: ?*const fn`, one function pointer the Linux CLI supplies (as
+  webbox's `host_facts` and `host_fetch` are supplied by each host). **The
+  names Claude types (`run`, `real`, `job_start`, `job_alive`, `job_stop`,
+  `job_wait`) are Linux-prelude wrappers** (`function run(argv, opts) return
+  host("run", argv, opts) end`); the host checks their arguments and stops
+  `argument`. Metal passes null: `host` stops with class `host` ("`run`: not
+  on this host"), one enum entry and one stub in its image.
+- **One hook for paths:** `Options.path_hook`, called at the top of
+  `pathArg` only when it is set. **Mounts, `real()` and the mounts file live
+  in the Linux host, behind it.** With no hook, metal's `pathArg` is
+  byte-identical to today's, and cannot produce a path outside its root. FAT
+  names stay the rule on Linux too: all 1,140 tracked files in the five repos
+  pass them, so a looser policy would buy nothing.
+- **Preludes, a list in `Options`:** core's (comptime-indexed, as now) and,
+  on Linux only, the Linux host's (`@embedFile`d in the host), **a repo's own**
+  (`.shale/prelude.shale` at the root, tracked) and **a user's**
+  (`~/.config/shale/prelude.shale`; `SHALE_PRELUDE` pins it in tests). The
+  indexer becomes one function, run at comptime for core and at runtime for
+  the others; a later prelude may not redefine an earlier one's name (a stop,
+  naming both). Metal's list is core alone. Stop frames name which prelude a
+  line is in, in the CLI's printer only.
+- **The dry run is `Mode.dry_run`**, which exists and means "no effects": the
+  CLI's host refuses `run` and `job_start` in it with a stop `attempt` cannot
+  catch (class `budget`, `runs`, one line in diag.zig), and counts its own cap
+  on programs (64 a run). No `runs` field in the core's budgets, nothing new
+  in `budget()`.
+- **The Linux host lives outside `src/script/`**, split at the 1000-line rule
   (`src/shale_spawn.zig`, the raw fork, exec and poll loop; `src/shale_keep.zig`,
-  pure; `src/shale_host_linux.zig`, the table, mounts, jobs). `portable_test.zig`
-  already refuses `std.process` and `std.os` in `src/script/`.
-- **The gate:** a test-only `FakeHost` that fakes **only the spawn** (bytes
+  pure; `src/shale_host_linux.zig`, the host function, the path hook, mounts,
+  jobs). `portable_test.zig` already refuses `std.process` and `std.os` in
+  `src/script/`.
+- **The gate:** a test-only fake host that fakes **only the spawn** (bytes
   in, bytes out, recorded): option parsing, the filter, the keep and the
   charging are the real code in both engines. Mounts in a gated test lie
   inside the root copy, remapped per engine. Not in the gate: real children,
   wall time, signals, `/proc`.
-- **Names, an explicit runtime policy:** `.fat` (the site's data, the
-  route's; metal's only, pinned, no default that could flip) or `.checkout`
-  (refuse only `""`, `.`, `..`, NUL and `/` within a part; exact case; no path
-  measuring), which the CLI sets.
-- **Mount resolution is core** (a runtime table in `Options`, empty on metal,
-  where FAT names already refuse `:`); only `real()` and the mounts file are
-  the host's. Home is a mount, not a second syntax.
-- **The new budget `runs`** (64 by default under `--write`) appears in
-  `budget()` only on a host that runs programs.
 
 ## Mounts
 
@@ -168,11 +177,14 @@ name**: `runs:gates/summary`, `memory:MEMORY.md`, `repos:dog-park/README.md`,
   built itself; a kept result (with its marker) is refused, by its record, not
   by guessing at text.
 - **stdout and stderr are one stream**, as `2>&1`. `log` keeps it whole, as
-  it streams, truncating a file already there; it is one effect (one change
-  however many chunks), through the store.
+  it streams, truncating a file already there; **the host writes it itself**
+  (no new path into the core's effects), and the CLI lists it among what the
+  run wrote.
 - **`env` adds to the inherited environment** (`ZIG_PROGRESS` removed). There
   is no `env` builtin: a script cannot read the environment.
-- **`secrets` never become values, and never come back:** the host reads each
+- **`secrets` never become values, and never come back** (a script may
+  still `read("home:.key")` into a value: that is its own choice, and
+  SHALE-AGENTS.md says to use `secrets`): the host reads each
   file (trimmed) into the child's environment; logs print `K=<secret
   home:.gopher_api_key>`; **the host replaces the secret's bytes with
   `<secret K>` in everything the child prints** (`out`, `log`), before the
@@ -180,7 +192,8 @@ name**: `runs:gates/summary`, `memory:MEMORY.md`, `repos:dog-park/README.md`,
 - **`must(r)`** (Linux prelude): when `r.ended ~= "exit"` or `r.code ~= 0`,
   prints `r.out` and fails with `` `<argv>` exited <code> `` (or "timed
   out"); else gives `r`. The `&&` of a shell chain.
-- **`fail(msg)`** ends a run with class `fail`; `attempt` catches it.
+- **`fail(msg)`** ends a run with class `fail`; `attempt` catches it; the
+  parser's refusal of `error` names it.
 - **What `run` refuses** (class `refused`, naming `want`), matched on argv[0]'s
   basename with any version suffix dropped (`python3.12` is `python3`):
   - shells and interpreters: `bash`, `sh`, `dash`, `zsh`, `busybox`,
@@ -221,12 +234,15 @@ able to outlive it.
 
 ## Text
 
-- **Core builtins:** `take(l, n)` gains a negative `n`, the last `|n|`.
+- **Core builtins:** **`last(l, n)`**, the last n of a list (round 6: `take`
+  with a negative count stays the loud stop it is, so a count gone negative on
+  the live site never silently becomes the tail).
   **Regular expressions gain alternation** (`|`, lowest precedence, leftmost
   alternative first; a group around it is the one capture group, `(?:` stays
   refused) **and `\b`** (a word boundary, ASCII), linear in Thompson's way;
   still one capture group, no backreferences. **`{nocase = true}`** on
-  `re_find`, `re_match` and the Linux prelude's `re_lines`.
+  `re_find`, `re_match` and the Linux prelude's `re_lines`; the regex cache is
+  keyed by the pattern and `nocase` both, and the folding is charged.
 - **The Linux prelude:** `re_lines(s, pattern[, {invert, nocase}])` →
   `{{line, text}}`; `head_lines(p, n)` and `tail_lines(p, n)` → lists (a tail
   reads back from the end in doubling parts until n lines fit; a missing file
@@ -250,11 +266,16 @@ asserted, one write, every literal multi-line.
   **a level is required** (`[[` refused: code being edited is full of `]]`);
   the level must match; the first newline right after the opener is dropped;
   bytes are raw (no escapes, no `\r\n` folding); a newline before the closer
-  is part of the string. **`--[==[ ... ]==]` is a block comment**, as Lua's.
+  is part of the string. **`--[==[ ... ]==]` is a block comment**, as Lua's;
+  `--[[` is refused as `[[` is, and `--[=x` is a line comment. **The fuzz
+  corpus covers it before it lands**: the lexer reads every byte of every
+  signed script on metal, so a bug there is a kernel panic, not a stop.
   A syntax error right after a long string hints the closer it met. Line and
   column advance through it.
 - **`edit(p, {{old = ..., new = ...[, all = true][, word = true]}, ...})`**:
-  `edit`'s second form, its own option names. **The edits apply in sequence**,
+  `edit`'s second form, its own option names; at most 64 edits a call, every
+  pass's bytes charged, refused in a background run before an argument is
+  read. **The edits apply in sequence**,
   each to the result of the one before; each asserted (once, unless `all`);
   one diff; one write; it gives the number of replacements made in all. A
   failing edit writes nothing, prints no partial diff, and its stop names
@@ -269,8 +290,8 @@ asserted, one write, every literal multi-line.
 ## The dry run, honest
 
 A program escapes the root and any dry run (`zig build` writes into the tree;
-`git status` rewrites the index). So **a dry run is a run whose `runs` budget
-is 0**, and `--budget runs=N` is refused without `--write`. It checks and
+`git status` rewrites the index). So **a dry run runs no program**
+(`Mode.dry_run`, above). It checks and
 prints every edit's diff against the disk as it is (a chain of edits to one
 file is one `edit` list, so a dry run sees what `--write` would), and the
 first `run` or `job_start` stops it as `budget runs` ("a dry run runs no
@@ -325,7 +346,8 @@ Reading calls give data and stop (`fail`) on a git error; changing calls are
   Shale cannot know the Bash call's own `timeout`: Claude keeps
   `timeout_ms` under it (120 s unless raised, at most 600), and SHALE-AGENTS.md
   says so.
-- Jobs count against `runs`; `job_alive` and `job_wait` do not. `job_start`
+- Jobs count against the host's cap on programs; `job_alive` and `job_wait`
+  do not. `job_start`
   and `job_stop` need `--write`.
 - `job_of(pid)`, adopting a job a repo script detached itself, waits for a
   need.
@@ -353,9 +375,10 @@ anyway`.
 ## The CLI's defaults
 
 `now()` is the wall clock, in seconds (`SHALE_NOW` pins it for tests).
-Output 64 KiB. `call_bytes` 64 MiB. Steps 5M. `runs` 64 under `--write`.
-**Terse:** the `── used:` line only past half a budget or on a stop; the
-effects list on `--verbose`. Existing tests that pin the old output or a 0
+Output 64 KiB. `call_bytes` 64 MiB. Steps 5M. 64 programs a run under
+`--write`, counted by the host. **Terse, in `script_runner.zig` only** (the
+route's `report` is frozen): the `── used:` line only past half a budget or
+on a stop; the effects list on `--verbose`. Existing tests that pin the old output or a 0
 clock are re-pinned, saying so.
 
 ## Making the ban real
@@ -403,21 +426,70 @@ Remembered rules fail; this one is enforced.
 sudo, mounts), `sudo`, interactive programs, ssh to prod. Copying and moving
 binary files is `run` (`cp`, `mv`), not new store builtins.
 
-## What metal's image gains (round 4's estimates)
+## What metal's image gains (round 6's count)
 
-| item | Zig lines | on metal |
+Round 4 estimated about 390 lines; round 6, counting what that table left out
+(the prelude loader's list, the regex cache key, the report's freeze, the
+names policy in `store.zig`), put the round-5 design at 600-800 core lines
+plus a policy in the store every lynrummy.com route writes through. Round 6's
+accepted changes take that back down:
+
+| item | core lines | on metal |
 |---|---|---|
-| the host enum entries and stubs, `Options.host` | about 60 | a stub a name; all option parsing is the host's |
-| 2 error classes, the `runs` budget | about 30 | nil |
-| long strings, block comments | about 50 | marginal |
-| `edit`'s list form | about 80 | low: Dog Park's runs are background, which refuses edits |
-| regex `\|`, `\b`, `nocase` | about 120 | **useful** (`error\|panic` in a scan) |
-| `take`'s negative count | about 10 | useful |
-| mounts and the names policy | about 40 | none: an empty table, `.fat` byte-identical |
-| everything else (git, text helpers, `create`, `edits_all`, `must`) | 0: the Linux prelude | none |
+| `host` (one enum entry, one stub), `Options.host` | about 15 | a stub |
+| `Options.path_hook` | about 10 | none: `pathArg` byte-identical without it |
+| the prelude list in `Options`; the indexer as one function | about 60 | none: core alone, comptime as now |
+| the dry run's stop class (one line in diag.zig) | about 5 | none |
+| `fail` and its class | about 25 | useful: an assertion |
+| long strings and block comments, fuzzed | about 50 | marginal |
+| `edit`'s list form, capped | about 90 | low: Dog Park's runs are background, which refuses edits |
+| regex `\|`, `\b`, `nocase`, the cache key | about 130 | **useful** (`error\|panic` in a scan) |
+| `last` | about 10 | useful |
+| everything else (the host, mounts, git, jobs, the text helpers, `create`, `edits_all`, `must`) | 0: the Linux host and its preludes | none |
 
-**About 390 lines, a few KiB, measured as a number in a test** (the
-freestanding script module's size before and after).
+**About 400 lines, no change to `store.zig`, measured as the whole gopher.elf
+image's size before and after** (round 6: the script module alone would miss
+what the store and the route carry).
+
+## The queue, in Shale (Steve, 2026-10-18)
+
+The queue Claude and CC share (metal-vmm's `QUEUE.md`, `QUEUE-ARCHIVE.md`,
+`FEEDBACK.md`) is edited by hand today, through anchored python edits, and its
+numbering drifts: the live file's items run 232, 231, 230, 229, 228, 227,
+**223, 224, 225, 226**, 222, an increasing run inside a decreasing one, each
+the trace of an insert anchored to the wrong neighbour. FEEDBACK.md is 1,322
+lines with nothing to archive it but care. Steve: "you should be able to
+manipulate that easily with shale as well as archiving the old items. A very
+common pitfall for Claude is that numbering gets out of whack."
+
+- **Its grammar, written down** (in metal-vmm's README and checked by the
+  tool): sections are `## ` lines; an item is the text from a line beginning
+  `**N. ` to the next item or section; **numbers are unique across QUEUE.md and
+  QUEUE-ARCHIVE.md together** (an archived number is never reused); **within a
+  section, items are newest first**; an item's status (`DONE`, `CC'S`, `THE
+  BOX'S`) is in its head. FEEDBACK.md: entries are `## ` lines, newest first,
+  each `<who> → <who>, <date>: <title>`.
+- **The tool is metal-vmm's own prelude** (`.shale/prelude.shale`, tracked),
+  so any Shale run in that checkout has it:
+  - `queue_check()` → each violation with its line (a number used twice, a
+    number in both files, a section out of order);
+  - `queue_next()` → one more than the highest number in either file;
+  - `queue_add(section, title, body)` → the number it gave, the item inserted
+    at the top of its section;
+  - `queue_done(n, outcome)`, `queue_archive({n, ...})` (each to one line in
+    the archive: number, title, outcome, the commits its text names; both
+    files or neither, by `edits_all`);
+  - `feedback_add(from, to, title, body)`, newest first;
+    `feedback_archive({before = date})`.
+- **Every changing call checks first, and refuses a file that is out of
+  order** rather than guess where to insert; `queue_reorder()` puts it in
+  order, its own call, its diff shown. The live file's 223-226 run is the
+  first thing it fixes.
+- **Its tests are Shale too** (`.shale/queue_test.shale`, on fixtures in
+  `tests/queue/`, run by `shale --write`): `queue_check` names exactly a
+  planted misorder; `queue_add` puts the next number at the top of "CC: open";
+  a number in the archive is never given again; an archive moves both files or
+  neither. Shale testing Shale, with nothing else.
 
 ## The order of work
 
@@ -425,23 +497,27 @@ freestanding script module's size before and after).
    timed-out Bash call; the box's curl version (8.3 or later for
    `--variable`, for a later `http_get`). Results into this file.
 1. **The core** (CC's, metal-vmm QUEUE 232, under way): split
-   builtins_store.zig; long strings and block comments; `edit`'s list form;
-   `take`'s negative count; `fail`; regex `|`, `\b`, `nocase`; SHALE.md's
-   contradictions.
-2. **The host table and `run`:** the raw spawn and poll loop, the pure keep,
-   the filters, `whole`, `log`, `env`, `secrets` and their scrubbing, the
-   refusals; mounts and `real`; the `.checkout` policy; the CLI's defaults;
-   the dry run as `runs = 0`; the script from stdin.
-3. **The Linux prelude:** the text helpers, `must`, `create`, `edits_all`,
-   `newest`, `glob`'s `hidden`; the user prelude and its pin.
+   builtins_store.zig; long strings and block comments, fuzzed first; `edit`'s
+   list form, capped; `last`; `fail`; regex `|`, `\b`, `nocase` and the cache
+   key; `report` frozen; SHALE.md's contradictions; the whole image measured.
+2. **The seam and `run`:** `host` and `Options.host`, `Options.path_hook`,
+   the prelude list; the raw spawn and poll loop, the pure keep, the filters,
+   `whole`, `log`, `env`, `secrets` and their scrubbing, the refusals; mounts
+   and `real` behind the hook; the CLI's defaults; the dry run's stop; the
+   script from stdin.
+3. **The Linux prelude:** the wrappers (`run`, `real`, `job_*`), the text
+   helpers, `must`, `create`, `edits_all`, `newest`, `glob`'s `hidden`; the
+   repo prelude and the user prelude, and their pins.
 4. **The git prelude.**
 5. **Jobs:** `job_start` with its reaper, the `.job` record, `job_alive`,
    `job_stop`, `job_wait`.
 6. **`shale-gate` and the hook.**
-7. **The docs:** SHALE.md (the host, mounts, `run`, jobs, git, the CLI's
+7. **The queue tool** (metal-vmm's `.shale/prelude.shale`) and its Shale tests;
+   then the live queue reordered by it.
+8. **The docs:** SHALE.md (the seam, mounts, `run`, jobs, git, the CLI's
    defaults) and SHALE-AGENTS.md (its first page and its "where Shale is
    worse"), rewritten for what was built.
-8. Later, on a need: `input()`, `http_get`, `job_of`, separate stderr, a
+9. Later, on a need: `input()`, `http_get`, `job_of`, separate stderr, a
    per-session scratch mount.
 
 **The tests the design names:** the keep against the prelude's
@@ -456,7 +532,7 @@ long strings at levels 1-3 with `]]` inside; a `shale` killed with TERM
 leaving no child; a job found again by its `.job` path from a second `shale`,
 its exit code read after it ended; an untracked script refused by path.
 
-**Its own repo** earns its keep after (2), once the host seam exists.
+**Its own repo** earns its keep after (2), once the seam exists.
 
 ## Rounds
 
@@ -493,3 +569,24 @@ its user prelude; the hook user-wide; a docs chunk; and about sixty details
 settled (the marker, `code` on a timeout, the grace and the drain, the mounts
 file's grammar, a log's truncation, the prelude's shadowing, `now()`'s unit,
 block comments).
+
+**Round 6** (an adversary loyal to metal alone; Steve: "You will mostly veto
+their pushback (because I want the extra linux features) but listen to their
+pushback"). Its count: the round-5 design was 600-800 core lines and a policy
+in `store.zig`, not the 390 claimed. **Accepted, because they cost Linux no
+feature:** one `host(name, ...)` builtin and Linux-prelude wrappers in place
+of six builtins; mounts, `real` and the names policy behind a path hook, with
+`.checkout` cut (no tracked file needs it), so metal's `pathArg` is
+byte-identical and no root escape enters the serving kernel; the dry run as
+the existing `Mode.dry_run`, no `runs` budget in the core; `last` in place of
+a negative `take`; the regex cache keyed by `nocase`; `edit`'s list form
+capped and charged; the lexer fuzzed before long strings land, and its old
+cases pinned; `fail` named by the parser's refusal of `error`, and the route's
+readers listed; `report` frozen, the CLI's terseness in `script_runner.zig`;
+`log` the host's file, not a new path into the core's effects; the whole
+image measured. **Vetoed, with reasons:** dropping the runtime preludes (the
+queue tool needs a repo's prelude; metal's list is core alone, so metal pays
+nothing); cutting the long string's "closer it met" hint (the likeliest
+mistake in editing Zig, about 15 lines); moving `glob` out of the core prelude
+(harmless lazy text); the gate's added burden for a fake host (the price of
+testing the host at all).
