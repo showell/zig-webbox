@@ -588,8 +588,8 @@ the errors column says the rest.
 | `like(s, pattern)` | a boolean | |
 | `match_path(path, pattern)` | a boolean | `argument` past 64 parts |
 | `between(s, a, b)` | the text between, or nil | |
-| `re_find(s, pattern)` | the leftmost match, `{at, text[, group]}`, or nil | `argument` for a pattern past 256 bytes or with what the subset leaves out |
-| `re_match(s, pattern)` | a boolean: whether `s` holds a match | as `re_find` |
+| `re_find(s, pattern[, {nocase}])` | the leftmost match, `{at, text[, group]}`, or nil | `argument` for a pattern past 256 bytes or with what the subset leaves out |
+| `re_match(s, pattern[, {nocase}])` | a boolean: whether `s` holds a match | as `re_find` |
 | `rep(s, n)` | `s`, `n` times | `argument` for `n` < 0 |
 | `substitute(s, old, new)` | `s` with each `old` replaced | `argument` for `old` = "" |
 | `path(a, b, ...)` | the parts joined with `/` | |
@@ -607,6 +607,7 @@ the errors column says the rest.
 | `last(l, n)` | a new list of the last `n` | `argument` for `n` < 0 |
 | `reverse(l)` | nil: in place | |
 | `keys(m)`, `has_key(m, k)`, `count(t)` | a list; a boolean; an integer | |
+| `get(t, k[, default])` | `t[k]`, or `default` where there is none | `type` for a key of the wrong kind |
 | `now()`, `budget()` | the host's time; what is left | |
 | `print(...)` | nil | `type` for a list or map |
 | `yield()` | nil | |
@@ -645,6 +646,9 @@ the errors column says the rest.
 - `like`: a pattern for the entries' names (`like` below). Folders are
   walked into whether they match or not.
 - `kind`: `"file"`, `"directory"` or `"other"`.
+- `skip`: a pattern (`like`'s) for names passed by whole: neither given
+  nor walked into, nor stat'ed (QUEUE 229: `skip = ".*"` passes by `.git`
+  and `.zig-cache`; the prelude's `glob` uses it).
 - `after`: where an earlier call's part ended (its `more` entry's path,
   or "" for the start). The walk goes on after it in its own order, the
   path there or not: each folder on it is listed again, and the walk
@@ -717,7 +721,8 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 
 ### Regular expressions
 
-**A small subset, and linear** (metal-vmm QUEUE 230; Steve, 2026-10-18).
+**A small subset, and linear** (metal-vmm QUEUES 230 and 232; Steve,
+2026-10-18).
 A field taken out of a line is one call, where `between`, `split` and a
 helper took three:
 
@@ -727,16 +732,18 @@ if m ~= nil then print(m.at, m.text, m.group) end
 print(re_match("  pub fn deadline(", "^\\s*pub fn"), re_match("x", "\\d"))
 local r = re_find("see tcp.zig:40 and gone.zig:1", "(\\w+\\.zig):\\d+")
 print(r.group, parse_int(sub(r.text, #r.group + 2)))
+print(re_find("error: test 4 FAILED", "\\b(fail|error|panic)", {nocase = true}).group)
 -- prints:
 -- 18<TAB>DEPARTS (bounded)<TAB>bounded
 -- true<TAB>false
 -- tcp.zig<TAB>40
+-- error
 ```
 
 | builtin | gives |
 |---|---|
-| `re_find(s, pattern)` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none: `if m == nil` (or `if m then`) |
-| `re_match(s, pattern)` | whether `s` holds a match, anywhere, as `grep` says of a line; `^` and `$` pin it to the whole |
+| `re_find(s, pattern[, {nocase = true}])` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none: `if m == nil` (or `if m then`). `nocase`: ASCII letters match either case |
+| `re_match(s, pattern[, {nocase = true}])` | whether `s` holds a match, anywhere, as `grep` says of a line; `^` and `$` pin it to the whole |
 
 | in a pattern | is |
 |---|---|
@@ -747,13 +754,20 @@ print(r.group, parse_int(sub(r.text, #r.group + 2)))
 | `\n`, `\t`, `\r` | a newline, a tab, a carriage return |
 | `*`, `+`, `?` | the part before, any number of times, at least once, or once or not; **each takes as much as it can** |
 | `^`, `$` | the string's start, its end |
-| `( ... )` | **one capture group a pattern**; it may repeat, `(ab)*`, and keeps its last turn |
+| `\b`, `\B` | a word's edge (a letter, digit or `_` on one side and not the other, or the string's end), and a place that is not one (QUEUE 232) |
+| `a\|b` | either, **the loosest** (`^error\|warn` is `^error` or `warn`), the leftmost alternative that matches taken first (QUEUE 232) |
+| `( ... )` | **one capture group a pattern**, which may hold alternatives, `(info\|warn)`; it may repeat, `(ab)*`, and keeps its last turn |
 
-**Refused, each by name** (`argument`, saying what to write instead): `|`
-(no alternation: a class is one byte of several), `{n,m}`, a second `(`,
-`(?...)` (no lookaround), `\1` (no backreferences), `\b`, lazy `*?`, a
-repetition repeated (`a**`), `[:alpha:]`, and a pattern of more than 256
-bytes. A pattern is written in a Shale string, so its `\` is written
+**`{nocase = true}`** folds ASCII letters when the pattern compiles (a step
+a byte more), so the search costs what it would without; a class is
+folded before its `^`, so `[^a]` takes neither `a` nor `A`, as Python's.
+The run's cache keeps a pattern's two compilations apart.
+
+**Refused, each by name** (`argument`, saying what to write instead):
+`{n,m}`, a second `(`, `(?...)` (no lookaround, no groups that do not
+capture), `\1` (no backreferences), `\b` inside a class, lazy `*?`, a
+repetition repeated (`a**`) or of a place (`\b+`), `[:alpha:]`, and a
+pattern of more than 256 bytes. A pattern is written in a Shale string, so its `\` is written
 `\\`: `"\\d+"` is the pattern `\d+`.
 
 **What it costs: linear, whatever the pattern.** A pattern compiles to a
@@ -766,10 +780,11 @@ cost 100,013 and 180,020 steps, and four times the string four times the
 steps (props_test). A backtracking engine's `(a*)*b` would take time
 exponential in the string; here no pattern can make a step count a lie.
 The match is the one a backtracking matcher would find first, tested
-against one on 20,000 random patterns and strings, with one rule of
-Thompson's: a loop's turn that matches nothing ends the loop as failed.
-Perl and Python take that turn, so on "a", `(a?)*`'s group here is "a",
-there "".
+against one on 20,000 random patterns and strings (alternatives, `\b`
+and `nocase` among them), with one rule of Thompson's: **a loop's turn
+that matches nothing ends the loop** (and is never followed by another).
+Perl and Python sometimes take one more turn after it, so on "a",
+`(a?)*`'s group here is "a", there "".
 
 ### Numbers
 
@@ -1379,9 +1394,12 @@ holds every source of the module.
 
 ## What was decided, and what was refused
 
-- **No dry run.** Scripts just run (Steve).
-- **No effects beyond the store.** No network, no clock but `now()`, no
-  host.
+- **A dry run on Linux only.** On the sites a script just runs (Steve);
+  the Linux `shale` runs dry unless `--write` (QUEUE 229, `Mode.dry_run`).
+- **On metal, no effects beyond the store.** No network, no clock but
+  `now()`, no host. (The dogfood design gives Linux's Shale more, behind
+  one seam, metal's unchanged: zig-webbox
+  `docs/designs/DESIGN-shale-dogfood.md`.)
 - **A step a byte for a builtin's work, and a step for 16 bytes of bulk
   byte work** (Steve, 209): reads, scans and the haystacks of searches.
   A search also pays a step a place it stops and for its compares, after
@@ -1397,7 +1415,8 @@ holds every source of the module.
   lets `for x in` walk it in place.
 - **No floats, no closures.** Patterns only as the regular expressions'
   linear subset, `re_find` and `re_match` (Steve, 2026-10-18: "yes to
-  regex"): no alternation, one group, no backtracking.
+  regex"; alternation, `\b` and `nocase` with the dogfood design): one
+  group, no backreferences, no backtracking.
 - **Offsets in files are 0-based; positions in strings are 1-based.** The
   first are the site's (sidecars count bytes from 0); the second are
   Lua's.

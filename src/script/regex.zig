@@ -1,9 +1,12 @@
 //! **REGULAR EXPRESSIONS, A LINEAR-TIME SUBSET** (metal-vmm QUEUE 230,
 //! chunk 2; Steve, 2026-10-18: "yes to regex"): the engine `re_find` and
 //! `re_match` run (builtins_regex.zig). Literals, `.`, classes (`[a-z]`,
-//! `[^...]`, `\d \w \s` and their capitals), `*`, `+`, `?`, `^`, `$` and one
-//! capture group; no alternation, no counted repetition, no backreferences,
-//! no lookaround: each is refused, saying so.
+//! `[^...]`, `\d \w \s` and their capitals), `*`, `+`, `?`, `^`, `$`,
+//! alternation (`|`, lowest precedence, the leftmost alternative first) and
+//! `\b \B` (a word's edge, ASCII; QUEUE 232), and one capture group, which
+//! may hold alternatives; `nocase` folds ASCII letters when the pattern
+//! compiles. No counted repetition, no backreferences, no lookaround: each
+//! is refused, saying so.
 //!
 //! **A THOMPSON MACHINE, SO THE COST IS LINEAR.** A pattern compiles to a
 //! program of at most a few instructions a byte; a search runs every way
@@ -35,6 +38,9 @@ pub const Op = enum(u8) {
     start,
     /// Only at the string's end.
     end,
+    /// Only at a word's edge (`c` 0), or only not at one (`c` 1): a word
+    /// byte on one side and none on the other.
+    boundary,
     match,
 };
 
@@ -62,28 +68,39 @@ pub const Refusal = struct { at: usize, message: []const u8 };
 
 pub const Error = error{ OutOfMemory, Refused };
 
+pub const Options = struct {
+    /// ASCII letters match either case, folded into the program as it is
+    /// compiled: a class is folded before its `^` (`[^a]` takes neither `a`
+    /// nor `A`), as Python's is.
+    nocase: bool = false,
+};
+
 // ── the pattern, read ───────────────────────────────────────────────────
 
 const Quant = enum { one, star, plus, opt };
 
+/// A pattern's alternatives, each a run of nodes.
+const Alt = []const []const Node;
+
 const Node = struct {
-    kind: enum { byte, any, set, start, end, group },
+    kind: enum { byte, any, set, start, end, boundary, not_boundary, group },
     c: u8 = 0,
     set: u16 = 0,
     quant: Quant = .one,
-    /// A group's nodes, in `Reader.inner`.
-    inner_from: u16 = 0,
-    inner_len: u16 = 0,
+    /// The group's alternatives.
+    inner: Alt = &.{},
 };
 
 const Reader = struct {
     p: []const u8,
     at: usize = 0,
+    /// The sets', kept in the program.
     alloc: std.mem.Allocator,
+    /// The tree's, dropped when the program is made.
+    tree: std.mem.Allocator,
     refused: *Refusal,
+    options: Options,
     sets: std.ArrayList(Set) = .empty,
-    top: std.ArrayList(Node) = .empty,
-    inner: std.ArrayList(Node) = .empty,
     group: bool = false,
 
     fn refuse(r: *Reader, at: usize, message: []const u8) Error {
@@ -91,28 +108,41 @@ const Reader = struct {
         return error.Refused;
     }
 
-    /// A run of nodes, to the pattern's end or (in the group) its `)`.
-    fn seq(r: *Reader, list: *std.ArrayList(Node), in_group: bool) Error!void {
+    /// Alternatives, to the pattern's end or (in the group) its `)`.
+    fn alt(r: *Reader, in_group: bool) Error!Alt {
+        var seqs: std.ArrayList([]const Node) = .empty;
+        while (true) {
+            try seqs.append(r.tree, try r.seq(in_group));
+            if (r.at < r.p.len and r.p[r.at] == '|') {
+                r.at += 1;
+                continue;
+            }
+            return seqs.items;
+        }
+    }
+
+    /// A run of nodes, to the pattern's end, a `|`, or (in the group) its `)`.
+    fn seq(r: *Reader, in_group: bool) Error![]const Node {
+        var list: std.ArrayList(Node) = .empty;
         while (r.at < r.p.len) {
             const at = r.at;
             const c = r.p[at];
             var node: Node = switch (c) {
                 ')' => {
-                    if (in_group) return;
+                    if (in_group) return list.items;
                     return r.refuse(at, "a `)` with no `(` before it: `\\)` is the byte");
                 },
+                '|' => return list.items,
                 '(' => blk: {
                     if (r.at + 1 < r.p.len and r.p[r.at + 1] == '?') return r.refuse(at, "`(?` is not in this subset: no lookaround and no groups that do not capture");
                     if (in_group or r.group) return r.refuse(at, "one capture group a pattern: a second `(` is not in this subset (`\\(` is the byte)");
                     r.group = true;
                     r.at += 1;
-                    const from = r.inner.items.len;
-                    try r.seq(&r.inner, true);
+                    const inner = try r.alt(true);
                     if (r.at >= r.p.len) return r.refuse(at, "a `(` that is never closed");
                     r.at += 1; // )
-                    break :blk .{ .kind = .group, .inner_from = @intCast(from), .inner_len = @intCast(r.inner.items.len - from) };
+                    break :blk .{ .kind = .group, .inner = inner };
                 },
-                '|' => return r.refuse(at, "`|` is not in this subset: no alternation; a class (`[ab]`) is one byte of several, or call `re_find` once for each"),
                 '{' => return r.refuse(at, "`{n,m}` is not in this subset: write the part out as often as it must come (`\\d\\d\\d?`), or `\\{` for the byte"),
                 '*', '+', '?' => return r.refuse(at, "a `*`, `+` or `?` with nothing before it to repeat"),
                 '.' => blk: {
@@ -131,12 +161,13 @@ const Reader = struct {
                 '\\' => try r.escape(),
                 else => blk: {
                     r.at += 1;
-                    break :blk .{ .kind = .byte, .c = c };
+                    break :blk try r.byteNode(c);
                 },
             };
             if (r.at < r.p.len) switch (r.p[r.at]) {
                 '*', '+', '?' => |q| {
-                    if (node.kind == .start or node.kind == .end) return r.refuse(r.at, "`^` and `$` are places, not bytes: they cannot repeat");
+                    if (node.kind == .start or node.kind == .end or node.kind == .boundary or node.kind == .not_boundary)
+                        return r.refuse(r.at, "`^`, `$`, `\\b` and `\\B` are places, not bytes: they cannot repeat");
                     node.quant = switch (q) {
                         '*' => .star,
                         '+' => .plus,
@@ -153,8 +184,20 @@ const Reader = struct {
                 '{' => return r.refuse(r.at, "`{n,m}` is not in this subset: write the part out as often as it must come (`\\d\\d\\d?`), or `\\{` for the byte"),
                 else => {},
             };
-            try list.append(r.alloc, node);
+            try list.append(r.tree, node);
         }
+        return list.items;
+    }
+
+    /// A byte, or under `nocase` a letter's two cases.
+    fn byteNode(r: *Reader, c: u8) Error!Node {
+        if (r.options.nocase and std.ascii.isAlphabetic(c)) {
+            var s = Set.initEmpty();
+            s.set(std.ascii.toLower(c));
+            s.set(std.ascii.toUpper(c));
+            return r.newSet(s);
+        }
+        return .{ .kind = .byte, .c = c };
     }
 
     fn newSet(r: *Reader, s: Set) Error!Node {
@@ -190,8 +233,7 @@ const Reader = struct {
             '0'...'9' => return r.refuse(at, "backreferences (`\\1`) are not in this subset"),
             else => {},
         }
-        if (c == 'b' or c == 'B') return r.refuse(at, "`\\b` is not in this subset: no word boundaries; `\\W` or `^` and `$` where the edge is a byte or the string's end");
-        if (std.ascii.isAlphabetic(c)) return r.refuse(at, "an escape this subset does not have: `\\d \\w \\s` (and `\\D \\W \\S`), `\\n \\t \\r`, or `\\` before a byte that is not a letter or digit");
+        if (std.ascii.isAlphabetic(c)) return r.refuse(at, "an escape this subset does not have: `\\d \\w \\s` (and `\\D \\W \\S`), `\\b \\B`, `\\n \\t \\r`, or `\\` before a byte that is not a letter or digit");
         return c;
     }
 
@@ -201,11 +243,14 @@ const Reader = struct {
         const c = r.p[at + 1];
         r.at += 2;
         if (shorthand(c)) |s| return r.newSet(s);
-        return .{ .kind = .byte, .c = try r.escapedByte(at, c) };
+        if (c == 'b') return .{ .kind = .boundary };
+        if (c == 'B') return .{ .kind = .not_boundary };
+        return r.byteNode(try r.escapedByte(at, c));
     }
 
     /// `[...]`: bytes, ranges (`a-z`) and shorthands; `^` first is every
-    /// byte but those; a `]` first is the byte.
+    /// byte but those; a `]` first is the byte. Under `nocase` the letters
+    /// are folded before the `^`.
     fn class(r: *Reader) Error!Node {
         const open = r.at;
         r.at += 1;
@@ -231,6 +276,7 @@ const Reader = struct {
                     s.setUnion(sh);
                     continue;
                 }
+                if (e == 'b' or e == 'B') return r.refuse(at, "`\\b` in a class is not in this subset: a word's edge is a place, not a byte; write it outside the `[...]`");
                 lo = try r.escapedByte(at, e);
             } else r.at += 1;
             // A range, unless the `-` is the class's last byte.
@@ -249,6 +295,15 @@ const Reader = struct {
                 s.setRangeValue(.{ .start = lo, .end = @as(usize, hi) + 1 }, true);
             } else s.set(lo);
         }
+        if (r.options.nocase) {
+            var folded = s;
+            var it = s.iterator(.{});
+            while (it.next()) |b| if (std.ascii.isAlphabetic(@intCast(b))) {
+                folded.set(std.ascii.toLower(@intCast(b)));
+                folded.set(std.ascii.toUpper(@intCast(b)));
+            };
+            s = folded;
+        }
         if (negated) s.toggleAll();
         return r.newSet(s);
     }
@@ -259,7 +314,6 @@ const Reader = struct {
 const Emitter = struct {
     insts: std.ArrayList(Inst) = .empty,
     alloc: std.mem.Allocator,
-    inner: []const Node,
 
     fn emit(e: *Emitter, i: Inst) Error!u16 {
         try e.insts.append(e.alloc, i);
@@ -268,6 +322,26 @@ const Emitter = struct {
 
     fn here(e: *const Emitter) u16 {
         return @intCast(e.insts.items.len);
+    }
+
+    /// Alternatives: a split to each in turn, the leftmost preferred, each
+    /// but the last ending in a jump past the rest.
+    fn alt(e: *Emitter, a: Alt) Error!void {
+        var ends: [pattern_most + 1]u16 = undefined;
+        var n_ends: usize = 0;
+        for (a, 0..) |s, k| {
+            if (k + 1 == a.len) {
+                try e.seq(s);
+                break;
+            }
+            const split = try e.emit(.{ .op = .split });
+            e.insts.items[split].x = split + 1;
+            try e.seq(s);
+            ends[n_ends] = try e.emit(.{ .op = .jmp });
+            n_ends += 1;
+            e.insts.items[split].y = e.here();
+        }
+        for (ends[0..n_ends]) |j| e.insts.items[j].x = e.here();
     }
 
     fn seq(e: *Emitter, nodes: []const Node) Error!void {
@@ -281,9 +355,11 @@ const Emitter = struct {
             .set => _ = try e.emit(.{ .op = .set, .x = n.set }),
             .start => _ = try e.emit(.{ .op = .start }),
             .end => _ = try e.emit(.{ .op = .end }),
+            .boundary => _ = try e.emit(.{ .op = .boundary, .c = 0 }),
+            .not_boundary => _ = try e.emit(.{ .op = .boundary, .c = 1 }),
             .group => {
                 _ = try e.emit(.{ .op = .save, .x = 0 });
-                try e.seq(e.inner[n.inner_from..][0..n.inner_len]);
+                try e.alt(n.inner);
                 _ = try e.emit(.{ .op = .save, .x = 1 });
             },
         }
@@ -320,19 +396,19 @@ const Emitter = struct {
 
 /// **A PATTERN, COMPILED**, or refused (`refused` says where and why).
 /// Its memory is `alloc`'s, given back by `Program.deinit`.
-pub fn compile(alloc: std.mem.Allocator, pattern: []const u8, refused: *Refusal) Error!Program {
+pub fn compile(alloc: std.mem.Allocator, pattern: []const u8, options: Options, refused: *Refusal) Error!Program {
     if (pattern.len > pattern_most) {
         refused.* = .{ .at = pattern_most, .message = "a pattern of more than 256 bytes" };
         return error.Refused;
     }
-    var r: Reader = .{ .p = pattern, .alloc = alloc, .refused = refused };
-    defer r.top.deinit(alloc);
-    defer r.inner.deinit(alloc);
+    var tree = std.heap.ArenaAllocator.init(alloc);
+    defer tree.deinit();
+    var r: Reader = .{ .p = pattern, .alloc = alloc, .tree = tree.allocator(), .refused = refused, .options = options };
     errdefer r.sets.deinit(alloc);
-    try r.seq(&r.top, false);
-    var e: Emitter = .{ .alloc = alloc, .inner = r.inner.items };
+    const top = try r.alt(false);
+    var e: Emitter = .{ .alloc = alloc };
     errdefer e.insts.deinit(alloc);
-    try e.seq(r.top.items);
+    try e.alt(top);
     _ = try e.emit(.{ .op = .match });
     const insts = try e.insts.toOwnedSlice(alloc);
     errdefer alloc.free(insts);
@@ -340,8 +416,12 @@ pub fn compile(alloc: std.mem.Allocator, pattern: []const u8, refused: *Refusal)
         .insts = insts,
         .sets = try r.sets.toOwnedSlice(alloc),
         .group = r.group,
-        .anchored = r.top.items.len > 0 and r.top.items[0].kind == .start,
+        .anchored = top.len == 1 and top[0].len > 0 and top[0][0].kind == .start,
     };
+}
+
+fn wordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
 // ── the search ──────────────────────────────────────────────────────────
@@ -427,7 +507,8 @@ pub const Searched = struct {
 /// way that comes to an instruction already followed for this place ends
 /// there (a loop's turn that took no byte, or a way less preferred than
 /// one already there), so each instruction is followed at most once a place.
-fn add(p: *const Program, sc: *Scratch, list: *List, first: Thread, pos: usize, len: usize, work: *u64) void {
+fn add(p: *const Program, sc: *Scratch, list: *List, first: Thread, pos: usize, s: []const u8, work: *u64) void {
+    const len = s.len;
     var top: usize = 1;
     sc.stack[0] = first;
     while (top > 0) {
@@ -453,6 +534,9 @@ fn add(p: *const Program, sc: *Scratch, list: *List, first: Thread, pos: usize, 
                     t.pc += 1;
                 } else break,
                 .end => if (pos == len) {
+                    t.pc += 1;
+                } else break,
+                .boundary => if (((pos > 0 and wordByte(s[pos - 1])) != (pos < len and wordByte(s[pos]))) == (i.c == 0)) {
                     t.pc += 1;
                 } else break,
                 .byte, .any, .set, .match => {
@@ -481,7 +565,7 @@ pub fn search(p: *const Program, sc: *Scratch, s: []const u8, positions_most: u6
         positions += 1;
         // A new start, least preferred, until there is a match.
         if (matched == null and (!p.anchored or pos == 0))
-            add(p, sc, clist, .{ .pc = 0, .caps = .{ pos, unset, unset } }, pos, s.len, &work);
+            add(p, sc, clist, .{ .pc = 0, .caps = .{ pos, unset, unset } }, pos, s, &work);
         nlist.reset();
         for (clist.threads[0..clist.len]) |t| {
             work += 1;
@@ -499,7 +583,7 @@ pub fn search(p: *const Program, sc: *Scratch, s: []const u8, positions_most: u6
                 .set => p.sets[i.x].isSet(s[pos]),
                 else => unreachable,
             };
-            if (ok) add(p, sc, nlist, .{ .pc = t.pc + 1, .caps = t.caps }, pos + 1, s.len, &work);
+            if (ok) add(p, sc, nlist, .{ .pc = t.pc + 1, .caps = t.caps }, pos + 1, s, &work);
         }
         std.mem.swap(*List, &clist, &nlist);
         if (pos == s.len) break;
@@ -517,13 +601,15 @@ pub fn search(p: *const Program, sc: *Scratch, s: []const u8, positions_most: u6
 
 // ── the compiled patterns, kept ─────────────────────────────────────────
 
-/// **A PATTERN IS COMPILED ONCE A RUN, CACHED BY ITS TEXT** (QUEUE 230):
+/// **A PATTERN IS COMPILED ONCE A RUN, CACHED BY ITS TEXT** (QUEUE 230)
+/// and its `nocase` (QUEUE 232):
 /// the last `cache_most` patterns a run used, each with the scratch its
 /// searches work in. A ninth takes the place of the one used longest ago.
 pub const cache_most = 8;
 
 pub const Cached = struct {
     text: []u8,
+    nocase: bool,
     program: Program,
     scratch: Scratch,
     used: u64,
@@ -540,9 +626,9 @@ pub const Cache = struct {
     clock: u64 = 0,
 
     /// The pattern's compiled program, if the cache has it.
-    pub fn get(c: *Cache, pattern: []const u8) ?*Cached {
+    pub fn get(c: *Cache, pattern: []const u8, options: Options) ?*Cached {
         c.clock += 1;
-        for (&c.entries) |*e| if (e.*) |*got| if (std.mem.eql(u8, got.text, pattern)) {
+        for (&c.entries) |*e| if (e.*) |*got| if (got.nocase == options.nocase and std.mem.eql(u8, got.text, pattern)) {
             got.used = c.clock;
             return got;
         };
@@ -550,8 +636,8 @@ pub const Cache = struct {
     }
 
     /// The pattern, compiled and kept (`get` found it not there).
-    pub fn put(c: *Cache, alloc: std.mem.Allocator, pattern: []const u8, refused: *Refusal) Error!*Cached {
-        var program = try compile(alloc, pattern, refused);
+    pub fn put(c: *Cache, alloc: std.mem.Allocator, pattern: []const u8, options: Options, refused: *Refusal) Error!*Cached {
+        var program = try compile(alloc, pattern, options, refused);
         errdefer program.deinit(alloc);
         var scratch = try Scratch.init(alloc, &program);
         errdefer scratch.deinit(alloc);
@@ -564,7 +650,7 @@ pub const Cache = struct {
             if (e == null) break;
         }
         if (c.entries[slot]) |*old| old.deinit(alloc);
-        c.entries[slot] = .{ .text = text, .program = program, .scratch = scratch, .used = c.clock };
+        c.entries[slot] = .{ .text = text, .nocase = options.nocase, .program = program, .scratch = scratch, .used = c.clock };
         return &c.entries[slot].?;
     }
 

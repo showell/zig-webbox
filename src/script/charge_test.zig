@@ -262,6 +262,7 @@ const hard_cases = [_]struct { name: []const u8, store: Setup = .none, setup: []
     .{ .name = "like, backtracking", .setup = "local s = rep(\"a\", N)", .call = "local x = like(s, \"*a*a*b\")" },
     .{ .name = "re_find, a loop of a loop that never matches", .setup = "local s = rep(\"a\", N)", .call = "local x = re_find(s, \"(a*)*b\")" },
     .{ .name = "re_find, many ways at every byte", .setup = "local s = rep(\"a\", N)", .call = "local x = re_find(s, \"a?a?a?a?a*a*a*$\")" },
+    .{ .name = "re_find, alternatives that meet at every byte", .setup = "local s = rep(\"a\", N)", .call = "local x = re_find(s, \"(a|aa|a?)*b\", {nocase = true})" },
     .{ .name = "sort, strings sharing a prefix", .setup = "local l = {} for i = 1, N do push(l, rep(\"x\", 20) .. (N - i)) end", .call = "sort(l)" },
 };
 

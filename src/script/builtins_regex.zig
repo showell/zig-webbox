@@ -19,18 +19,20 @@ const B = ast.Builtin;
 const spec = bi.spec;
 
 pub const specs = [_]bi.Spec{
-    spec(.re_find, 2, 2, reFind),
-    spec(.re_match, 2, 2, reMatch),
+    spec(.re_find, 2, 3, reFind),
+    spec(.re_match, 2, 3, reMatch),
 };
 
 /// The pattern's compiled program: the run's, or compiled now and kept.
-fn program(run: *Run, pos: ast.Pos, b: B, pattern: []const u8) Error!*regex.Cached {
-    if (run.patterns.get(pattern)) |got| return got;
+fn program(run: *Run, pos: ast.Pos, b: B, pattern: []const u8, options: regex.Options) Error!*regex.Cached {
+    if (run.patterns.get(pattern, options)) |got| return got;
     if (pattern.len > regex.pattern_most) return run.fail(pos, .argument, "`{s}`'s pattern is {d} bytes, and one may be at most {d}", .{ @tagName(b), pattern.len, regex.pattern_most });
-    try run.charge(pos, pattern.len + 1);
-    run.tally(pattern.len + 1);
+    // A step a byte to compile, and a step a byte more to fold its case.
+    const cost = pattern.len + 1 + if (options.nocase) pattern.len else 0;
+    try run.charge(pos, cost);
+    run.tally(cost);
     var refused: regex.Refusal = undefined;
-    return run.patterns.put(run.machine, pattern, &refused) catch |e| switch (e) {
+    return run.patterns.put(run.machine, pattern, options, &refused) catch |e| switch (e) {
         error.OutOfMemory => run.machineOom(pos),
         error.Refused => run.fail(pos, .argument, "`{s}`'s pattern, at its byte {d}: {s}", .{ @tagName(b), refused.at + 1, refused.message }),
     };
@@ -38,8 +40,23 @@ fn program(run: *Run, pos: ast.Pos, b: B, pattern: []const u8) Error!*regex.Cach
 
 /// The search, charged as it goes: when the steps left would not cover
 /// the whole of it, it stops where they run out.
-fn searched(run: *Run, pos: ast.Pos, b: B, s: []const u8, pattern: []const u8) Error!struct { ?regex.Found, *regex.Cached } {
-    const c = try program(run, pos, b, pattern);
+/// The options map a call may end with: `{nocase = true}`.
+fn optionsArg(run: *Run, pos: ast.Pos, b: B, args: []const Value) Error!regex.Options {
+    var o: regex.Options = .{};
+    if (args.len < 3) return o;
+    const m = try bi.mapArg(run, pos, b, args[2]);
+    for (m.map.keys(), m.map.values()) |k, x| {
+        if (!std.mem.eql(u8, k, "nocase")) return run.fail(pos, .argument, "`{s}` takes `nocase`, not `{s}`", .{ @tagName(b), k });
+        o.nocase = switch (x) {
+            .boolean => |v| v,
+            else => return run.fail(pos, .type, "`{s}`: its `nocase` must be true or false, not {s}", .{ @tagName(b), x.typeName() }),
+        };
+    }
+    return o;
+}
+
+fn searched(run: *Run, pos: ast.Pos, b: B, s: []const u8, pattern: []const u8, args: []const Value) Error!struct { ?regex.Found, *regex.Cached } {
+    const c = try program(run, pos, b, pattern, try optionsArg(run, pos, b, args));
     const per: u64 = c.program.insts.len;
     const most = (run.budgets.steps -| run.steps) / per + 1;
     const r = regex.search(&c.program, &c.scratch, s, most);
@@ -49,14 +66,14 @@ fn searched(run: *Run, pos: ast.Pos, b: B, s: []const u8, pattern: []const u8) E
     return .{ r.found, c };
 }
 
-/// **`re_find(s, pattern)`**: the leftmost match of `pattern` in `s`, the
+/// **`re_find(s, pattern[, {nocase}])`**: the leftmost match of `pattern` in `s`, the
 /// one a backtracking matcher would find first, as `{at, text}` (`at`
 /// 1-based) with `group`, the capture group's text ("" where the match did
 /// not go through it), when the pattern has one; nil when there is none.
 fn reFind(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const s = try bi.stringArg(run, pos, .re_find, args[0], "its first argument");
     const pattern = try bi.stringArg(run, pos, .re_find, args[1], "its pattern");
-    const found, const c = try searched(run, pos, .re_find, s, pattern);
+    const found, const c = try searched(run, pos, .re_find, s, pattern, args);
     const f = found orelse return .nil;
     const a = run.alloc;
     const m = try run.newTable(pos);
@@ -67,12 +84,12 @@ fn reFind(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .table = m };
 }
 
-/// **`re_match(s, pattern)`**: whether `s` holds a match of `pattern`,
+/// **`re_match(s, pattern[, {nocase}])`**: whether `s` holds a match of `pattern`,
 /// anywhere, as `grep` would say of a line: `^` and `$` pin it to the
 /// whole.
 fn reMatch(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const s = try bi.stringArg(run, pos, .re_match, args[0], "its first argument");
     const pattern = try bi.stringArg(run, pos, .re_match, args[1], "its pattern");
-    const found, _ = try searched(run, pos, .re_match, s, pattern);
+    const found, _ = try searched(run, pos, .re_match, s, pattern, args);
     return .{ .boolean = found != null };
 }

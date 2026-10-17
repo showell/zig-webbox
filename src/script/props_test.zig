@@ -407,47 +407,62 @@ const regex = script.regex;
 /// **A PATTERN OF THE SUBSET, AS A TREE**: what the generator makes, the
 /// reference matcher reads, and `render` writes as the pattern's text. The
 /// reference never parses: it reads the tree the text was written from.
+/// A pattern is alternatives (`|`), each a run of nodes; the one group
+/// holds alternatives of its own (QUEUE 232).
 const GNode = struct {
-    kind: enum { lit, any, set, start, end, group },
+    kind: enum { lit, any, set, start, end, boundary, group },
     c: u8 = 0,
     set: usize = 0,
     quant: enum { one, star, plus, opt } = .one,
-    inner: []const GNode = &.{},
+    inner: GAlt = &.{},
 };
+const GAlt = []const []const GNode;
 
-/// The classes the generator writes, and which bytes each holds.
-const gen_sets = [_]struct { text: []const u8, holds: []const u8 }{
-    .{ .text = "[ab]", .holds = "ab" },
-    .{ .text = "[^a]", .holds = "b1 .\n" },
-    .{ .text = "[a-b]", .holds = "ab" },
-    .{ .text = "\\d", .holds = "1" },
-    .{ .text = "\\w", .holds = "ab1" },
-    .{ .text = "\\s", .holds = " \n" },
-    .{ .text = "[^ab1]", .holds = " .\n" },
-    .{ .text = "[.1]", .holds = ".1" },
-    .{ .text = "[\\d ]", .holds = "1 " },
-    .{ .text = "\\S", .holds = "ab1." },
+/// The classes the generator writes: each a base and whether it is
+/// negated, so a case folded under `nocase` is folded before the negation
+/// (`[^a]` takes neither `a` nor `A`), as Python's does.
+const gen_sets = [_]struct { text: []const u8, base: []const u8, negated: bool = false }{
+    .{ .text = "[ab]", .base = "ab" },
+    .{ .text = "[^a]", .base = "a", .negated = true },
+    .{ .text = "[a-b]", .base = "ab" },
+    .{ .text = "\\d", .base = "1" },
+    .{ .text = "\\w", .base = "ab1AB" },
+    .{ .text = "\\s", .base = " \n" },
+    .{ .text = "[^ab1]", .base = "ab1", .negated = true },
+    .{ .text = "[.1]", .base = ".1" },
+    .{ .text = "[\\d ]", .base = "1 " },
+    .{ .text = "\\S", .base = " \n", .negated = true },
+    .{ .text = "[A]", .base = "A" },
 };
-/// What the strings are made of: every class above tells some apart.
-const gen_alphabet = "ab1 .\n";
+/// What the strings are made of: every class above tells some apart, and
+/// `A` against `a` is what `nocase` changes.
+const gen_alphabet = "ab1 .\nA";
 
-fn genSeq(rand: std.Random, arena: std.mem.Allocator, len_most: usize, group_left: *bool) ![]const GNode {
+fn genAlt(rand: std.Random, arena: std.mem.Allocator, len_most: usize, group_left: *bool) error{OutOfMemory}!GAlt {
+    const n: usize = if (rand.uintLessThan(u8, 3) == 0) 2 + rand.uintAtMost(usize, 1) else 1;
+    const alt = try arena.alloc([]const GNode, n);
+    for (alt) |*seq| seq.* = try genSeq(rand, arena, len_most, group_left);
+    return alt;
+}
+
+fn genSeq(rand: std.Random, arena: std.mem.Allocator, len_most: usize, group_left: *bool) error{OutOfMemory}![]const GNode {
     const n = rand.uintAtMost(usize, len_most);
     const seq = try arena.alloc(GNode, n);
     for (seq) |*node| {
-        node.* = switch (rand.uintLessThan(u8, 16)) {
-            0...5 => .{ .kind = .lit, .c = "ab1 .\n"[rand.uintLessThan(usize, 6)] },
+        node.* = switch (rand.uintLessThan(u8, 17)) {
+            0...5 => .{ .kind = .lit, .c = gen_alphabet[rand.uintLessThan(usize, gen_alphabet.len)] },
             6, 7 => .{ .kind = .any },
             8...10 => .{ .kind = .set, .set = rand.uintLessThan(usize, gen_sets.len) },
             11 => .{ .kind = .start },
             12 => .{ .kind = .end },
+            13 => .{ .kind = .boundary },
             else => if (group_left.*) blk: {
                 group_left.* = false;
                 var none = false;
-                break :blk .{ .kind = .group, .inner = try genSeq(rand, arena, 3, &none) };
+                break :blk .{ .kind = .group, .inner = try genAlt(rand, arena, 3, &none) };
             } else .{ .kind = .lit, .c = 'a' },
         };
-        if (node.kind != .start and node.kind != .end) node.quant = switch (rand.uintLessThan(u8, 8)) {
+        if (node.kind != .start and node.kind != .end and node.kind != .boundary) node.quant = switch (rand.uintLessThan(u8, 8)) {
             0, 1 => .star,
             2 => .plus,
             3 => .opt,
@@ -457,42 +472,57 @@ fn genSeq(rand: std.Random, arena: std.mem.Allocator, len_most: usize, group_lef
     return seq;
 }
 
-fn render(out: *std.ArrayList(u8), seq: []const GNode) !void {
+fn render(out: *std.ArrayList(u8), alt: GAlt) error{OutOfMemory}!void {
     const a = testing.allocator;
-    for (seq) |node| {
-        switch (node.kind) {
-            .lit => switch (node.c) {
-                '.' => try out.appendSlice(a, "\\."),
-                '\n' => try out.appendSlice(a, "\\n"),
-                else => try out.append(a, node.c),
-            },
-            .any => try out.append(a, '.'),
-            .set => try out.appendSlice(a, gen_sets[node.set].text),
-            .start => try out.append(a, '^'),
-            .end => try out.append(a, '$'),
-            .group => {
-                try out.append(a, '(');
-                try render(out, node.inner);
-                try out.append(a, ')');
-            },
-        }
-        switch (node.quant) {
-            .one => {},
-            .star => try out.append(a, '*'),
-            .plus => try out.append(a, '+'),
-            .opt => try out.append(a, '?'),
+    for (alt, 0..) |seq, i| {
+        if (i > 0) try out.append(a, '|');
+        for (seq) |node| {
+            switch (node.kind) {
+                .lit => switch (node.c) {
+                    '.' => try out.appendSlice(a, "\\."),
+                    '\n' => try out.appendSlice(a, "\\n"),
+                    else => try out.append(a, node.c),
+                },
+                .any => try out.append(a, '.'),
+                .set => try out.appendSlice(a, gen_sets[node.set].text),
+                .start => try out.append(a, '^'),
+                .end => try out.append(a, '$'),
+                .boundary => try out.appendSlice(a, "\\b"),
+                .group => {
+                    try out.append(a, '(');
+                    try render(out, node.inner);
+                    try out.append(a, ')');
+                },
+            }
+            switch (node.quant) {
+                .one => {},
+                .star => try out.append(a, '*'),
+                .plus => try out.append(a, '+'),
+                .opt => try out.append(a, '?'),
+            }
         }
     }
 }
 
+fn swapCase(c: u8) u8 {
+    return if (std.ascii.isUpper(c)) std.ascii.toLower(c) else std.ascii.toUpper(c);
+}
+
+fn wordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
 /// **THE REFERENCE: A BACKTRACKING MATCHER**, slow and plainly right:
-/// each choice tried in its order of preference (more before fewer, a
-/// group's `?` taken before skipped), the first way through that reaches
-/// the pattern's end is the match. A loop's turn that matched nothing
-/// ends the loop as failed (a `+`'s first turn excepted), as a Thompson
-/// machine's does: an empty turn is never what makes a match.
+/// each choice tried in its order of preference (the alternatives left to
+/// right, more before fewer, a group's `?` taken before skipped), the first
+/// way through that reaches the pattern's end is the match. **A loop's
+/// turn that matched nothing ends the loop**, as a Thompson machine's does
+/// (it would come back to the loop's head at the same place): a `*`'s turn,
+/// or a `+`'s after its first, as failed; a `+`'s first turn, with the loop
+/// done. An empty turn is never followed by another.
 const Ref = struct {
     s: []const u8,
+    nocase: bool = false,
 
     const Caps = struct { gs: ?usize = null, ge: ?usize = null };
     const Hit = struct { end: usize, caps: Caps };
@@ -502,8 +532,9 @@ const Ref = struct {
         close: *const Cont,
         /// After a `*` turn begun at `start`: another turn, or on.
         again: struct { node: *const GNode, start: usize, next: *const Cont },
-        /// After a `+`'s first turn: more turns, or on.
-        more: struct { node: *const GNode, next: *const Cont },
+        /// After a `+`'s first turn, begun at `start`: more turns, or on;
+        /// only on when the turn took nothing.
+        more: struct { node: *const GNode, start: usize, next: *const Cont },
     };
 
     fn go(r: Ref, k: *const Cont, pos: usize, caps: Caps) ?Hit {
@@ -512,8 +543,13 @@ const Ref = struct {
             .seq => |q| r.seqAt(q.rest, q.next, pos, caps),
             .close => |next| r.go(next, pos, .{ .gs = caps.gs, .ge = pos }),
             .again => |q| if (pos == q.start) null else r.star(q.node, q.next, pos, caps),
-            .more => |q| r.star(q.node, q.next, pos, caps),
+            .more => |q| if (pos == q.start) r.go(q.next, pos, caps) else r.star(q.node, q.next, pos, caps),
         };
+    }
+
+    fn alts(r: Ref, alt: GAlt, k: *const Cont, pos: usize, caps: Caps) ?Hit {
+        for (alt) |seq| if (r.seqAt(seq, k, pos, caps)) |h| return h;
+        return null;
     }
 
     fn seqAt(r: Ref, nodes: []const GNode, k: *const Cont, pos: usize, caps: Caps) ?Hit {
@@ -524,7 +560,7 @@ const Ref = struct {
             .one => r.once(n, &rest, pos, caps),
             .opt => r.once(n, &rest, pos, caps) orelse r.go(&rest, pos, caps),
             .star => r.star(n, &rest, pos, caps),
-            .plus => r.once(n, &Cont{ .more = .{ .node = n, .next = &rest } }, pos, caps),
+            .plus => r.once(n, &Cont{ .more = .{ .node = n, .start = pos, .next = &rest } }, pos, caps),
         };
     }
 
@@ -532,22 +568,29 @@ const Ref = struct {
         return r.once(n, &Cont{ .again = .{ .node = n, .start = pos, .next = k } }, pos, caps) orelse r.go(k, pos, caps);
     }
 
+    fn inSet(r: Ref, set: usize, c: u8) bool {
+        const st = gen_sets[set];
+        const in = std.mem.indexOfScalar(u8, st.base, c) != null or (r.nocase and std.mem.indexOfScalar(u8, st.base, swapCase(c)) != null);
+        return in != st.negated;
+    }
+
     fn once(r: Ref, n: *const GNode, k: *const Cont, pos: usize, caps: Caps) ?Hit {
         const at: ?u8 = if (pos < r.s.len) r.s[pos] else null;
         return switch (n.kind) {
-            .lit => if (at != null and at.? == n.c) r.go(k, pos + 1, caps) else null,
+            .lit => if (at != null and (at.? == n.c or (r.nocase and swapCase(at.?) == n.c))) r.go(k, pos + 1, caps) else null,
             .any => if (at != null and at.? != '\n') r.go(k, pos + 1, caps) else null,
-            .set => if (at != null and std.mem.indexOfScalar(u8, gen_sets[n.set].holds, at.?) != null) r.go(k, pos + 1, caps) else null,
+            .set => if (at != null and r.inSet(n.set, at.?)) r.go(k, pos + 1, caps) else null,
             .start => if (pos == 0) r.go(k, pos, caps) else null,
             .end => if (pos == r.s.len) r.go(k, pos, caps) else null,
-            .group => r.seqAt(n.inner, &Cont{ .close = k }, pos, .{ .gs = pos, .ge = null }),
+            .boundary => if ((pos > 0 and wordByte(r.s[pos - 1])) != (at != null and wordByte(at.?))) r.go(k, pos, caps) else null,
+            .group => r.alts(n.inner, &Cont{ .close = k }, pos, .{ .gs = pos, .ge = null }),
         };
     }
 
     /// The leftmost match, as `regex.search` gives it.
-    fn find(r: Ref, seq: []const GNode) ?regex.Found {
+    fn find(r: Ref, alt: GAlt) ?regex.Found {
         for (0..r.s.len + 1) |start| {
-            if (r.seqAt(seq, &Cont{ .done = {} }, start, .{})) |h| return .{
+            if (r.alts(alt, &Cont{ .done = {} }, start, .{})) |h| return .{
                 .start = start,
                 .end = h.end,
                 .group = if (h.caps.gs != null and h.caps.ge != null) .{ h.caps.gs.?, h.caps.ge.? } else null,
@@ -561,7 +604,7 @@ fn groupText(s: []const u8, f: regex.Found) []const u8 {
     return if (f.group) |g| s[g[0]..g[1]] else "";
 }
 
-test "property: re_find's machine finds what a backtracking matcher finds, on random patterns of the subset and random strings (QUEUE 230)" {
+test "property: re_find's machine finds what a backtracking matcher finds, on random patterns of the subset and random strings, `|`, `\\b` and `nocase` among them (QUEUES 230, 232)" {
     var prng = std.Random.DefaultPrng.init(230);
     const rand = prng.random();
     var pattern: std.ArrayList(u8) = .empty;
@@ -573,14 +616,15 @@ test "property: re_find's machine finds what a backtracking matcher finds, on ra
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         var group_left = true;
-        const tree = try genSeq(rand, arena.allocator(), 6, &group_left);
+        const tree = try genAlt(rand, arena.allocator(), 6, &group_left);
         pattern.clearRetainingCapacity();
         try render(&pattern, tree);
         s.clearRetainingCapacity();
         for (0..rand.uintAtMost(usize, 12)) |_| try s.append(testing.allocator, gen_alphabet[rand.uintLessThan(usize, gen_alphabet.len)]);
+        const nocase = rand.uintLessThan(u8, 4) == 0;
 
         var refused: regex.Refusal = undefined;
-        var program = regex.compile(testing.allocator, pattern.items, &refused) catch |e| {
+        var program = regex.compile(testing.allocator, pattern.items, .{ .nocase = nocase }, &refused) catch |e| {
             std.debug.print("round {d}: /{s}/ refused at {d}: {s}\n", .{ round, pattern.items, refused.at, refused.message });
             return e;
         };
@@ -588,8 +632,8 @@ test "property: re_find's machine finds what a backtracking matcher finds, on ra
         var scratch = try regex.Scratch.init(testing.allocator, &program);
         defer scratch.deinit(testing.allocator);
         const got = regex.search(&program, &scratch, s.items, std.math.maxInt(u64));
-        const want = (Ref{ .s = s.items }).find(tree);
-        errdefer std.debug.print("round {d}: /{s}/ on \"{f}\": got {?any}, want {?any}\n", .{ round, pattern.items, std.zig.fmtString(s.items), got.found, want });
+        const want = (Ref{ .s = s.items, .nocase = nocase }).find(tree);
+        errdefer std.debug.print("round {d}: /{s}/{s} on \"{f}\": got {?any}, want {?any}\n", .{ round, pattern.items, if (nocase) "i" else "", std.zig.fmtString(s.items), got.found, want });
         try testing.expect(got.finished);
         try testing.expectEqual(want == null, got.found == null);
         if (want) |w| {
@@ -632,9 +676,10 @@ test "property: re_find and re_match in a script say what the backtracking match
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         var group_left = true;
-        const tree = try genSeq(rand, arena.allocator(), 6, &group_left);
+        const tree = try genAlt(rand, arena.allocator(), 6, &group_left);
         pattern.clearRetainingCapacity();
         try render(&pattern, tree);
+        const nocase = rand.boolean();
         const s = s_buf[0..rand.uintAtMost(usize, s_buf.len)];
         for (s) |*c| c.* = gen_alphabet[rand.uintLessThan(usize, gen_alphabet.len)];
         // The script: every field of the match, the group's only when the
@@ -642,21 +687,21 @@ test "property: re_find and re_match in a script say what the backtracking match
         src.clearRetainingCapacity();
         try src.appendSlice(testing.allocator, "local s = \"");
         try appendShaleString(&src, s);
-        try src.appendSlice(testing.allocator, "\"\nlocal p = \"");
+        try src.appendSlice(testing.allocator, if (nocase) "\"\nlocal o = {nocase = true}\nlocal p = \"" else "\"\nlocal o = {nocase = false}\nlocal p = \"");
         try appendShaleString(&src, pattern.items);
         try src.appendSlice(testing.allocator,
             \\"
-            \\local m = re_find(s, p)
-            \\if m then print(m.at, "[" .. m.text .. "]", "[" .. get(m, "group", "-") .. "]", re_match(s, p)) else print("none", re_match(s, p)) end
+            \\local m = re_find(s, p, o)
+            \\if m then print(m.at, "[" .. m.text .. "]", "[" .. get(m, "group", "-") .. "]", re_match(s, p, o)) else print("none", re_match(s, p, o)) end
         );
         const has_group = std.mem.indexOfScalar(u8, pattern.items, '(') != null;
         want.clearRetainingCapacity();
-        if ((Ref{ .s = s }).find(tree)) |w| {
+        if ((Ref{ .s = s, .nocase = nocase }).find(tree)) |w| {
             try want.print(testing.allocator, "{d}\t[{s}]\t[{s}]\ttrue\n", .{ w.start + 1, s[w.start..w.end], if (has_group) groupText(s, w) else "-" });
         } else try want.appendSlice(testing.allocator, "none\tfalse\n");
         const out = try f.output(src.items);
         defer testing.allocator.free(out);
-        errdefer std.debug.print("round {d}: /{s}/ on \"{f}\"\n", .{ round, pattern.items, std.zig.fmtString(s) });
+        errdefer std.debug.print("round {d}: /{s}/{s} on \"{f}\"\n", .{ round, pattern.items, if (nocase) "i" else "", std.zig.fmtString(s) });
         try testing.expectEqualStrings(want.items, out);
     }
 }
@@ -684,7 +729,7 @@ test "property: a search's cost is linear in the string, whatever the pattern: `
     // Exactly what it says it charges: 20,001 places (the end is one) at
     // `a*b`'s 5 instructions, 4 to compile its 3 bytes, and the call's 4.
     try testing.expectEqual(@as(u64, 20_001 * 5 + 4 + 4), plain);
-    for ([_][]const u8{ "(a*)*b", "(a+)+b", "a?a?a?a?a?a*a*a*b", "(a?)*a*b" }) |p| {
+    for ([_][]const u8{ "(a*)*b", "(a+)+b", "a?a?a?a?a?a*a*a*b", "(a?)*a*b", "(a|aa)*b", "(a|a|a?)*b", "(a*|b)*c|a*d" }) |p| {
         const at_n = try reSteps(&f, p, n);
         const at_4n = try reSteps(&f, p, 4 * n);
         errdefer std.debug.print("/{s}/: {d} steps at {d}, {d} at {d}; a*b {d}\n", .{ p, at_n, n, at_4n, 4 * n, plain });

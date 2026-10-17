@@ -887,3 +887,19 @@ test "builtins: re_find and re_match at their edges, and a run's patterns past t
         \\print(ok)
     , "24\n");
 }
+
+test "builtins: re_find's alternatives, \\b and nocase (the design, final; QUEUE 232)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // `|` is the loosest; the leftmost alternative that matches is taken.
+    try f.expectOutput("print(re_find(\"a warning, then an error\", \"error|warning\").text, re_find(\"ab\", \"a|ab\").text, re_find(\"xab\", \"^a|b\").at)", "warning\ta\t3\n");
+    // A group around alternatives is the one group.
+    try f.expectOutput("print(re_find(\"level=WARN msg\", \"level=(INFO|WARN|ERROR)\").group)", "WARN\n");
+    // `\\b`: a word's edge; `\\B` not one.
+    try f.expectOutput("print(re_match(\"a cat.\", \"\\\\bcat\\\\b\"), re_match(\"concatenate\", \"\\\\bcat\\\\b\"), re_find(\"concat cat\", \"\\\\Bcat\").at)", "true\tfalse\t4\n");
+    // nocase: letters either way; a class folded before its `^`.
+    try f.expectOutput("print(re_match(\"FAILED\", \"fail\", {nocase = true}), re_match(\"FAILED\", \"fail\"), re_find(\"Ab\", \"[^a]\", {nocase = true}).text)", "true\tfalse\tb\n");
+    // The cache keeps a pattern's two compilations apart.
+    try f.expectOutput("print(re_match(\"A\", \"a\"), re_match(\"A\", \"a\", {nocase = true}), re_match(\"A\", \"a\"))", "false\ttrue\tfalse\n");
+}

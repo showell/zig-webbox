@@ -36,8 +36,8 @@ default that is an integer or a boolean reads the value as one.
 within one; hidden names like `.git` and `.zig-cache` left out),
 `grep(p, s)` (the lines holding a literal, numbered), `read_lines` and
 `count_lines` for a file of any size, `re_find(s, pattern)` and
-`re_match` (regular expressions, a linear-time subset with one capture
-group), `between(s, a, b)` (the text after one string and before the
+`re_match` (regular expressions, a linear-time subset: `|`, `\b`, one
+capture group, `{nocase = true}`), `between(s, a, b)` (the text after one string and before the
 next), `edit(p, old, new[, {all, word}])` (a literal replaced, its diff
 printed) and `edit(p, {{old = ..., new = ...}, ...})` (several in sequence,
 one diff, one write, none made if any fails), long strings (`[=[ ... ]=]`,
@@ -265,11 +265,11 @@ follows the name in the match.
 
 ## Where Shale is worse, said plainly
 
-- **Regular expressions are a subset**: one capture group, no `|`, no
-  `{n,m}`, no lookaround, no backreferences (each refused by name). Two
-  fields from one match are the group and what follows it in the match;
-  a choice between words is a call for each. In return no pattern makes a
-  search slower than linear, and its cost is known before it runs.
+- **Regular expressions are a subset**: one capture group, no `{n,m}`, no
+  lookaround, no backreferences (each refused by name). Two fields from one
+  match are the group and what follows it in the match. In return no
+  pattern makes a search slower than linear, and its cost is known before
+  it runs.
 - **A file is read whole by `grep` and `edit`**, at most the call-bytes cap
   (1 MiB): a bigger one goes through `read_lines` a part at a time.
 - **Step budgets are real.** A walk of a large tree, or a script that loops
