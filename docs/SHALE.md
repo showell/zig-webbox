@@ -393,6 +393,7 @@ was in. The classes are:
 | `argument` | a builtin or function given the wrong arguments |
 | `store` | a store call failed (it names the path) |
 | `budget` | a budget ran out (it names which) |
+| `fail` | the script's own: `fail(msg)`, its message as given (QUEUE 232) |
 
 **How a stop reads,** on the runner and in the route's reply:
 
@@ -451,6 +452,10 @@ It gives back a map:
   innermost first, as the report's `called from` lines: a list of `{line,
   column, in_function}` maps, out to the top level: the `attempt`
   itself is one of them, the call of `f`, and the calls before it.
+
+**It catches a `fail`** as any other error: `fail(msg)` is how a function
+says it could not do what it was asked, and `attempt` gives `class =
+"fail"`, `error = msg`.
 
 Two things it does not do:
 - **It never catches a budget.** A budget is the run's, not the call's, so
@@ -599,12 +604,14 @@ the errors column says the rest.
 | `push(l, x)` | nil | `type` for a map or for nil |
 | `sort(l)`, `sort(rows, key[, "asc" or "desc"])` | nil: in place | `type` for mixed kinds; `index` for a row with no `key`; `argument` for another order |
 | `take(l, n)` | a new list of the first `n` | `argument` for `n` < 0 |
+| `last(l, n)` | a new list of the last `n` | `argument` for `n` < 0 |
 | `reverse(l)` | nil: in place | |
 | `keys(m)`, `has_key(m, k)`, `count(t)` | a list; a boolean; an integer | |
 | `now()`, `budget()` | the host's time; what is left | |
 | `print(...)` | nil | `type` for a list or map |
 | `yield()` | nil | |
 | `arg(name[, default])` | the run's value by that name, or `default` | `argument` for a value not of an integer or boolean default's kind |
+| `fail(msg)` | never returns: the run stops | `fail`, with `msg` |
 | `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function, trail}` | (the language's own: see `attempt`) |
 | the prelude's `walk_all(p, opts)`, `count_all(p, s)`, `find_next(p, s, at)` | every entry; every occurrence; the next one | as `walk`, `count_in`, `find_in` |
 
@@ -790,6 +797,7 @@ there "".
 | `sort(rows, key)` | a list of maps, in place, by each one's `key`: all integers or all strings. **Stable**: equal keys keep their order, so sorting by one key then another orders by both |
 | `sort(rows, key, "desc")` | the same, descending, **still stable**: equal keys keep their order (a sort then `reverse` reversed them). `"asc"` is the default |
 | `take(l, n)` | a new list of `l`'s first `n` items, or all of a shorter one: the top N of a sorted list |
+| `last(l, n)` | a new list of `l`'s last `n` items, in order, or all of a shorter one: the tail of a log's lines (QUEUE 232). A count below 0 is an error, as `take`'s: a count gone negative never quietly becomes a tail |
 | `reverse(l)` | in place |
 | `keys(m)` | a map's keys, in the order first set |
 | `has_key(m, k)` | whether `m` has `k` |
@@ -804,6 +812,7 @@ there "".
 | `budget()` | a map of what is left of `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output`, so a script can stop at a point of its own (the other budgets are not in it) |
 | `print(...)` | scalars only. It evaluates every argument first, joins them with tabs, and ends with a newline: `print()` is an empty line, `print(nil, true)` is `nil<TAB>true` |
 | `arg(name[, default])` | the value the run was given as `name` (the runner's `name=value`), or `default` (nil unset): a script's inputs. An integer or boolean default reads the value as one (`true`, `false`, `1`, `0`); any other, the string. The live site's route gives no values |
+| `fail(msg)` | the run stops here, class `fail`, `msg` its message: one line and its trail, as any stop (QUEUE 232). The script's own assertion: `if #found == 0 then fail("no config under " .. dir) end`. `attempt` catches it; the CLI exits 1 on it |
 | `yield()` | nil: a collection point, where the run keeps only the values it still reaches (see "The VM"). When a run pauses is the host's to say, never the script's |
 
 ## The prelude

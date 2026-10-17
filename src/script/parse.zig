@@ -27,7 +27,7 @@ const lua_names = std.StaticStringMap([]const u8).initComptime(.{
     .{ "require", "`require` is not in this language" },
     .{ "pcall", "`pcall` is not in this language: `attempt(f, ...)` calls a function and gives its error as a value" },
     .{ "xpcall", "`xpcall` is not in this language: `attempt(f, ...)` calls a function and gives its error as a value" },
-    .{ "error", "`error` is not in this language" },
+    .{ "error", "`error` is not in this language: `fail(msg)` stops the run with your message, and `attempt` catches it" },
     .{ "pairs", "`pairs` is not in this language: `for k in keys(m) do ... m[k] ... end`" },
     .{ "ipairs", "`ipairs` is not in this language: `for x in list do ... end`, or `for i = 1, #list do`" },
     .{ "setmetatable", "metatables are not in this language" },

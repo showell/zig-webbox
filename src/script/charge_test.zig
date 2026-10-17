@@ -103,9 +103,11 @@ const cases = [_]Case{
     .{ .b = .count, .grows = .constant, .why = "a length the table keeps" },
     .{ .b = .reverse, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, i) end", .call = "reverse(l)" },
     .{ .b = .take, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, i) end", .call = "local x = take(l, N)" },
+    .{ .b = .last, .grows = .scales, .setup = "local l = {} for i = 1, N do push(l, i) end", .call = "local x = last(l, N)" },
     // the host
     .{ .b = .now, .grows = .constant, .why = "an integer the host handed in" },
     .{ .b = .arg, .grows = .constant, .why = "a name compared with each value the run was given, a handful, their bytes charged" },
+    .{ .b = .fail, .grows = .constant, .why = "the run stops: its message's bytes charged once" },
     .{ .b = .budget, .grows = .constant, .why = "six counters" },
     .{ .b = .yield, .grows = .constant, .why = "its argument checked; in the VM the copy it makes is charged a step a value and a step for 16 bytes, by collect.zig" },
     .{ .b = .print, .grows = .scales, .setup = "local s = rep(\"a\", N)", .call = "print(s)" },

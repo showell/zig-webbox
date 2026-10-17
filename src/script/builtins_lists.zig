@@ -19,6 +19,7 @@ pub const specs = [_]bi.Spec{
     spec(.sort, 1, 3, sort),
     spec(.reverse, 1, 1, reverse),
     spec(.take, 2, 2, take),
+    spec(.last, 2, 2, last),
     spec(.keys, 1, 1, keys),
     spec(.has_key, 2, 2, hasKey),
     spec(.get, 2, 3, get),
@@ -51,6 +52,23 @@ fn take(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     try run.charge(pos, k);
     const out = try run.newTable(pos);
     out.list.appendSlice(run.alloc, t.list.items[0..k]) catch return run.oom(pos);
+    out.kind = .list;
+    run.tally(k);
+    return .{ .table = out };
+}
+
+/// **`last(l, n)`** (the design, final; metal-vmm QUEUE 232): the last
+/// `n` items of a list, in order, all of them when it is shorter. A count
+/// below 0 is an error, as `take`'s is: a count gone negative never quietly
+/// becomes a tail.
+fn last(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const t = try bi.listArg(run, pos, .last, args[0]);
+    const n = try bi.intArg(run, pos, .last, args[1], "its count");
+    if (n < 0) return run.fail(pos, .argument, "`last`: a count of {d}", .{n});
+    const k: usize = @intCast(@min(@as(u64, @intCast(n)), t.list.items.len));
+    try run.charge(pos, k);
+    const out = try run.newTable(pos);
+    out.list.appendSlice(run.alloc, t.list.items[t.list.items.len - k ..]) catch return run.oom(pos);
     out.kind = .list;
     run.tally(k);
     return .{ .table = out };

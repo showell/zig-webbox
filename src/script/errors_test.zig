@@ -51,6 +51,10 @@ const cases = [_]Case{
     .{ .src = "local x = )", .line = 1, .column = 11, .class = .syntax, .message = "expected a value, found `)`" },
     .{ .src = "local x = (1\n", .line = 2, .column = 1, .class = .syntax, .message = "expected `)`, found the end of the script" },
     .{ .src = "print(1) = 2", .line = 1, .column = 1, .class = .syntax, .message = "only a local or an element `t[k]`, `t.k` can be assigned" },
+    // `fail` (the design, final; QUEUE 232): the script's own stop, its
+    // message as given; Lua's `error` refused, naming it.
+    .{ .src = "function f() fail(\"no config in \" .. \"etc\") end\nf()", .line = 1, .column = 14, .function = "f", .class = .fail, .message = "no config in etc" },
+    .{ .src = "error(\"x\")", .line = 1, .column = 1, .class = .refused, .message = "`error` is not in this language: `fail(msg)` stops the run with your message, and `attempt` catches it" },
     .{ .src = "local x = 1.5", .line = 1, .column = 11, .class = .refused, .message = "float literals are not in this language: integers only" },
     // Long strings (QUEUE 232): a level is required, and a syntax error
     // right after one says where it closed.

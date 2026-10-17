@@ -566,3 +566,20 @@ test "run: a map or a list compared with the literal nil, `==` and `~=`, either 
     // Nil against nil, and a scalar against nil, are as they were.
     try expectOutput("local x = nil print(x == nil, 1 == nil, nil ~= \"a\", nil == nil)", "true\tfalse\ttrue\ttrue\n");
 }
+
+test "run: last(l, n), the last n of a list; fewer when the list is shorter (the design, final; QUEUE 232)" {
+    try expectOutput("local l = {1, 2, 3, 4} print(join(last(l, 2), \",\"), #last(l, 9), #last(l, 0), #last({}, 3))", "3,4\t4\t0\t0\n");
+    // `take` with a negative count stays the stop it is.
+    try expectStop("local x = take({1, 2}, -1)", .argument, null);
+    try expectStop("local x = last({1, 2}, -1)", .argument, null);
+}
+
+test "run: fail(msg) ends the run with class fail; attempt catches it, its class and message (the design, final; QUEUE 232)" {
+    try expectStop("fail(\"the build is red\")", .fail, null);
+    try expectOutput(
+        \\function check(n) if n > 2 then fail("too many: " .. n) end return n end
+        \\local good = attempt(check, 1)
+        \\local bad = attempt(check, 5)
+        \\print(good.ok, good.value, bad.ok, bad.class, bad.error, bad.in_function)
+    , "true\t1\tfalse\tfail\ttoo many: 5\tcheck\n");
+}
