@@ -853,3 +853,37 @@ test "builtin: a line longer than one call brings is an error that says so, for 
     defer ok.deinit();
     try testing.expectEqualStrings("a\tb\n", ok.output);
 }
+
+test "builtins: re_find and re_match at their edges, and a run's patterns past the cache's eight (QUEUE 230)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    // The empty pattern matches at the start; `$` alone at the end.
+    try f.expectOutput("local m = re_find(\"abc\", \"\") print(m.at, \"[\" .. m.text .. \"]\")", "1\t[]\n");
+    try f.expectOutput("local m = re_find(\"abc\", \"$\") print(m.at, \"[\" .. m.text .. \"]\")", "4\t[]\n");
+    // Leftmost, then as much as each repetition can take.
+    try f.expectOutput("local m = re_find(\"xaab aaab\", \"a+b\") print(m.at, m.text)", "2\taab\n");
+    // `^` is the string's start only; `.` takes no newline.
+    try f.expectOutput("print(re_match(\"x\\nab\", \"^ab\"), re_match(\"a\\nb\", \"a.b\"), re_match(\"a\\nb\", \"a\\\\sb\"))", "false\tfalse\ttrue\n");
+    // A group the match did not go through is ""; a pattern with no group
+    // gives no `group`.
+    try f.expectOutput("local m = re_find(\"b\", \"(a)?b\") print(\"[\" .. m.group .. \"]\", has_key(re_find(\"b\", \"b\"), \"group\"))", "[]\tfalse\n");
+    // A repeated group keeps its last turn; an empty turn ends the loop.
+    try f.expectOutput("print(re_find(\"abab\", \"(ab)*\").group, re_find(\"a\", \"(a?)*\").group)", "ab\ta\n");
+    // A `]` first in a class is the byte; `\\]` is too.
+    try f.expectOutput("print(re_find(\"x]y\", \"[]]\").at, re_find(\"x]y\", \"[^]x]\").text, re_find(\"a]\", \"\\\\]\").at)", "2\ty\t2\n");
+    // No match: nil, and `if m` is how it is told.
+    try f.expectOutput("local m = re_find(\"abc\", \"d\") if m then print(\"found\") else print(\"none\") end", "none\n");
+    // Twelve patterns, each used twice: the cache holds eight, and every
+    // search says what it should whichever were put out.
+    try f.expectOutput(
+        \\local ok = 0
+        \\for round = 1, 2 do
+        \\  for i = 1, 12 do
+        \\    local m = re_find("x" .. rep("a", 12) .. "y", rep("a", i) .. "y$")
+        \\    if m.at == 14 - i and #m.text == i + 1 and re_match(rep("a", i), rep("a", i) .. "$") then ok = ok + 1 end
+        \\  end
+        \\end
+        \\print(ok)
+    , "24\n");
+}

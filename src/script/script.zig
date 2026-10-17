@@ -11,6 +11,7 @@ pub const diag = @import("diag.zig");
 pub const ast = @import("ast.zig");
 pub const lex = @import("lex.zig");
 pub const parse = @import("parse.zig");
+pub const regex = @import("regex.zig");
 pub const value = @import("value.zig");
 pub const interp = @import("interp.zig");
 pub const builtins = @import("builtins.zig");

@@ -49,6 +49,9 @@ pub const Builtin = enum {
     basename,
     strip_suffix,
     between,
+    // regular expressions (QUEUE 230)
+    re_find,
+    re_match,
     // numbers
     min,
     max,

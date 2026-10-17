@@ -20,11 +20,13 @@ const sources = .{
     .{ "builtins_time.zig", @embedFile("builtins_time.zig") },
     .{ "builtins_format.zig", @embedFile("builtins_format.zig") },
     .{ "builtins_numbers.zig", @embedFile("builtins_numbers.zig") },
+    .{ "builtins_regex.zig", @embedFile("builtins_regex.zig") },
     .{ "compile.zig", @embedFile("compile.zig") },
     .{ "vm.zig", @embedFile("vm.zig") },
     .{ "collect.zig", @embedFile("collect.zig") },
     .{ "process.zig", @embedFile("process.zig") },
     .{ "cli.zig", @embedFile("cli.zig") },
+    .{ "regex.zig", @embedFile("regex.zig") },
 };
 
 /// What a portable file may not name: the file system but its path

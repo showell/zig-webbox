@@ -154,6 +154,9 @@ pub const Run = struct {
     scan_buf: []u8 = &.{},
     /// The top-level `const`s, each null until its line has run.
     consts: []?Value = &.{},
+    /// The patterns `re_find` and `re_match` compiled (QUEUE 230), in the
+    /// machine's memory.
+    patterns: @import("regex.zig").Cache = .{},
     /// The lowest frame address the walk reached: the Zig stack it took,
     /// measured (docs/SHALE.md, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
@@ -164,6 +167,7 @@ pub const Run = struct {
         self.chain_parts.deinit(self.machine);
         self.chain_ops.deinit(self.machine);
         self.collecting.deinit(self.machine);
+        self.patterns.deinit(self.machine);
     }
 
     pub fn fail(self: *Run, pos: ast.Pos, class: diag.Class, comptime fmt: []const u8, args: anytype) Error {

@@ -35,8 +35,10 @@ default that is an integer or a boolean reads the value as one.
 **What it has for code:** `glob(pattern)` (`**` any folders, `*` and `?`
 within one; hidden names like `.git` and `.zig-cache` left out),
 `grep(p, s)` (the lines holding a literal, numbered), `read_lines` and
-`count_lines` for a file of any size, `between(s, a, b)` (the text after
-one string and before the next), `edit(p, old, new[, {all, word}])`
+`count_lines` for a file of any size, `re_find(s, pattern)` and
+`re_match` (regular expressions, a linear-time subset with one capture
+group), `between(s, a, b)` (the text after one string and before the
+next), `edit(p, old, new[, {all, word}])`
 (a literal replaced, its diff printed), `walk` with `skip`, and the
 language's own `split`, `words`, `contains`, `sort`, `table` and maps. The
 whole language is [`SHALE.md`](SHALE.md).
@@ -47,6 +49,10 @@ prints is under `-- prints:` (a tab shows as `<TAB>`).
 
 ## The cookbook, beside what an agent would write otherwise
 
+Each task says what it uses: a literal finds the lines (`grep`), and a
+pattern takes the field out of them (`re_find`), where a field has a
+shape. A literal that is the whole of what is wanted stays a literal.
+
 ### The DEPARTS lines in `src/tcp*.zig`, counted by reason
 
 ```shale
@@ -54,9 +60,11 @@ local by = {}
 local total = 0
 for p in glob("src/tcp*.zig") do
   for m in grep(p, "DEPARTS (") do
-    local reason = between(m.text, "DEPARTS (", ")")
-    by[reason] = get(by, reason, 0) + 1
-    total = total + 1
+    local r = re_find(m.text, "DEPARTS \\((\\w+)\\)")
+    if r then
+      by[r.group] = get(by, r.group, 0) + 1
+      total = total + 1
+    end
   end
 end
 local rows = {}
@@ -76,9 +84,10 @@ print("all", total)
 grep -h 'DEPARTS (' src/tcp*.zig | sed -E 's/.*DEPARTS \(([a-z]+)\).*/\1/' | sort | uniq -c
 ```
 
-The shell is one line, and wins here. Shale's version is longer, but each
-step is a name an agent can change without re-deriving a `sed` expression,
-and `.zig-cache`'s copy of a file is never counted.
+**Uses** `glob`, `grep` for the lines, `re_find` for the reason (the
+`sed` expression's own pattern, and its group). The shell is one line, and
+wins here. Shale's version is longer, but each step is a name an agent can
+change, and `.zig-cache`'s copy of a file is never counted.
 
 ### The files over a thousand lines
 
@@ -99,16 +108,17 @@ print(table(rows, {"lines", "path"}))
 find . -name '*.zig' -not -path './.*' | xargs wc -l | awk '$1 > 1000 && $2 != "total"' | sort -rn
 ```
 
-About even. `count_lines` counts a last line without its newline, as `wc
--l` does not.
+**Uses** `glob` and `count_lines`: no text is taken apart. About even.
+`count_lines` counts a last line without its newline, as `wc -l` does
+not.
 
 ### Every `props.always` message, with where it is
 
 ```shale
 for p in glob("src/**/*.zig") do
   for m in grep(p, "props.always(") do
-    local message = between(m.text, "\"", "\"")
-    if message ~= nil then print(p .. ":" .. m.line, message) end
+    local r = re_find(m.text, "props\\.always\\([^\"]*\"([^\"]*)\"")
+    if r then print(p .. ":" .. m.line, r.group) end
   end
 end
 -- prints:
@@ -124,9 +134,11 @@ for p in sorted(pathlib.Path("src").rglob("*.zig")):
             print(f"{p}:{i}\t{m.group(1)}")
 ```
 
-Shale has no regular expressions: the first string literal is what is
-`between` the first two `"`, which an escaped quote inside the message
-would cut short. For this tree it holds; a regex would hold for more.
+**Uses** `grep` for the lines and `re_find` for the message: the call's
+first string literal, not merely the line's first string.
+With one group and no alternation, a message holding an escaped quote
+(`\"`) is cut at it, which Python's `(?:\\.|[^"\\])*` would not be; for
+this tree it holds.
 
 ### A symbol renamed across a tree, its diff first
 
@@ -155,7 +167,9 @@ print(n .. " renamed")
 grep -rlw pastDeadline src | xargs sed -i 's/\bpastDeadline\b/deadlinePassed/g' && git diff
 ```
 
-Shale shows the diff **before** anything is written, and writes only with
+**Uses** `glob`, `grep` to pass by the files without the name, and `edit`
+with `word`: the name is a literal, so no pattern. Shale shows the diff
+**before** anything is written, and writes only with
 `--write`; `sed -i` writes first, and the diff is git's to show after.
 `word = true` is `\b`'s whole-word rule. A file `edit` would change in a
 way its `old` does not pin down (`old` twice, without `all`) is refused, and
@@ -164,19 +178,12 @@ says so, before anything is changed.
 ### A doc's `file:line` references, checked
 
 ```shale
-function leading_int(s)
-  local n = 0
-  while n < #s and contains("0123456789", sub(s, n + 1, n + 1)) do n = n + 1 end
-  if n == 0 then return nil end
-  return parse_int(sub(s, 1, n))
-end
 for m in grep("docs/notes.md", ".zig:") do
   for w in words(m.text) do
-    local parts = split(substitute(substitute(w, "`", ""), "(", ""), ".zig:")
-    local n = nil
-    if #parts == 2 then n = leading_int(parts[2]) end
-    if n ~= nil then
-      local name = basename(parts[1]) .. ".zig"
+    local r = re_find(w, "(\\w+\\.zig):\\d+")
+    if r then
+      local name = r.group
+      local n = parse_int(sub(r.text, #name + 2))
       local found = glob("**/" .. name)
       if #found == 0 then
         print(name .. ":" .. n, "no such file")
@@ -199,15 +206,20 @@ for m in re.finditer(r"([\w/]+\.zig):(\d+)", pathlib.Path("docs/notes.md").read_
     elif len(hits[0].read_text().splitlines()) < int(m[2]): print(m[0], "too short")
 ```
 
-**Python wins this one.** Without a regular expression, taking the number
-after `.zig:` is a seven-line function, and taking the name is two
-`substitute`s for the punctuation a doc puts around it.
+**Uses** `grep` for the lines, `words` for each reference, `re_find` for
+the name (its group) and the number after it, and `glob` and `count_lines`
+to check it. **About even with Python now:** where this took a seven-line
+function for the digits and two `substitute`s for the punctuation around
+a reference, the pattern does both; with one group, the number is what
+follows the name in the match.
 
 ## Where Shale is worse, said plainly
 
-- **No regular expressions** (a question for Steve, in metal-vmm's
-  FEEDBACK). Extracting a field is `between`, `split`, `words` and `sub`;
-  a run of digits is a helper.
+- **Regular expressions are a subset**: one capture group, no `|`, no
+  `{n,m}`, no lookaround, no backreferences (each refused by name). Two
+  fields from one match are the group and what follows it in the match;
+  a choice between words is a call for each. In return no pattern makes a
+  search slower than linear, and its cost is known before it runs.
 - **A file is read whole by `grep` and `edit`**, at most the call-bytes cap
   (1 MiB): a bigger one goes through `read_lines` a part at a time.
 - **Step budgets are real.** A walk of a large tree, or a script that loops
