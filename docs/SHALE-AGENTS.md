@@ -339,7 +339,7 @@ function for the digits and two `substitute`s for the punctuation around
 a reference, the pattern does both; with one group, the number is what
 follows the name in the match.
 
-## The gate: `shale-gate` (not installed: Steve installs it)
+## The gate: `shale-gate` (installed on the box, 2026-10-17, in `~/.claude/settings.json`)
 
 **A PreToolUse hook on Bash and Monitor** holds a session to Shale
 (`tools/shale_gate.zig`, run by `tools/shale-gate.sh`, which turns any
@@ -359,12 +359,13 @@ failure, a missing binary included, into a refusal). It passes exactly:
   call carried `agent_id` and `agent_type`; the top-level session's calls
   carried neither.
 
-Anything else is refused, with one line naming both forms. The hook,
-for `~/.claude/settings.json`:
+Anything else is refused, with one line naming both forms. `shale` is on
+`PATH` as `~/.local/bin/shale`, a link to `zig-out/bin/shale`, so a rebuild
+here is what every launch runs. The hook, in `~/.claude/settings.json`:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Bash|Monitor",
-  "hooks": [{"type": "command", "command": "/home/steve/zig-webbox/tools/shale-gate.sh"}]}]}}
+  "hooks": [{"type": "command", "command": "/home/steve/showell_repos/zig-webbox/tools/shale-gate.sh"}]}]}}
 ```
 
 ## Where Shale is worse, said plainly
