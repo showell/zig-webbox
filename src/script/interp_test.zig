@@ -435,11 +435,11 @@ test "run: 208's cold review: attempt needs its commas; a long chain in a loop c
 /// The machine's memory a shape of a few locals and no calls may take
 /// beside its arena (metal-vmm QUEUE 211): the frames, the operand stack
 /// and the compiled code's arena, whatever the loop's count (68 KB
-/// measured, most of it the code arena's first pages). **THE PRELUDE IS
-/// IN IT**, parsed and compiled for every run: with `walk_upto` and
-/// `room_for` (QUEUE 229) its tree crossed a chunk's doubling, and the
-/// machine holds 112 KiB after the compile where it held 48 KiB.
-const machine_most = 256 * 1024;
+/// measured, most of it the code arena's first pages). **ONLY THE
+/// PRELUDE A SCRIPT CALLS IS IN IT** (QUEUE 230): parsed and compiled for
+/// every run, the whole prelude took the machine from 48 KiB to 112 KiB
+/// after the compile (QUEUE 229), and this bound to 256 KiB.
+const machine_most = 128 * 1024;
 
 test "run: the arena budget bounds the memory a run takes: the backing allocator's peak stays under it, for the review's shapes (209)" {
     // At 208, std's arena held 1.7x and 2.0x what was counted: 14.1 MB

@@ -153,10 +153,9 @@ pub const Function = struct {
 };
 
 pub const Program = struct {
+    /// The script's functions and the prelude's it calls (QUEUE 230), in
+    /// the order the parse met them.
     functions: []Function,
-    /// How many of `functions`, from the first, are the prelude's
-    /// (prelude.shale); the script's own follow.
-    prelude_functions: u32 = 0,
     /// The top-level `const`s, in order, by name.
     const_names: []const []const u8 = &.{},
     /// The script's own top level, a function with no parameters.

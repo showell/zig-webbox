@@ -728,7 +728,11 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 Each part of their work is one builtin call under its cap, so a run's
 slices and budgets are as if the script had written them itself. **A
 script may declare a function of the same name:** its calls are then its
-own, from its line on.
+own, from its line on. **Only what a script calls is in its run** (metal-vmm
+QUEUE 230): a prelude function is parsed and compiled at its first call,
+with those it calls in turn (`glob` brings `walk_all`), so a script that
+calls none holds none of it in its machine. A prelude function's own calls
+are the prelude's, whatever the script has declared.
 
 | function | gives | costs |
 |---|---|---|

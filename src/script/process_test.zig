@@ -239,3 +239,60 @@ test "process: it keeps its own source: the caller's freed after start, the run 
     while (p.step(.{}) == .paused) {}
     try testing.expectEqualStrings("one\t2\tone\n", p.output());
 }
+
+/// The functions a source's tree holds, the prelude's and its own, by name.
+fn functionNames(src: []const u8, buf: *[16][]const u8) ![]const []const u8 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var stop: ?script.diag.Stop = null;
+    const program = try script.parse.parse(arena.allocator(), src, 64, &stop);
+    var n: usize = 0;
+    for (program.functions) |f| {
+        buf[n] = try std.fmt.bufPrint(&name_bufs[n], "{s}", .{f.name});
+        n += 1;
+    }
+    std.mem.sort([]const u8, buf[0..n], {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    return buf[0..n];
+}
+var name_bufs: [16][64]u8 = undefined;
+
+test "process: only the prelude a script calls is parsed and compiled, through the prelude's own calls (metal-vmm QUEUE 230)" {
+    const Case = struct { src: []const u8, holds: []const []const u8 };
+    for ([_]Case{
+        .{ .src = "", .holds = &.{} },
+        .{ .src = "print(1)", .holds = &.{} },
+        .{ .src = "local r = walk_upto(\"\", {}, 2)", .holds = &.{"the prelude's walk_upto"} },
+        // glob calls walk_all: what the prelude calls is reached too.
+        .{ .src = "local g = glob(\"*\")", .holds = &.{ "the prelude's glob", "the prelude's walk_all" } },
+        // Called twice, from the script and from a function: parsed once.
+        .{ .src = "function f() return glob(\"*\") end local a = walk_all(\"\", {}) local b = f()", .holds = &.{ "f", "the prelude's glob", "the prelude's walk_all" } },
+        // A script's own function of a prelude name is its own: the
+        // prelude's is never reached.
+        .{ .src = "function glob(p) return {} end local g = glob(\"*\")", .holds = &.{"glob"} },
+    }) |c| {
+        var buf: [16][]const u8 = undefined;
+        const got = try functionNames(c.src, &buf);
+        errdefer for (got) |g| std.debug.print("{s}: holds {s}\n", .{ c.src, g });
+        try testing.expectEqual(c.holds.len, got.len);
+        for (c.holds, got) |w, g| try testing.expectEqualStrings(w, g);
+    }
+}
+
+test "process: a script that calls no prelude function holds the machine it did before the prelude grew (QUEUE 230: 48 KiB, where 229 left 112 KiB)" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    for ([_]struct { []const u8, usize }{
+        .{ "", 48 * 1024 },
+        .{ "print(1)", 48 * 1024 },
+        .{ "local r = walk_upto(\"\", {}, 2)", 64 * 1024 },
+    }) |c| {
+        const p = try process.Process.start(threaded.io(), testing.allocator, ".zig-cache/no-root", c[0], .atomic, .{}, 0, 16);
+        defer p.kill();
+        errdefer std.debug.print("{s}: the machine holds {d} after the compile\n", .{ c[0], p.machine.budget.held });
+        try testing.expect(p.machine.budget.held <= c[1]);
+    }
+}
