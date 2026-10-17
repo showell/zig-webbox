@@ -41,4 +41,5 @@ test {
     _ = @import("shale_prelude_linux_test.zig");
     _ = @import("shale_prelude_git_test.zig");
     _ = @import("shale_jobs_test.zig");
+    _ = @import("shale_cli_test.zig");
 }

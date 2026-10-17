@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
     var err_buf: [1024]u8 = undefined;
-    var ew = std.Io.File.stderr().writer(io, &err_buf);
+    var ew = std.Io.File.stderr().writerStreaming(io, &err_buf);
     const err = &ew.interface;
     defer err.flush() catch {};
 
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer result.deinit();
 
     var out_buf: [4096]u8 = undefined;
-    var ow = std.Io.File.stdout().writer(io, &out_buf);
+    var ow = std.Io.File.stdout().writerStreaming(io, &out_buf);
     const w = &ow.interface;
     try w.writeAll(result.output);
     try w.flush();
