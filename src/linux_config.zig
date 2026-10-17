@@ -57,9 +57,11 @@ pub fn load(io: Io, alloc: std.mem.Allocator, env: std.process.Environ.Map, comp
     }
 
     if (data_dir) |dd| data_dir_shown = dd;
+    // A file names its data_dir: one without would put the data in the
+    // repository's defaults and drop the file's auth_dir.
     const dd = data_dir orelse {
-        say("config: {s} has no data_dir — using defaults\n", .{path});
-        return null;
+        say("config: {s} has no data_dir\n", .{path});
+        return error.ConfigNamesNoDataDir;
     };
     const ad = auth_dir orelse try expandHome(alloc, env, auth_default);
     say("config: data_dir={s}  auth_dir={s}\n", .{ dd, ad });
@@ -104,4 +106,10 @@ test "linux_config: the real file read: roots from the file, ~ from HOME, an aut
     try testing.expectEqual(@as(?Roots, null), try load(io, a, unset, "T_CONFIG", "/z"));
     try unset.put("T_CONFIG", "/nonexistent/x.conf");
     if (load(io, a, unset, "T_CONFIG", "/z")) |_| return error.TestUnexpectedResult else |_| {}
+
+    // A file with no data_dir is refused, never the defaults with its
+    // auth_dir dropped.
+    try tmp.dir.writeFile(io, .{ .sub_path = "z.conf", .data = "auth_dir=/y\n" });
+    try env.put("T_CONFIG", try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "z.conf" }));
+    try testing.expectError(error.ConfigNamesNoDataDir, load(io, a, env, "T_CONFIG", "/z"));
 }
