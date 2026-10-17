@@ -83,7 +83,26 @@ pub fn build(b: *std.Build) void {
     b.step("shale-sign", "the Shale signer: zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]").dependOn(&run_signer.step);
     const signer_test = b.addTest(.{ .root_module = signer.root_module });
 
+    // **SHALE-GATE** (tools/shale_gate.zig, metal-vmm QUEUE 233): the
+    // PreToolUse hook's classifier, passing a `shale` launch or the
+    // escape and refusing the rest. Built here; Steve installs the hook.
+    const gate = b.addExecutable(.{ .name = "shale-gate", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/shale_gate.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    b.installArtifact(gate);
+    const gate_test = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/shale_gate_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const gate_options = b.addOptions();
+    gate_options.addOptionPath("shale_gate", gate.getEmittedBin());
+    gate_test.root_module.addImport("shale_gate_options", gate_options.createModule());
+
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&b.addRunArtifact(gate_test).step);
     // **THE SCRIPT FUZZER'S COUNT** (src/script/fuzz_test.zig): a few hundred
     // sources in the tests, as many as asked for with -Dscript-fuzz.
     const fuzz_runs = b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400;

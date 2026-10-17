@@ -337,6 +337,31 @@ function for the digits and two `substitute`s for the punctuation around
 a reference, the pattern does both; with one group, the number is what
 follows the name in the match.
 
+## The gate: `shale-gate` (not installed: Steve installs it)
+
+**A PreToolUse hook on Bash and Monitor** holds a session to Shale
+(`tools/shale_gate.zig`, run by `tools/shale-gate.sh`, which turns any
+failure, a missing binary included, into a refusal). It passes exactly:
+
+- **a launch:** `[cd DIR && ]shale [--write] [--verbose] [--budget N=V]
+  [FILE] [NAME=VALUE]...`, every word plain (no quotes, `$`, backticks,
+  `;|&<>()*?`), optionally ending `<<'TAG'` (TAG `[A-Z_]+`), with the
+  script below and a last line `TAG` that no earlier line is;
+- **the escape:** a first line `# want: <tag>: <text>` (Shale should do
+  this) or `# out-of-scope: <tag>: <text>` (it never will). The command
+  runs, and a line goes to `~/.local/state/shale/wants.tsv`: the date, the
+  session, the kind, the tag, the text, and the command's first 160 bytes;
+- **a subagent's call.** Its hook input carries an `agent_id` (the hooks
+  reference, "Common input fields"), and local cold agents are exempt.
+
+Anything else is refused, with one line naming both forms. The hook,
+for `~/.claude/settings.json`:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "Bash|Monitor",
+  "hooks": [{"type": "command", "command": "/home/steve/zig-webbox/tools/shale-gate.sh"}]}]}}
+```
+
 ## Where Shale is worse, said plainly
 
 - **Regular expressions are a subset**: one capture group, no `{n,m}`, no
