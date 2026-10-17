@@ -19,6 +19,15 @@ minimal, **without a bunch of comptime hacks**. Pipe-like behaviour is likely
 the best way to make it versatile; git and real stdin are the named gaps. A
 repo of its own may come later. Bootstrap: `shale` on bash's search path.
 
+## Who writes Shale
+
+**A well-meaning agent, who makes mistakes** (Steve, 2026-10-18). So the
+design is not paranoid about hostile scripts (no defences against a lexer
+denial of service), but careful about slips: a mistake must end in a clear
+stop, never a wrong answer, a panic, or damage. That is the test for every
+refusal and every guard below (`run`'s refusals catch habits, not
+adversaries; mounts are naming, not a sandbox).
+
 ## Two rules above the rest
 
 **1. Shale does text itself.** Shale runs another program only to get what that
@@ -268,8 +277,11 @@ asserted, one write, every literal multi-line.
   bytes are raw (no escapes, no `\r\n` folding); a newline before the closer
   is part of the string. **`--[==[ ... ]==]` is a block comment**, as Lua's;
   `--[[` is refused as `[[` is, and `--[=x` is a line comment. **The fuzz
-  corpus covers it before it lands**: the lexer reads every byte of every
-  signed script on metal, so a bug there is a kernel panic, not a stop.
+  corpus covers it before it lands.** Not against an attacker: Shale's authors
+  are well-meaning agents (Steve, 2026-10-18: "we don't have to be paranoid
+  about lexer denial-of-service attacks"), but they make mistakes (an unclosed
+  long string, a wrong level, end of file inside a closer), and on metal a
+  lexer bug is a kernel panic where a clean stop was owed.
   A syntax error right after a long string hints the closer it met. Line and
   column advance through it.
 - **`edit(p, {{old = ..., new = ...[, all = true][, word = true]}, ...})`**:
