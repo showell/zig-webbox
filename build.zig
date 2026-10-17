@@ -88,12 +88,18 @@ pub fn build(b: *std.Build) void {
     // **ONLY THE TESTS NAMED** (-Dtest-filter=<text>): a change's own tests
     // in seconds, before the whole suite.
     const test_filter = b.option([]const u8, "test-filter", "run only the tests whose names contain this");
+    // **EACH TEST'S TIME** (-Dtest-timing, tools/timing_runner.zig): every
+    // test's wall time, slowest first, so a suite's cost has names.
+    const timing: ?std.Build.Step.Compile.TestRunner = if (b.option(bool, "test-timing", "print each test's time, slowest first") orelse false)
+        .{ .path = b.path("tools/timing_runner.zig"), .mode = .simple }
+    else
+        null;
     for ([_][]const u8{ "src/store.zig", "src/counter.zig", "src/bus.zig", "src/mem_meter.zig", "src/host_facts.zig", "src/bind.zig", "src/webbox.zig", "src/webbox_linux.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,
             .optimize = optimize,
-        }), .filters = if (test_filter) |t| b.dupeStrings(&.{t}) else &.{} });
+        }), .filters = if (test_filter) |t| b.dupeStrings(&.{t}) else &.{}, .test_runner = timing });
         // A file of the Linux host reaches the portable half as the module;
         // a file of the library, by path.
         unit.root_module.addImport("webbox", webbox);
