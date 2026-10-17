@@ -33,7 +33,8 @@ pub const Outcome = enum {
     connect_deadline,
     idle_deadline,
     total_deadline,
-    /// The retransmission timer ran out (metal).
+    /// The retransmission timer ran out (metal only: Linux's deadlines end a
+    /// fetch before its own retries do).
     given_up,
     /// The server reset the connection after it was made.
     reset,
@@ -45,7 +46,9 @@ pub const Outcome = enum {
     short_answer,
     /// A body past `body_most`: the host keeps no more.
     too_long,
-    /// The address is not on the machine's own network.
+    /// The address is not on the machine's own network (metal fetches
+    /// on-link only, and a machine whose lease named no network fetches
+    /// nothing); on Linux, ENETUNREACH or EADDRNOTAVAIL.
     no_route,
 };
 
@@ -55,10 +58,18 @@ pub const body_most = 64 * 1024;
 /// How a fetch ended. `body` is the host's, good until the next `start`.
 pub const Result = struct { outcome: Outcome, status: u16, body: []const u8 };
 
+/// The longest path a host fetches: past it, `start` refuses, never a
+/// shorter path asked instead.
+pub const path_most = 256;
+
+/// Why a fetch did not start: one is running, or its end is not yet taken
+/// (`Busy`), or its path is past `path_most`.
+pub const StartError = error{ Busy, PathTooLong };
+
 /// What a host provides. `start` copies what it needs of `target` (its path);
 /// `result` hands the ended fetch over once, then null until the next.
 pub const Fetcher = struct {
-    start: *const fn (target: Target, deadlines: Deadlines) error{Busy}!void,
+    start: *const fn (target: Target, deadlines: Deadlines) StartError!void,
     result: *const fn () ?Result,
 };
 
@@ -69,10 +80,12 @@ pub fn provide(f: Fetcher) void {
     fetcher = f;
 }
 
-/// Starts a fetch. `Busy` while one is running; `NoFetch` on a host that
-/// offers none (a unit test's site, started with no host).
-pub fn start(target: Target, deadlines: Deadlines) error{ Busy, NoFetch }!void {
+/// Starts a fetch. `Busy` while one is running or its end is unread;
+/// `PathTooLong` past `path_most`; `NoFetch` on a host that offers none (a
+/// unit test's site, started with no host).
+pub fn start(target: Target, deadlines: Deadlines) (StartError || error{NoFetch})!void {
     const f = fetcher orelse return error.NoFetch;
+    if (target.path.len > path_most) return error.PathTooLong;
     return f.start(target, deadlines);
 }
 
@@ -86,7 +99,7 @@ test "host_fetch: no host, no fetch; a host's fetch is started once at a time an
     const Fake = struct {
         var running = false;
         var ended: ?Result = null;
-        fn startIt(_: Target, _: Deadlines) error{Busy}!void {
+        fn startIt(_: Target, _: Deadlines) StartError!void {
             if (running) return error.Busy;
             running = true;
         }
@@ -107,6 +120,7 @@ test "host_fetch: no host, no fetch; a host's fetch is started once at a time an
     provide(.{ .start = Fake.startIt, .result = Fake.resultIt });
     try start(t, d);
     try std.testing.expectError(error.Busy, start(t, d));
+    try std.testing.expectError(error.PathTooLong, start(.{ .ip = t.ip, .port = 80, .path = "/" ** (path_most + 1) }, d));
     try std.testing.expectEqual(@as(?Result, null), result());
     Fake.ended = .{ .outcome = .ok, .status = 200, .body = "{}" };
     try std.testing.expectEqual(Outcome.ok, result().?.outcome);

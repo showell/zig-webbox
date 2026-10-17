@@ -13,10 +13,13 @@ pub const bind = @import("bind.zig");
 pub const linux_config = @import("linux_config.zig");
 /// No response before the writes ahead of it are on the disk.
 pub const linux_durable = @import("linux_durable.zig");
+/// The application's one fetch at a time, on a thread of its own.
+pub const linux_fetch = @import("linux_fetch.zig");
 
 test {
     _ = linux_host;
     _ = bind;
     _ = linux_config;
     _ = linux_durable;
+    _ = linux_fetch;
 }

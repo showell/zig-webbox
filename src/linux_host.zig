@@ -33,6 +33,7 @@ const host_facts = @import("webbox").host_facts;
 const free_space = @import("webbox").free_space;
 const linux_config = @import("linux_config.zig");
 const linux_durable = @import("linux_durable.zig");
+const linux_fetch = @import("linux_fetch.zig");
 
 /// The environment variables a host reads, named whole by the application,
 /// so a search for one finds where it is read.
@@ -101,6 +102,7 @@ pub fn Server(comptime S: type) type {
                 .trusted_proxy = env.get(options.env.trusted_proxy) orelse options.default_trusted_proxy,
                 .facts = linuxFacts,
                 .say = sayToStderr,
+                .fetch = .{ .start = linux_fetch.start, .result = linux_fetch.result },
             });
             report(&started);
             // **NO RESPONSE BEFORE ITS WRITES ARE DURABLE** (HOST.md): the
@@ -137,6 +139,8 @@ pub fn Server(comptime S: type) type {
             defer listener.deinit(io);
             // **BETWEEN HANDLERS, A SLICE AT A TIME** (metal-vmm QUEUE 211):
             // the site's background work on a thread of its own.
+            // A fetch's end rings the between thread, as a handler's does.
+            linux_fetch.on_end = .{ .io = io, .ring = ringBetween };
             startBetween(io, &never_stop);
 
             std.debug.print("{s}: http://localhost:{d}, bound to {f}  {s}\n", .{ options.name, port, addr, options.routes_hint });
