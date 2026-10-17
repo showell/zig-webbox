@@ -15,6 +15,8 @@ pub const linux_config = @import("linux_config.zig");
 pub const linux_durable = @import("linux_durable.zig");
 /// The application's one fetch at a time, on a thread of its own.
 pub const linux_fetch = @import("linux_fetch.zig");
+/// What Shale's `run` keeps of a program's output, pure (metal-vmm QUEUE 233).
+pub const shale_keep = @import("shale_keep.zig");
 
 test {
     _ = linux_host;
@@ -22,4 +24,5 @@ test {
     _ = linux_config;
     _ = linux_durable;
     _ = linux_fetch;
+    _ = shale_keep;
 }
