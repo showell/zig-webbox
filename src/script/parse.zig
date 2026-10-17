@@ -732,6 +732,7 @@ pub const Parser = struct {
             return self.prelude_loaded[i].?;
         }
         // The preludes after the core's, up to the one being parsed.
+        if (comptime !preludes_on) return null;
         const last = if (self.in_prelude) |k| k else self.extra.len;
         for (self.extra[0..@min(last, self.extra.len)], 1..) |*x, k| if (indexAt(x.index, name)) |i| {
             if (x.loaded[i] == null) try self.loadPrelude(k, i);
@@ -834,6 +835,12 @@ pub const PreludeFunction = struct { name: []const u8, at: usize, line: u32 };
 /// shows it ("the Linux prelude") and its source, only functions, each
 /// from the start of a line.
 pub const Prelude = struct { name: []const u8, source: []const u8 };
+
+/// **WHETHER THIS HOST HANDS SHALE PRELUDES AFTER THE CORE'S** (QUEUE
+/// 233): a host with an operating system says so in its `host_io`
+/// (`shale_preludes`); metal's does not, and its image carries none of
+/// their indexing, checking or lookup.
+const preludes_on = @hasDecl(@import("host_io"), "shale_preludes") and @import("host_io").shale_preludes;
 
 /// A later prelude as a parse holds it: its functions, and which are loaded.
 const Extra = struct { prelude: Prelude, index: []const PreludeFunction, loaded: []?u32 };
@@ -954,26 +961,29 @@ pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, sourc
     p.frame.depth = 0;
     // **THE LATER PRELUDES, INDEXED AND CHECKED** (QUEUE 233): each holds
     // only functions that parse, and none takes an earlier prelude's name.
-    const extra = try scratch.alloc(Extra, preludes.len);
-    defer {
+    // A host that takes none (metal) compiles none of this.
+    const extra: []Extra = if (comptime preludes_on) try scratch.alloc(Extra, preludes.len) else &.{};
+    defer if (comptime preludes_on) {
         for (extra[0..p.extra.len]) |x| {
             scratch.free(x.index);
             scratch.free(x.loaded);
         }
         scratch.free(extra);
-    }
-    for (preludes, extra) |pre, *x| {
-        var index: std.ArrayList(PreludeFunction) = .empty;
-        errdefer index.deinit(scratch);
-        var at: usize = 0;
-        var line: u32 = 1;
-        while (nextFunction(pre.source, &at, &line)) |f| try index.append(scratch, f);
-        const loaded = try scratch.alloc(?u32, index.items.len);
-        @memset(loaded, null);
-        x.* = .{ .prelude = pre, .index = try index.toOwnedSlice(scratch), .loaded = loaded };
-        p.extra = extra[0 .. p.extra.len + 1];
-        try checkPrelude(&p, p.extra.len);
-    }
+    };
+    if (comptime preludes_on) {
+        for (preludes, extra) |pre, *x| {
+            var index: std.ArrayList(PreludeFunction) = .empty;
+            errdefer index.deinit(scratch);
+            var at: usize = 0;
+            var line: u32 = 1;
+            while (nextFunction(pre.source, &at, &line)) |f| try index.append(scratch, f);
+            const loaded = try scratch.alloc(?u32, index.items.len);
+            @memset(loaded, null);
+            x.* = .{ .prelude = pre, .index = try index.toOwnedSlice(scratch), .loaded = loaded };
+            p.extra = extra[0 .. p.extra.len + 1];
+            try checkPrelude(&p, p.extra.len);
+        }
+    } else if (preludes.len > 0) return p.failf(.{ .line = 1, .column = 1 }, .host, "{s}: this host takes no prelude after the core's", .{preludes[0].name});
     // The script; a prelude function (prelude.shale, QUEUE 220) is parsed
     // at its first call (QUEUE 230).
     try p.advance();

@@ -5,3 +5,7 @@
 //! host it runs on is one file, swapped by the build, and never named in the
 //! code.
 pub const Io = @import("std").Io;
+/// **SHALE'S PRELUDES AFTER THE CORE'S** (metal-vmm QUEUE 233): a host
+/// with an operating system takes them (the Linux host's, a repo's, a
+/// user's); metal's `host_io` says nothing, and its parse compiles none.
+pub const shale_preludes = true;
