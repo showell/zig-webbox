@@ -1160,7 +1160,17 @@ SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
   `host("run", argv, opts)` runs a program, `host("real", path)` gives a
   path's OS path, and a path whose first part has a `:` is a mount's
   (`runs:gates/summary`). The mounts are in `SHALE_MOUNTS`'s file, else
-  `~/.config/shale/mounts` (`name = /abs/path` or `name = ~/path` a line).
+  `~/.config/shale/mounts` (`name = /abs/path` or `name = ~/path` a line,
+  ` ro` after it for a read-only mount: every change through it is
+  refused before anything is written, at the one point every change
+  passes, `PathHook.may_change`, which only a `host_io` saying
+  `shale_change_check` compiles; another word after the path, or a path
+  with a space, is a mistake named by its line). A mount's own path is
+  resolved once, at load. **The store follows no symbolic link** below
+  the root or a mount's folder: the path hook walks each part with
+  `lstat` (a component walk, a step a part) and a link stops the run,
+  `refused`, for every read, change, `exists`/`stat` and listing; `walk`
+  passes the links it lists by.
 - **The preludes after the core's**: the Linux prelude (`run`, `must`,
   `re_lines`, `head_lines`, `tail_lines`, `grep_all`, `unique`, `newest`,
   `create`, `edits_all`, `zig_rename`, `zig_decls`, `zig_move` and

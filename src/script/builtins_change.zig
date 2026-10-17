@@ -342,8 +342,16 @@ fn storeChange(run: *Run, pos: ast.Pos, c: Change, args: []const Value) Error!Va
     return changeAt(run, pos, b, c, p, data);
 }
 
+/// **WHETHER THE HOST LETS `p` CHANGE** (metal-vmm QUEUE 235): every change
+/// asks, before anything is written; a change of two files (`zig_move`)
+/// asks for both first. On metal, nothing.
+pub fn mayChange(run: *Run, pos: ast.Pos, p: Path) Error!void {
+    if (comptime interp.change_check_on) if (run.path_hook) |h| if (h.may_change) |f| try f(h.ctx, run, pos, p.rel, p.full);
+}
+
 /// A change to `p` with `data`, logged under `b`'s name.
 fn changeAt(run: *Run, pos: ast.Pos, b: B, c: Change, p: Path, data: []const u8) Error!Value {
+    try mayChange(run, pos, p);
     if (run.changes >= run.budgets.changes) return run.budgetStop(pos, .changes);
     if (data.len > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
     run.changes += 1;

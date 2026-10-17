@@ -13,3 +13,7 @@ pub const shale_preludes = true;
 /// change's diff as a summary unless `--verbose`; metal prints every diff
 /// in full and compiles no summary.
 pub const shale_diff_summary = true;
+/// **A CHANGE THE HOST MAY REFUSE** (metal-vmm QUEUE 235: a read-only
+/// mount's): every change asks the path hook first. Metal's host has no
+/// mounts, says nothing, and compiles none of it.
+pub const shale_change_check = true;

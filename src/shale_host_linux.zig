@@ -34,7 +34,15 @@ pub const runs_most = 64;
 
 // ── mounts ───────────────────────────────────────────────────────────────
 
-pub const Mount = struct { name: []const u8, dir: []const u8 };
+pub const Mount = struct {
+    name: []const u8,
+    dir: []const u8,
+    /// ` ro` after the path (metal-vmm QUEUE 235): every change through it
+    /// is refused before anything is written; reads and programs as ever.
+    access: Access = .read_write,
+
+    pub const Access = enum { read_write, read_only };
+};
 
 /// **THE MOUNTS FILE**: `name = value` a line, `#` comments and blank
 /// lines; a value an absolute path or one from `~/`. What is wrong is said
@@ -52,7 +60,21 @@ pub fn parseMounts(alloc: std.mem.Allocator, text: []const u8, home: []const u8,
             return error.Malformed;
         };
         const name = std.mem.trim(u8, line[0..eq], " \t");
-        const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        // The path, and ` ro` after it, or nothing.
+        var words = std.mem.tokenizeAny(u8, line[eq + 1 ..], " \t");
+        const value = words.next() orelse "";
+        var access: Mount.Access = .read_write;
+        if (words.next()) |w| {
+            if (words.next() != null) {
+                why.* = try std.fmt.allocPrint(alloc, "line {d}: `{s}`'s path has a space, or more than ` ro` follows it", .{ n, name });
+                return error.Malformed;
+            }
+            if (!std.mem.eql(u8, w, "ro")) {
+                why.* = try std.fmt.allocPrint(alloc, "line {d}: `{s}` after `{s}`'s path: only `ro` may follow it (and a path has no space)", .{ n, w, name });
+                return error.Malformed;
+            }
+            access = .read_only;
+        }
         if (name.len == 0 or !validName(name)) {
             why.* = try std.fmt.allocPrint(alloc, "line {d}: `{s}` is not a mount's name: letters, digits, `_` and `-`", .{ n, name });
             return error.Malformed;
@@ -69,7 +91,7 @@ pub fn parseMounts(alloc: std.mem.Allocator, text: []const u8, home: []const u8,
             why.* = try std.fmt.allocPrint(alloc, "line {d}: `{s}`'s value `{s}` is relative: an absolute path, or one from `~/`", .{ n, name, value });
             return error.Malformed;
         };
-        try out.append(alloc, .{ .name = try alloc.dupe(u8, name), .dir = std.mem.trimEnd(u8, dir, "/") });
+        try out.append(alloc, .{ .name = try alloc.dupe(u8, name), .dir = std.mem.trimEnd(u8, dir, "/"), .access = access });
     }
     return out.toOwnedSlice(alloc);
 }
@@ -89,6 +111,14 @@ pub fn loadMounts(alloc: std.mem.Allocator, io: std.Io, pinned: ?[]const u8, hom
         if (e == error.Malformed) why.* = try std.fmt.allocPrint(alloc, "{s}: {s}", .{ from, line_why });
         return e;
     };
+    // **A MOUNT'S OWN PATH, RESOLVED ONCE** (metal-vmm QUEUE 235): a link
+    // in it (`~/zig` to `~/zig-0.16.0`) is the user's choice, taken here;
+    // below it, the store follows none.
+    for (mounts) |*m| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.Io.Dir.cwd().realPathFile(io, m.dir, &buf) catch continue;
+        m.dir = try alloc.dupe(u8, buf[0..n]);
+    }
     return .{ .mounts = mounts, .from = from };
 }
 
@@ -196,7 +226,7 @@ pub const Host = struct {
     }
 
     pub fn options(h: *Host) struct { host: interp.Host, path_hook: interp.PathHook } {
-        return .{ .host = .{ .ctx = h, .call = call }, .path_hook = .{ .ctx = h, .resolve = resolve } };
+        return .{ .host = .{ .ctx = h, .call = call }, .path_hook = .{ .ctx = h, .resolve = resolve, .may_change = mayChange } };
     }
 
     pub fn record(h: *Host, comptime fmt: []const u8, args: anytype) void {
@@ -213,7 +243,14 @@ pub const Host = struct {
 fn resolve(ctx: *anyopaque, run: *Run, pos: ast.Pos, path: []const u8) Error!?[]const u8 {
     const h: *Host = @ptrCast(@alignCast(ctx));
     const first_end = std.mem.indexOfScalar(u8, path, '/') orelse path.len;
-    const colon = std.mem.indexOfScalar(u8, path[0..first_end], ':') orelse return null;
+    const colon = std.mem.indexOfScalar(u8, path[0..first_end], ':') orelse {
+        // The root's path: the root's rules are the core's; a link in it is
+        // refused here, when its parts are names (else the core says why).
+        var it = std.mem.splitScalar(u8, path, '/');
+        while (it.next()) |part| if (!store.fatName(part)) return null;
+        try refuseLinks(run, pos, std.mem.trimEnd(u8, run.root, "/"), path, "");
+        return null;
+    };
     const name = path[0..colon];
     const rest = path[colon + 1 ..];
     const m = for (h.mounts) |m| {
@@ -237,8 +274,47 @@ fn resolve(ctx: *anyopaque, run: *Run, pos: ast.Pos, path: []const u8) Error!?[]
     if (is_dir) |d| d.close(run.io) else return run.fail(pos, .store, "the mount `{s}` is {s}, which is not a folder there", .{ m.name, m.dir });
     const inside = std.mem.startsWith(u8, m.dir, h.root_abs) and (m.dir.len == h.root_abs.len or m.dir[h.root_abs.len] == '/');
     const dir = if (inside) std.fmt.allocPrint(run.alloc, "{s}{s}", .{ try rootOf(h, run, pos), m.dir[h.root_abs.len..] }) catch return run.oom(pos) else m.dir;
+    try refuseLinks(run, pos, dir, rest, path[0 .. colon + 1]);
     if (rest.len == 0) return dir;
     return std.fmt.allocPrint(run.alloc, "{s}/{s}", .{ dir, rest }) catch run.oom(pos);
+}
+
+/// **THE STORE FOLLOWS NO LINK** (metal-vmm QUEUE 235; Steve: "refuse
+/// any"): each part of `rest` below `base`, looked at without following
+/// it (`lstat`, a component walk); a symbolic link stops the run, for a
+/// read, a change, `exists`, `stat` and a listing alike. A part not there
+/// ends the walk: what is below it is not there either. A step a part.
+/// (`walk` passes the links it lists by: what a listing names is not a
+/// path given.)
+fn refuseLinks(run: *Run, pos: ast.Pos, base: []const u8, rest: []const u8, shown_prefix: []const u8) Error!void {
+    if (rest.len == 0) return;
+    var at: std.ArrayList(u8) = .empty;
+    at.appendSlice(run.alloc, base) catch return run.oom(pos);
+    var it = std.mem.splitScalar(u8, rest, '/');
+    var shown_end: usize = 0;
+    while (it.next()) |part| {
+        try run.charge(pos, 1);
+        at.append(run.alloc, '/') catch return run.oom(pos);
+        at.appendSlice(run.alloc, part) catch return run.oom(pos);
+        shown_end += part.len + @intFromBool(shown_end > 0);
+        const st = std.Io.Dir.cwd().statFile(run.io, at.items, .{ .follow_symlinks = false }) catch return;
+        if (st.kind == .sym_link) return run.fail(pos, .refused, "{s}{s} is a symbolic link: the store follows none", .{ shown_prefix, rest[0..shown_end] });
+    }
+}
+
+/// **A CHANGE THROUGH A READ-ONLY MOUNT IS REFUSED** (metal-vmm QUEUE 235),
+/// by the mount's name, or by its folder when a root path reaches into it.
+fn mayChange(ctx: *anyopaque, run: *Run, pos: ast.Pos, rel: []const u8, full: []const u8) Error!void {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const abs = try absolute(h, run, pos, std.mem.trimEnd(u8, full, "/"));
+    for (h.mounts) |m| {
+        if (m.access != .read_only) continue;
+        const named = std.mem.startsWith(u8, rel, m.name) and rel.len > m.name.len and rel[m.name.len] == ':';
+        const inside = std.mem.startsWith(u8, m.dir, h.root_abs) and (m.dir.len == h.root_abs.len or m.dir[h.root_abs.len] == '/');
+        const dir = if (inside) std.fmt.allocPrint(run.alloc, "{s}{s}", .{ try rootOf(h, run, pos), m.dir[h.root_abs.len..] }) catch return run.oom(pos) else m.dir;
+        const under = std.mem.startsWith(u8, abs, dir) and (abs.len == dir.len or abs[dir.len] == '/');
+        if (named or under) return run.fail(pos, .refused, "{s}: mount `{s}` is read-only", .{ rel, m.name });
+    }
 }
 
 /// The run's own root, absolute.
@@ -271,6 +347,12 @@ fn call(ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []cons
     if (std.mem.eql(u8, name, "zig_decls")) return @import("shale_host_zig.zig").decls(run, pos, args);
     if (std.mem.eql(u8, name, "zig_move")) return @import("shale_host_zig.zig").move(run, pos, args);
     if (std.mem.eql(u8, name, "zig_imports")) return @import("shale_host_zig.zig").imports(run, pos, args);
+    // Whether a path may change: what `edits_all` asks of every file first.
+    if (std.mem.eql(u8, name, "may_change")) {
+        if (args.len != 1) return run.fail(pos, .argument, "`may_change` takes one path, given {d}", .{args.len});
+        try script.builtins_change.mayChange(run, pos, try script.builtins_store.pathArg(run, pos, .host, args[0], false));
+        return .{ .boolean = true };
+    }
     return run.fail(pos, .host, "`{s}`: not on this host", .{name});
 }
 

@@ -95,7 +95,13 @@ pub const Diffs = enum { full, summary };
 pub const PathHook = struct {
     ctx: *anyopaque,
     resolve: *const fn (ctx: *anyopaque, run: *Run, pos: ast.Pos, path: []const u8) Error!?[]const u8,
+    /// **THE HOST'S WORD ON A CHANGE** (metal-vmm QUEUE 235: a read-only
+    /// mount refuses it), asked before anything is written. Only where the
+    /// host's `host_io` says `shale_change_check`: on metal, nothing.
+    may_change: if (change_check_on) ?*const fn (ctx: *anyopaque, run: *Run, pos: ast.Pos, rel: []const u8, full: []const u8) Error!void else void = if (change_check_on) null else {},
 };
+
+pub const change_check_on = @hasDecl(@import("host_io"), "shale_change_check") and @import("host_io").shale_change_check;
 
 pub const Run = struct {
     io: Io,

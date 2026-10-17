@@ -426,6 +426,17 @@ two can give a quiet wrong answer, an empty list:
   the new head, `git_push` nothing), so no `must` around them.
 - **A path is the root's.** Another place is a mount, `name:path`; the
   box's are in `~/.config/shale/mounts`. An absolute path is refused.
+  A mount line ending in ` ro` is read-only: every change through it
+  (`edit`, `replace`, `create`, `append`, `remove`, `mkdir`,
+  `remove_tree`, `edits_all`, `zig_rename`, `zig_move`) stops, `refused:
+  ... mount `x` is read-only`, before anything is written; reads work. A
+  `run` with its `cwd` there runs: Shale cannot see what a program
+  writes.
+- **The store follows no symbolic link.** A path any part of which, below
+  the root or a mount's own folder, is a link stops the run, `refused:
+  <path> is a symbolic link`, for a read, a change, `exists`, `stat` and
+  a listing alike. A mount's own path is resolved once, when the mounts
+  are read.
 
 ## The gate: `shale-gate` (installed on the box, 2026-10-17, in `~/.claude/settings.json`)
 

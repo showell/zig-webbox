@@ -299,6 +299,9 @@ pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         .refused => |why| return run.fail(pos, .argument, "`zig_move` {s} to {s}: {s}", .{ p.rel, q.rel, why }),
     };
     try run.charge(pos, done.work);
+    // Both files may change, or neither is written.
+    try script.builtins_change.mayChange(run, pos, q);
+    try script.builtins_change.mayChange(run, pos, p);
     const spans = struct {
         fn of(r: *Run, ps: ast.Pos, xs: []const zm.Span) Error![]const Span {
             const out = r.alloc.alloc(Span, xs.len) catch return r.oom(ps);

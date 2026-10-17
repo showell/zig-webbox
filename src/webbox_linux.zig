@@ -62,4 +62,5 @@ test {
     _ = @import("shale_zig_decls_test.zig");
     _ = @import("shale_zig_move_test.zig");
     _ = @import("shale_zig_imports_test.zig");
+    _ = @import("shale_ro_links_test.zig");
 }

@@ -283,6 +283,9 @@ function edits_all(list)
       end
     end
   end
+  -- A file that may not change (a read-only mount's) stops it here,
+  -- before any is written.
+  for item in list do host("may_change", item[1]) end
   local n = 0
   for item in list do n = n + edit(item[1], item[2]) end
   return n
