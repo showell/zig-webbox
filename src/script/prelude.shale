@@ -60,8 +60,16 @@ end
 -- **THE FILES A GLOB NAMES** (metal-vmm QUEUE 229): every file whose path
 -- matches `pattern` (`match_path`: `**` any parts, `*` and `?` in one),
 -- sorted as the walk goes. The walk starts at the pattern's parts before
--- its first wildcard, and passes by hidden names (`.git`, `.zig-cache`).
-function glob(pattern)
+-- its first wildcard, and passes by hidden names (`.git`, `.zig-cache`)
+-- unless `opts` says `{hidden = true}` (QUEUE 233).
+function glob(pattern, opts?)
+  local skip = ".*"
+  if opts ~= nil then
+    for k in keys(opts) do
+      if k ~= "hidden" then fail("`glob` takes `hidden`, not `" .. k .. "`") end
+    end
+    if opts.hidden then skip = "" end
+  end
   local parts = split(pattern, "/")
   local base = {}
   for p in parts do
@@ -75,7 +83,9 @@ function glob(pattern)
     return got
   end
   if from ~= "" and not exists(from) then return got end
-  for e in walk_all(from, {kind = "file", skip = ".*"}) do
+  local o = {kind = "file"}
+  if skip ~= "" then o.skip = skip end
+  for e in walk_all(from, o) do
     if match_path(e.path, pattern) then push(got, e.path) end
   end
   return got

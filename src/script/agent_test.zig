@@ -99,6 +99,9 @@ test "agent: walk's skip passes by names, a folder never entered; glob finds fil
     try t.expectOutput("print(join(glob(\"src/tcp*.zig\"), \" \"))", .{}, "src/tcp.zig src/tcp_arrives.zig\n");
     try t.expectOutput("print(join(glob(\"**/*.zig\"), \" \"))", .{}, "src/sub/deep.zig src/tcp.zig src/tcp_arrives.zig\n");
     try t.expectOutput("print(join(glob(\"README.md\"), \" \"), #glob(\"none/*.zig\"), #glob(\"none.md\"))", .{}, "README.md\t0\t0\n");
+    // `{hidden = true}` takes dot-names too (QUEUE 233); another option is a mistake.
+    try t.expectOutput("print(join(glob(\"**/*.zig\", {hidden = true}), \" \"), #glob(\"**/*.zig\", {hidden = false}))", .{}, ".zig-cache/o/junk.zig src/sub/deep.zig src/tcp.zig src/tcp_arrives.zig\t3\n");
+    try t.expectStop("glob(\"*.zig\", {hiden = true})", .{}, .fail, "`glob` takes `hidden`, not `hiden`");
     // In parts of two entries, the same.
     var cut = script.runWith(t.threaded.io(), testing.allocator, t.root, "print(join(glob(\"**/*.zig\"), \" \"))", .{ .call_entries = 2 }, 0, &out_buf, .{});
     defer cut.deinit();

@@ -852,7 +852,7 @@ are the prelude's, whatever the script has declared.
 | `count_all(p, s)` | `s`'s occurrences in the whole file | a stat, then a `count_in` a megabyte |
 | `find_next(p, s, at)` | the 0-based offset of the first `s` at or after `at`, or nil | a `find_in` from `at`; a stat and more parts only when that finds nothing |
 | `walk_upto(p, opts, keep)` | `{entries, more, done}`: every entry from `opts.after` on, as `walk_all`, until the walk ends (`done`, `more` is "") or its reads would leave fewer than `keep` (not `done`: `more` is the path the next walk goes on after) | `walk`'s, a part at a time, with `keep_reads = keep` |
-| `glob(pattern)` | every file whose path matches `pattern` (`match_path`), in the walk's order; the walk starts at the parts before the first wildcard and passes by hidden names (`walk`'s `skip = ".*"`). A pattern with no wildcard is that file, if it is one | `walk_all`'s |
+| `glob(pattern[, {hidden}])` | every file whose path matches `pattern` (`match_path`), in the walk's order; the walk starts at the parts before the first wildcard and passes by hidden names (`walk`'s `skip = ".*"`) unless `{hidden = true}`. A pattern with no wildcard is that file, if it is one | `walk_all`'s |
 | `room_for(need)` | whether what is left of the budgets holds `need`, a map of `budget()`'s names: `room_for({reads = 3, read_bytes = n})` | a `budget()` |
 
 **A walk past what the budget walks, told in parts** (metal-vmm QUEUE

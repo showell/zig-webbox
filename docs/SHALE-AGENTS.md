@@ -35,7 +35,7 @@ A value given as `name=value` is the script's `arg("name", default)`; a
 default that is an integer or a boolean reads the value as one.
 
 **What it has for code:** `glob(pattern)` (`**` any folders, `*` and `?`
-within one; hidden names like `.git` and `.zig-cache` left out),
+within one; hidden names like `.git` and `.zig-cache` left out, unless `{hidden = true}`),
 `grep(p, s)` (the lines holding a literal, numbered), `read_lines` and
 `count_lines` for a file of any size, `re_find(s, pattern)` and
 `re_match` (regular expressions, a linear-time subset: `|`, `\b`, one
