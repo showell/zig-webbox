@@ -23,7 +23,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const Io = std.Io;
+const Io = @import("host_io").Io;
 
 const Root = struct { file: []const u8, may: []const []const u8 };
 
