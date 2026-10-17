@@ -521,7 +521,7 @@ const testing = std.testing;
 
 /// A temp directory and an arena. The thread pool each test needs is made in
 /// the test itself: outside a `test` block the host's Io is out of bounds
-/// (tools/lint_portable.py), since this module is in the route table's reach.
+/// (angry-gopher's tools/lint_portable.py), since this module is in the route table's reach.
 const Fixture = struct {
     arena: std.heap.ArenaAllocator,
     tmp: testing.TmpDir,

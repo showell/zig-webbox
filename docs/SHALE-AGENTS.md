@@ -15,17 +15,19 @@ there to stay safe is what an agent wants on Linux too:**
   printed, and none is made. Read the diff, then run it again with
   `--write`.
 - **It reads only what it is rooted at** (`--root`, else the working
-  directory): no `..`, no absolute paths, no host, no clock but what it is
-  handed. A script cannot reach what it was not given.
+  directory) and its mounts (`runs:x`): no `..`, no absolute paths. It
+  reaches past them only by running a program (`run`), which needs
+  `--write`.
 
 `shale` is terse: past half of any budget, or on a stop, it says what the
-run used of each (`── used: 52374 of 5000000 steps, 12 of 10000 reads,
-...`), so a script near an edge is known before a bigger run finds it;
+run used of four, steps, reads, read bytes and output bytes (`── used:
+52374 of 5000000 steps, 12 of 10000 reads, ...`), so a script near an edge
+is known before a bigger run finds it;
 `--verbose` says so always, with the effects and the programs run. With
 no file and no `-e`, the script is stdin (`shale <<'SHALE'`).
 
 ```sh
-zig build                      # zig-out/bin/shale
+zig build                      # zig-out/bin/shale: put it on PATH
 shale count.shale dir=src      # dry: changes logged, none made
 shale --write rename.shale from=old to=new
 shale -e 'for p in glob("src/*.zig") do print(p) end'
@@ -377,7 +379,17 @@ for `~/.claude/settings.json`:
   stop says which one ran out.
 - **Paths are a store's**: every part must be a name FAT holds, so a file
   whose name has `:` or `"` cannot be named, and hidden folders are left
-  out of a `glob`.
-- **No processes, no network, no stdin**, by design: a script cannot run
-  `git` or `zig`; it reads files and prints.
+  out of a `glob` unless `{hidden = true}`.
+- **A program is run whole, not piped:** `run`'s `stdin` is a string or a
+  `whole` result, so a pipeline is two runs with the first's output in
+  memory, not a stream. Every run needs `timeout_ms` and a keep, and a dry
+  run runs none: a script that runs programs is written with `--write`
+  in mind.
+- **No network but a program's** (`run({"curl", ...})`), and **no
+  environment**: a script cannot read a variable, only give one to a
+  program (`env`, `secrets`).
+- **Git is a prelude over `git`**, not a library: each call is a program
+  run, about as fast as typing it, and its errors are git's first line.
+- **Jobs are polled:** `job_wait` looks once a second, and nothing tells a
+  script the moment a job ends.
 - **Integers only, bytes only**: no floats, and a string is its bytes.

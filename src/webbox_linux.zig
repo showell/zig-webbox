@@ -1,7 +1,7 @@
 //! webbox_linux: a webbox site served as a Linux process. The `webbox`
 //! library's host-only half, its own module, so the portable half (the
 //! `webbox` module, all a site's code imports) never carries it: a site's
-//! Linux `main` imports this, and nothing else does (tools/lint_portable.py).
+//! Linux `main` imports this, and nothing else does (angry-gopher's tools/lint_portable.py).
 //! Its files reach the portable half as the `webbox` module, never by path.
 
 /// `Server(site).run`: the whole Linux host, from the allocator to the

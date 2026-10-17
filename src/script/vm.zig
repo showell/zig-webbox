@@ -395,7 +395,7 @@ const Machine = struct {
     }
 };
 
-/// **A RUN IN SLICES** (metal-vmm QUEUE 211; docs/SHALE-TASKS.md): the
+/// **A RUN IN SLICES** (metal-vmm QUEUE 211; docs/SHALE.md, "The contract"): the
 /// machine kept between them, so a slice ends at any op boundary and the
 /// next goes on from there. The VM never recurses, so nothing of the run is
 /// on the Zig stack between slices.

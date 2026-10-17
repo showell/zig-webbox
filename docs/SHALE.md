@@ -194,8 +194,9 @@ The host chooses, not the script; a signed request names it
   made. With `--write` it is atomic. Shale's default budgets, each of
   which `--budget NAME=N` sets (the table in "The budgets").
 - **Dog Park takes background runs only.** lynrummy.com's route runs
-  atomic ones; its background budgets are set for when its host steps
-  them (angry-gopher `admin_script.background_budgets`).
+  both: atomic ones, and background ones its host steps between requests
+  (since v32, metal-vmm QUEUE 222; angry-gopher
+  `admin_script.background_budgets`).
 - A script can ask what is left with `budget()`, but not which mode it is
   in: write a script that changes nothing when it may run either way.
 
@@ -618,7 +619,7 @@ the errors column says the rest.
 | `arg(name[, default])` | the run's value by that name, or `default` | `argument` for a value not of an integer or boolean default's kind |
 | `fail(msg)` | never returns: the run stops | `fail`, with `msg` |
 | `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function, trail}` | (the language's own: see `attempt`) |
-| the prelude's `walk_all(p, opts)`, `count_all(p, s)`, `find_next(p, s, at)` | every entry; every occurrence; the next one | as `walk`, `count_in`, `find_in` |
+| the prelude's `walk_all(p, opts)`, `walk_upto(p, opts, keep)`, `count_all(p, s)`, `find_next(p, s, at)`, `room_for(need)`, `glob(pattern[, {hidden}])` | every entry; as many as the reads allow; every occurrence; the next one; whether the budgets hold `need`; the files a glob names | as `walk`, `count_in`, `find_in`, `match_path` |
 
 ### The store
 
@@ -987,14 +988,17 @@ that hits one stops cleanly, naming it, with its line and column. A stop
 names a budget as `budget()` spells it: `steps`, `reads`, `read_bytes`,
 `changes`, `change_bytes`, `output`, and the rest by the names below
 (`arena`, `machine`, `kept`, `depth`, `call_depth`, `source`, `nesting`).
+**Three are spelled with their unit where a host or the CLI sets them**
+(`interp.Budgets`, `--budget`): `arena_bytes` is `arena`, `output_bytes`
+is `output`, `source_bytes` is `source`.
 
-**What metal passes** (the box's re-review, item 4): the route is the
+**What metal passes:** the route is the
 application's, not the kernel's, so zig-metal-unikernel sets no budgets of
 its own. The site's column is angry-gopher's `admin_script.budgets`, which
 lynrummy.com's route hands `script_route.handle` on metal; a budget it does
 not name is Shale's default, the machine's included.
 
-| budget | what it counts | default | the site's (angry-gopher v30) |
+| budget | what it counts | default | the site's (angry-gopher `admin_script.budgets`) |
 |---|---|---|---|
 | steps | each statement, expression and loop iteration, and every byte or item a builtin touches | 5,000,000 | 2,000,000 |
 | arena | **the memory the run holds, all of it.** (The tree a source parses to and the machine's own memory are beside it, under the machine budget.) Every value lives in the run's own arena, which takes chunks from the host only up to this budget (its headers included), so the budget is a hard bound on the memory a script can take, whatever it does (tested: the host's peak never passes it). An allocation of 64 KiB or more has a chunk of its own, given back when it is freed, so a list grown to megabytes holds only its live buffer. An allocation that fails, a store call's included, stops the run here | 16 MiB | 8 MiB |
@@ -1059,7 +1063,8 @@ budgets, and changes nothing.
 
 ### How large a site each script fits
 
-`zig build shale-scale` (src/shale_scale.zig) generates a store shaped
+`zig build shale-scale` (src/shale_scale.zig; the table below is its
+output of 2026-10-16, and running it again gives it afresh) generates a store shaped
 like angry-gopher's, at a growing number of topics, and runs each
 read-only script on it under the site's budgets (steps 2M, arena 8 MiB,
 500 reads, 16 MiB read) until it no longer fits. A topic is its
@@ -1172,16 +1177,59 @@ SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
   what the run used only past half a budget or on a stop; a dry run's
   changes. `--verbose` adds the effects, the programs run and their logs,
   and what the run used, always.
+- **What goes where:** the script's own output on stdout; on stderr the
+  report: a stop and its trail, the effects, the programs run, the dry
+  run's line, and `── used:`, which is what the run took of four budgets
+  (steps, reads, read bytes, output bytes) beside each budget. Both
+  stream, so `> f 2>&1` keeps them in order.
 - It exits 0 if the script finished, 1 if it stopped, 2 if the command
-  line, the script's file or the mounts could not be taken.
+  line, the script's file, the mounts or a prelude could not be taken.
 
 **Run it against a copy**, never the live data folder.
 
-`zig build script-bench` times the interpreter's hot paths in ReleaseSafe:
+`zig build script-bench` (run it again to measure again; these are of
+2026-10-15) times the interpreter's hot paths in ReleaseSafe:
 a loop's iteration, a while loop, a list, a map, calls, a string built by
 `..` and by `join`, a scan, and a whole read. An interpreted step takes 7
 to 15 ns. A byte read whole takes 0.4 ns; a byte scanned takes 3.7 ns,
 with a match every 4 bytes.
+
+## On Linux: behind the seam
+
+**Metal's core and Linux's are one** (the lexer, the parser, both
+engines, the budgets, the store, text, regex, lists); the Linux CLI hands
+it three things through `Options`, and metal hands none
+(`docs/designs/DESIGN-shale-dogfood.md`):
+
+- **`host(name, ...)`**, the one builtin that reaches outside. It is
+  `Options.host`, and on metal it stops with class `host` ("not on this
+  host"). On Linux it is `src/shale_host_linux.zig`:
+  - `run`, a program under a timeout, a keep and a filter;
+  - `real`, a path's OS path;
+  - the jobs, `src/shale_host_jobs.zig` over `src/shale_jobs.zig`.
+- **`Options.path_hook`**, called first in every store call's path. Linux's
+  is the mounts: a path whose first part has a `:` is a mount's
+  (`runs:gates/summary`), named in `SHALE_MOUNTS`'s file or
+  `~/.config/shale/mounts`. Mounts are naming, not a sandbox.
+- **`Options.preludes`**, the preludes after the core's, in order:
+  - the Linux prelude (`src/shale_prelude_linux.shale`): the names a
+    script types, such as `run`, `real`, `must`, the `job_*` calls and
+    the text and file helpers;
+  - the git prelude (`src/shale_prelude_git.shale`);
+  - the repo's `.shale/prelude.shale`, as metal-vmm's queue tool is;
+  - the user's.
+  
+  A later prelude may not redefine an earlier one's function. **Metal's
+  parse compiles none of this**: `host_io_std.zig` says
+  `shale_preludes`, and metal's host_io doesn't.
+- **A dry run runs no program:** `run` and `job_start` stop it as `budget
+  runs`, which `attempt` can't catch. A run runs at most 64 programs.
+- **The gate** (`tools/shale_gate.zig`, not installed) is the PreToolUse
+  hook that holds an agent to Shale (SHALE-AGENTS.md, "The gate").
+
+What each function takes and gives is in SHALE-AGENTS.md; the tests are
+`src/shale_*_test.zig` and the host's own, through the gate where a run
+can happen three times alike.
 
 ## On the live site: `script_route` and the signer
 
@@ -1215,7 +1263,7 @@ zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
 `src/shale_sign.zig` makes the key pair once (the private key goes at
 `~/.shale_signing_key`, mode 600, never printed) and signs a script with
 the next sequence number. The steps for the site are in
-zig-metal-unikernel's README, "Release notes: the script route".
+zig-metal-unikernel's DEPLOY.md, "Shale scripts: looking inside a droplet".
 
 ## The installed suite: scripts on a schedule
 
@@ -1269,6 +1317,7 @@ else of the script module's insides:
 | call | what it does |
 |---|---|
 | `Process.start(io, allocator, root, source, mode, budgets, now, output_most)` | parse and compile; a source that doesn't parse or fit gives a process already stopped, saying why |
+| `Process.startWith(io, allocator, root, source, options, budgets, now, output_most)` | the same, with `Options`: the mode, the script's values (`arg`), and on Linux the host, its path hook and the preludes after the core's |
 | `step(.{ .steps, .now })` | one slice: `paused`, `finished` or `stopped`. A slice ends between ops, after at most `steps` **or after any store call**, whichever comes first; `now()` is the slice's clock. An ended run says so again and runs nothing |
 | `output()` | what it has printed |
 | `status()` | its state, steps, slices, effects and its stop |
@@ -1278,10 +1327,12 @@ else of the script module's insides:
   request's heap: the values' arena, the machine's memory and its
   output, each under its budget. A second run later needs no host change
   but a count.
-- **Two modes.** `atomic` is today's run, whole inside one handler, and
+- **Three modes.** `atomic` is today's run, whole inside one handler, and
   may change the store. `background` is stepped in slices between
   handlers and **only reads**: `replace`, `append`, `mkdir`, `remove`
-  and `remove_tree` are `argument` errors naming `atomic`. A script that
+  and `remove_tree` are `argument` errors naming `atomic`. `dry_run`
+  (the Linux CLI's default) checks, counts and logs every change and
+  makes none, an `edit`'s diff printed. A script that
   finds and then deletes is a background run to find, then an atomic
   one to act.
 - **A slice ends after any store call** (Steve: "let the kernel swap it
@@ -1324,14 +1375,16 @@ steps, the work counted, the arena held, and the store each leaves.
 Every interpreter, builtin, example, cookbook, error-corpus, property,
 snippet and fuzz test is therefore a parity test. A difference panics
 with both runs, and the test it happened in is the reproduction.
-Two planted defects fire it: `<` compiled as `<=` (six tests), and a
-lost step on reading a local (55).
+Planted defects fire it: `<` compiled as `<=`, and a lost step on
+reading a local, each in many tests.
 
 **The machine's memory is not the arena.** The frames, the operands and
-the code come from the caller's allocator, beside the budgeted arena, so
-the two engines take the same arena and stop on it at the same place.
+the code come from the machine's own arena (the `machine` budget,
+`machine_bytes`), beside the values' arena, so the two engines take the
+same values' arena and stop on it at the same place.
 
-`zig build script-bench`, ReleaseSafe, the VM's time over the walker's:
+`zig build script-bench`, ReleaseSafe, the VM's time over the walker's
+(2026-10-15's run; the step measures it again):
 
 | case | walker | VM |
 |---|---|---|
@@ -1395,7 +1448,7 @@ effects and stop, but not to the same steps or arena.
 - Debug frames are about a kilobyte, so the call depth times the nesting
   (64 × 200) would need about 20 MB.
 - So the walk is bounded by the **depth** budget instead, and its
-  recursive frames are kept small. The VM (below) never recurses, but
+  recursive frames are kept small. The VM (above) never recurses, but
   keeps the depth budget exactly, so a script stops at the same place on
   either.
 - Measured by `interp_test.zig`:
@@ -1423,9 +1476,9 @@ holds every source of the module.
 - **A dry run on Linux only.** On the sites a script just runs (Steve);
   the Linux `shale` runs dry unless `--write` (QUEUE 229, `Mode.dry_run`).
 - **On metal, no effects beyond the store.** No network, no clock but
-  `now()`, no host. (The dogfood design gives Linux's Shale more, behind
-  one seam, metal's unchanged: zig-webbox
-  `docs/designs/DESIGN-shale-dogfood.md`.)
+  `now()`, no host. Linux's Shale has more behind one seam, metal's
+  unchanged ("On Linux: behind the seam"; zig-webbox
+  `docs/designs/DESIGN-shale-dogfood.md`).
 - **A step a byte for a builtin's work, and a step for 16 bytes of bulk
   byte work** (Steve, 209): reads, scans and the haystacks of searches.
   A search also pays a step a place it stops and for its compares, after
