@@ -46,6 +46,11 @@ pub const Mode = enum { atomic, background, dry_run };
 pub const Options = struct {
     mode: Mode = .atomic,
     args: []const interp.Arg = &.{},
+    /// The host's door, `host(name, ...)` (metal-vmm QUEUE 233): none on
+    /// metal, where `host` stops with class `host`.
+    host: ?interp.Host = null,
+    /// The host's hook on paths, called first when set: none on metal.
+    path_hook: ?interp.PathHook = null,
 };
 
 pub const State = enum { running, finished, stopped };
@@ -132,6 +137,8 @@ pub const Process = struct {
             .read_only = mode == .background,
             .dry_run = mode == .dry_run,
             .args = options.args,
+            .host = options.host,
+            .path_hook = options.path_hook,
         };
         p.ready(source) catch {};
         return p;

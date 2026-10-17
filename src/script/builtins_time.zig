@@ -17,6 +17,7 @@ pub const specs = [_]bi.Spec{
     spec(.now, 0, 0, now),
     spec(.arg, 1, 2, givenArg),
     spec(.fail, 1, 1, failWith),
+    spec(.host, 1, bi.most_args, hostCall),
     spec(.budget, 0, 0, budget),
     spec(.yield, 0, 0, yield),
     spec(.date, 1, 1, date),
@@ -40,6 +41,17 @@ fn failWith(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const msg = try bi.stringArg(run, pos, .fail, args[0], "its message");
     try run.charge(pos, msg.len);
     return run.fail(pos, .fail, "{s}", .{msg});
+}
+
+/// **`host(name, ...)`** (metal-vmm QUEUE 233): the host's call `name`,
+/// given the rest; what the Linux CLI's preludes wrap as `run`, `real` and
+/// the jobs. Where there is no host (metal), a `host` stop naming the call.
+/// The host checks and charges its own arguments and work.
+fn hostCall(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const name = try bi.stringArg(run, pos, .host, args[0], "its call's name");
+    try run.charge(pos, name.len);
+    const h = run.host orelse return run.fail(pos, .host, "`{s}`: not on this host", .{name});
+    return h.call(h.ctx, run, pos, name, args[1..]);
 }
 
 fn givenArg(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {

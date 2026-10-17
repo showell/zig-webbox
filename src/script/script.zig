@@ -202,6 +202,8 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .read_only = options.mode == .background,
         .dry_run = options.mode == .dry_run,
         .args = options.args,
+        .host = options.host,
+        .path_hook = options.path_hook,
     };
     defer r.deinit();
     // The VM's runs went through its Process above: here, the walker's.
@@ -250,5 +252,6 @@ test {
     _ = @import("yield_test.zig");
     _ = @import("process_test.zig");
     _ = @import("agent_test.zig");
+    _ = @import("host_test.zig");
     _ = cli;
 }

@@ -44,6 +44,9 @@ pub const Path = struct { full: []const u8, rel: []const u8 };
 pub fn pathArg(run: *Run, pos: ast.Pos, b: B, v: Value, allow_root: bool) Error!Path {
     const rel = try bi.stringArg(run, pos, b, v, "its path");
     try run.charge(pos, rel.len);
+    // **THE HOST'S HOOK, WHEN IT HAS ONE** (metal-vmm QUEUE 233): a path it
+    // resolves (a mount's, on Linux) is its; any other, the root's rules.
+    if (run.path_hook) |h| if (try h.resolve(h.ctx, run, pos, rel)) |full| return .{ .full = full, .rel = rel };
     if (rel.len == 0) {
         if (!allow_root) return run.fail(pos, .argument, "`{s}(\"\")` would act on the whole root: a change needs a path of at least one part", .{@tagName(b)});
         return .{ .full = run.root, .rel = "" };

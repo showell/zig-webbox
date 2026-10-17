@@ -75,6 +75,23 @@ pub const Effect = struct {
 
 pub const Error = error{ Stop, OutOfMemory };
 
+/// **THE CORE'S ONE DOOR OUT** (metal-vmm QUEUE 233; the dogfood design's
+/// "The architecture"): `host(name, ...)` calls `call` with the name and
+/// the rest of its arguments. The Linux CLI gives one (running programs,
+/// mounts, jobs); metal gives none, and `host` stops with class `host`.
+pub const Host = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []const Value) Error!Value,
+};
+
+/// **THE ONE HOOK ON PATHS**: called first by every path argument, when
+/// set; the OS path a script's path names, or null for the root's rules.
+/// What a mount is (`runs:x`) is the host's. Metal sets none.
+pub const PathHook = struct {
+    ctx: *anyopaque,
+    resolve: *const fn (ctx: *anyopaque, run: *Run, pos: ast.Pos, path: []const u8) Error!?[]const u8,
+};
+
 pub const Run = struct {
     io: Io,
     alloc: std.mem.Allocator,
@@ -113,6 +130,9 @@ pub const Run = struct {
     dry_run: bool = false,
     /// The values the run was given by name (`arg`).
     args: []const Arg = &.{},
+    /// The host's door and hook, where it has them (`Host`, `PathHook`).
+    host: ?Host = null,
+    path_hook: ?PathHook = null,
     /// Whether the run called a builtin that changes the store, refused or
     /// not (the gate cuts a run that did not as a background run).
     tried_change: bool = false,
