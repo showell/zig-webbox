@@ -5,7 +5,7 @@ there to stay safe is what an agent wants on Linux too:**
 
 - **Every run is bounded.** Its steps, its reads, its changes and **what
   it prints** each have a budget (`--budget NAME=N` sets one). A script
-  that would print a megabyte stops at the output budget (256 KiB unset)
+  that would print a megabyte stops at the output budget (64 KiB in `shale` unset)
   and says so: its output is a bounded context cost, never a flood.
 - **A stop is one line that says where and why**, with the calls that led
   there (`called from file:line:column (in f)`), and a class: `type`,
@@ -18,9 +18,11 @@ there to stay safe is what an agent wants on Linux too:**
   directory): no `..`, no absolute paths, no host, no clock but what it is
   handed. A script cannot reach what it was not given.
 
-`shale` ends by saying what the run used of each budget (`── used: 52374
-of 5000000 steps, 12 of 10000 reads, ...`), so the cost of a script is
-known before a bigger run finds the edge.
+`shale` is terse: past half of any budget, or on a stop, it says what the
+run used of each (`── used: 52374 of 5000000 steps, 12 of 10000 reads,
+...`), so a script near an edge is known before a bigger run finds it;
+`--verbose` says so always, with the effects and the programs run. With
+no file and no `-e`, the script is stdin (`shale <<'SHALE'`).
 
 ```sh
 zig build                      # zig-out/bin/shale

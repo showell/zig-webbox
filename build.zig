@@ -36,12 +36,15 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/script_runner.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "webbox", .module = webbox }},
+        .imports = &.{
+            .{ .name = "webbox", .module = webbox },
+            .{ .name = "webbox_linux", .module = webbox_linux },
+        },
     }) });
     b.installArtifact(runner);
     const run_script = b.addRunArtifact(runner);
     if (b.args) |a| run_script.addArgs(a);
-    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--write] <file.shale> [name=value ...]").dependOn(&run_script.step);
+    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--write] [--verbose] [<file.shale> | -e SOURCE] [name=value ...]").dependOn(&run_script.step);
 
     // **SHALE'S HOT PATHS, TIMED** (src/script_bench.zig): no tier runs it.
     const script_bench = b.addExecutable(.{ .name = "script-bench", .root_module = b.createModule(.{

@@ -66,6 +66,41 @@ pub fn parseMounts(alloc: std.mem.Allocator, text: []const u8, home: []const u8,
     return out.toOwnedSlice(alloc);
 }
 
+/// **WHERE THE MOUNTS ARE**: `SHALE_MOUNTS` names the file (the tests pin
+/// it), else `~/.config/shale/mounts`. The default's absence is no mounts;
+/// a file named and missing, or any file's mistake, is said with the file.
+pub fn loadMounts(alloc: std.mem.Allocator, io: std.Io, pinned: ?[]const u8, home: []const u8, why: *[]const u8) error{ OutOfMemory, Malformed }!struct { mounts: []Mount, from: []const u8 } {
+    const from = if (pinned) |p| p else try std.fmt.allocPrint(alloc, "{s}/.config/shale/mounts", .{home});
+    const text = std.Io.Dir.cwd().readFileAlloc(io, from, alloc, .limited(64 * 1024)) catch |e| {
+        if (pinned == null and e == error.FileNotFound) return .{ .mounts = &.{}, .from = from };
+        why.* = try std.fmt.allocPrint(alloc, "{s}{s}: {s}", .{ if (pinned != null) "SHALE_MOUNTS=" else "", from, @errorName(e) });
+        return error.Malformed;
+    };
+    var line_why: []const u8 = "";
+    const mounts = parseMounts(alloc, text, home, &line_why) catch |e| {
+        if (e == error.Malformed) why.* = try std.fmt.allocPrint(alloc, "{s}: {s}", .{ from, line_why });
+        return e;
+    };
+    return .{ .mounts = mounts, .from = from };
+}
+
+/// **A PROGRAM'S ENVIRONMENT**, inherited, `K=V` each, but for
+/// `ZIG_PROGRESS`: a `zig build` that `run` runs writes its progress to a
+/// pipe the build that ran the CLI holds, never to `run`'s output.
+pub fn baseEnv(alloc: std.mem.Allocator, map: *const std.process.Environ.Map) error{OutOfMemory}![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (out.items) |e| alloc.free(e);
+        out.deinit(alloc);
+    }
+    var it = map.iterator();
+    while (it.next()) |kv| {
+        if (std.mem.eql(u8, kv.key_ptr.*, "ZIG_PROGRESS")) continue;
+        try out.append(alloc, try std.fmt.allocPrint(alloc, "{s}={s}", .{ kv.key_ptr.*, kv.value_ptr.* }));
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn validName(s: []const u8) bool {
     for (s) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) return false;
     return true;
@@ -757,6 +792,45 @@ test "host: mounts: a mount's paths, real() for argv, an unknown mount or a miss
         try testing.expectError(error.Malformed, parseMounts(a, c[0], "/home/x", &why));
         try testing.expect(std.mem.indexOf(u8, why, c[1]) != null);
     }
+}
+
+test "host: the CLI's environment: inherited, ZIG_PROGRESS out" {
+    var m: std.process.Environ.Map = .init(testing.allocator);
+    defer m.deinit();
+    try m.put("HOME", "/home/x");
+    try m.put("ZIG_PROGRESS", "3");
+    try m.put("PATH", "/bin");
+    const env = try baseEnv(testing.allocator, &m);
+    defer {
+        for (env) |e| testing.allocator.free(e);
+        testing.allocator.free(env);
+    }
+    try testing.expectEqual(@as(usize, 2), env.len);
+    try testing.expectEqualStrings("HOME=/home/x", env[0]);
+    try testing.expectEqualStrings("PATH=/bin", env[1]);
+}
+
+test "host: the mounts file: SHALE_MOUNTS pins it; the default's absence is no mounts, a pinned one's a mistake" {
+    var t: T = undefined;
+    try t.init();
+    defer t.deinit();
+    const a = t.arena.allocator();
+    const io = t.threaded.io();
+    var why: []const u8 = "";
+    const none = try loadMounts(a, io, null, "/no/such/home", &why);
+    try testing.expectEqual(@as(usize, 0), none.mounts.len);
+    try testing.expectEqualStrings("/no/such/home/.config/shale/mounts", none.from);
+    try testing.expectError(error.Malformed, loadMounts(a, io, "/no/such/mounts", "/h", &why));
+    try testing.expectEqualStrings("SHALE_MOUNTS=/no/such/mounts: FileNotFound", why);
+    try t.tmp.dir.writeFile(io, .{ .sub_path = "mounts", .data = "runs = ~/runs\n" });
+    const file = try std.fmt.allocPrint(a, "{s}/mounts", .{t.root});
+    const got = try loadMounts(a, io, file, "/h", &why);
+    try testing.expectEqualStrings("/h/runs", got.mounts[0].dir);
+    try testing.expectEqualStrings(file, got.from);
+    try t.tmp.dir.writeFile(io, .{ .sub_path = "mounts", .data = "runs = runs\n" });
+    try testing.expectError(error.Malformed, loadMounts(a, io, file, "/h", &why));
+    try testing.expect(std.mem.startsWith(u8, why, file));
+    try testing.expect(std.mem.endsWith(u8, why, ": line 1: `runs`'s value `runs` is relative: an absolute path, or one from `~/`"));
 }
 
 /// A spawn that runs nothing: the bytes it is told to give, every time.
