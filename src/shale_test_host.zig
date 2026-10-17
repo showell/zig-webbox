@@ -48,6 +48,13 @@ pub const T = struct {
         return script.runWith(t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes });
     }
 
+    /// One run of the VM, outside the gate: for a script whose effects
+    /// on the world cannot happen three times alike (a commit, a push).
+    pub fn runOnce(t: *T, src: []const u8, mode: script.process.Mode) script.Result {
+        const o = t.host.options();
+        return script.runOn(.vm, t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes });
+    }
+
     pub fn expectOutput(t: *T, src: []const u8, want: []const u8) !void {
         var r = t.run(src, .atomic);
         defer r.deinit();

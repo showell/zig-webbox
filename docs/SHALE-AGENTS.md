@@ -63,6 +63,44 @@ has none of it):
   `edits_all({{p, edits}, ...})` checks every file's edits before it writes
   any.
 
+**Git, in the git prelude** (`src/shale_prelude_git.shale`). Every call
+runs git under `run`, so it needs `--write`. A `repo` is a Shale path, `""`
+for the root and `repos:dog-park` for a mount.
+- **Reading:** `git_status(repo)` gives `{code, path[, from]}`.
+  `git_log(repo, {n, range, ref, fields})` gives `{hash, subject, date,
+  author}`. `git_diff(repo, {range, paths, stat})` and `git_show(repo,
+  "rev:path")` give text. `git_ls_files(repo)`, `git_is_clean(repo)` and
+  `git_head(repo)` give the tracked paths, whether the tree is clean, and
+  the head's short hash.
+- **Changing:**
+  - `git_commit(repo, msg, {add = "tracked" | "all" | {paths}})` passes
+    the message on stdin and gives the new head.
+  - `git_push(repo, {remote, branch})` sets the upstream, as `push -u`
+    does.
+  - `git_fetch(repo, {all})`, `git_pull_ff(repo)` and `git_merge_ff(repo,
+    ref)`.
+  - `git_worktree_add(repo, dir, {branch, new})`,
+    `git_worktree_remove(repo, dir, {force})` and `git_branch_delete(repo,
+    name, {force})`.
+- **Errors:** a git error stops the run with the call as you typed it and
+  git's first line: `` `git show HEAD:nope` exited 128: fatal: ... ``.
+  Each call has 60 seconds unless given `timeout_ms`.
+
+**Claude's commit belongs in the user prelude**, not the git prelude: it
+refuses a message without its attribution.
+
+```lua
+-- ~/.config/shale/prelude.shale
+function commit(repo, msg, opts)
+  local signed = false
+  for l in lines(msg) do
+    if starts_with(l, "Co-Authored-By:") then signed = true end
+  end
+  if not signed then fail("`commit`: the message has no Co-Authored-By: line") end
+  return git_commit(repo, msg, opts)
+end
+```
+
 **A repo's own prelude** is `.shale/prelude.shale` at the root. **A
 user's** is `~/.config/shale/prelude.shale` (`SHALE_PRELUDE=<file>` names
 another, `SHALE_PRELUDE=` none). Each holds only functions, and none may

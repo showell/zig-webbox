@@ -25,6 +25,10 @@ const spawn = @import("shale_spawn.zig");
 /// (`run`, `real`) over `host`, and the helpers only Linux has.
 pub const linux_prelude: script.parse.Prelude = .{ .name = "the Linux prelude", .source = @embedFile("shale_prelude_linux.shale") };
 
+/// **THE GIT PRELUDE** (QUEUE 233, chunk 3): git over `run`, after the
+/// Linux prelude whose `run` and `real` it calls.
+pub const git_prelude: script.parse.Prelude = .{ .name = "the git prelude", .source = @embedFile("shale_prelude_git.shale") };
+
 /// The most programs a run may run (the design's "The CLI's defaults").
 pub const runs_most = 64;
 
@@ -89,13 +93,14 @@ pub fn loadMounts(alloc: std.mem.Allocator, io: std.Io, pinned: ?[]const u8, hom
 }
 
 /// **THE PRELUDES AFTER THE CORE'S, IN ORDER** (the dogfood design's "The
-/// architecture"): the Linux prelude; the repo's, `.shale/prelude.shale` at
+/// architecture"): the Linux prelude and the git prelude; the repo's, `.shale/prelude.shale` at
 /// the root, if it is there; the user's, the file `SHALE_PRELUDE` names
 /// (`""` none, the tests' pin) or else `~/.config/shale/prelude.shale` if it
 /// is there. Each is named as a stop shows its lines.
 pub fn loadPreludes(alloc: std.mem.Allocator, io: std.Io, root_abs: []const u8, pinned: ?[]const u8, home: []const u8, why: *[]const u8) error{ OutOfMemory, Malformed }![]script.parse.Prelude {
     var out: std.ArrayList(script.parse.Prelude) = .empty;
     try out.append(alloc, linux_prelude);
+    try out.append(alloc, git_prelude);
     const repo = try std.fmt.allocPrint(alloc, "{s}/.shale/prelude.shale", .{root_abs});
     if (try readPrelude(alloc, io, repo, false, "", why)) |src| try out.append(alloc, .{ .name = ".shale/prelude.shale", .source = src });
     if (pinned) |p| {

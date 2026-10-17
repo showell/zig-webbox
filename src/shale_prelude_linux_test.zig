@@ -147,25 +147,26 @@ test "linux prelude: the repo's and the user's preludes come after it, SHALE_PRE
     const a = t.arena.allocator();
     const io = t.threaded.io();
     var why: []const u8 = "";
-    // Neither there: the Linux prelude alone.
+    // Neither there: the Linux prelude and the git prelude alone.
     const alone = try host_linux.loadPreludes(a, io, t.root, null, "/no/such/home", &why);
-    try testing.expectEqual(@as(usize, 1), alone.len);
+    try testing.expectEqual(@as(usize, 2), alone.len);
     try testing.expectEqualStrings("the Linux prelude", alone[0].name);
+    try testing.expectEqualStrings("the git prelude", alone[1].name);
     try t.tmp.dir.createDirPath(io, ".shale");
     try t.put(".shale/prelude.shale", "function twice(x)\n  return x * 2\nend\n");
     try t.put("mine.shale", "function shout(s)\n  return upper(s) .. \"!\" .. twice(1)\nend\nfunction boom()\n  return 1 + {}\nend\n");
     const mine = try std.fmt.allocPrint(a, "{s}/mine.shale", .{t.root});
     const all = try host_linux.loadPreludes(a, io, t.root, mine, "/no/such/home", &why);
-    try testing.expectEqual(@as(usize, 3), all.len);
-    try testing.expectEqualStrings(".shale/prelude.shale", all[1].name);
-    try testing.expectEqualStrings(mine, all[2].name);
+    try testing.expectEqual(@as(usize, 4), all.len);
+    try testing.expectEqualStrings(".shale/prelude.shale", all[2].name);
+    try testing.expectEqualStrings(mine, all[3].name);
     t.preludes = all;
     try t.expectOutput("print(twice(3), shout(\"hi\"), #unique({\"a\", \"a\"}))", "6\tHI!2\t1\n");
     var r = t.run("boom()", .atomic);
     defer r.deinit();
     try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}'s boom", .{mine}), r.stop.?.function);
     // SHALE_PRELUDE="" is no user prelude; one named and missing is a mistake.
-    try testing.expectEqual(@as(usize, 2), (try host_linux.loadPreludes(a, io, t.root, "", "/no/such/home", &why)).len);
+    try testing.expectEqual(@as(usize, 3), (try host_linux.loadPreludes(a, io, t.root, "", "/no/such/home", &why)).len);
     try testing.expectError(error.Malformed, host_linux.loadPreludes(a, io, t.root, "/no/such/prelude.shale", "/h", &why));
     try testing.expectEqualStrings("SHALE_PRELUDE=/no/such/prelude.shale: FileNotFound", why);
     // The default user prelude, from home.
@@ -173,7 +174,7 @@ test "linux prelude: the repo's and the user's preludes come after it, SHALE_PRE
     try t.put("home/.config/shale/prelude.shale", "function hello()\n  return 1\nend\n");
     const home = try std.fmt.allocPrint(a, "{s}/home", .{t.root});
     const from_home = try host_linux.loadPreludes(a, io, t.root, null, home, &why);
-    try testing.expectEqualStrings("~/.config/shale/prelude.shale", from_home[2].name);
+    try testing.expectEqualStrings("~/.config/shale/prelude.shale", from_home[3].name);
     // A later prelude may not take an earlier one's name.
     try t.put(".shale/prelude.shale", "function unique(x)\n  return x\nend\n");
     t.preludes = try host_linux.loadPreludes(a, io, t.root, "", "/h", &why);
