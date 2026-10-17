@@ -108,6 +108,28 @@ fn namedModules(a: std.mem.Allocator, text: []const u8) ![]const []const u8 {
     return out.toOwnedSlice(a);
 }
 
+/// **EVERY TEST FILE IS IMPORTED** by some file: a `*_test.zig` that no file
+/// names is compiled by nothing, so its tests never run and the suite stays
+/// green. Moving linux_host.zig's tests out showed it: with their one import
+/// gone, `zig build test` passed and ran none of them.
+fn orphanTests(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
+    var tests: std.ArrayList([]const u8) = .empty;
+    var imported: std.ArrayList([]const u8) = .empty;
+    var w = try dir.walk(a);
+    defer w.deinit();
+    while (try w.next(io)) |e| {
+        if (e.kind != .file or !std.mem.endsWith(u8, e.basename, ".zig")) continue;
+        const name = try a.dupe(u8, e.path);
+        if (isTest(name)) try tests.append(a, name);
+        const body = try dir.readFileAlloc(io, name, a, .limited(4 << 20));
+        for (try refs(a, body, "@import")) |dep| if (isTest(dep)) try imported.append(a, try resolved(a, name, dep));
+    }
+    var out: std.ArrayList([]const u8) = .empty;
+    for (tests.items) |t| if (!contains(imported.items, t))
+        try out.append(a, try std.fmt.allocPrint(a, "{s} is imported by no file: its tests never run", .{t}));
+    return out.toOwnedSlice(a);
+}
+
 /// What is wrong with the library under `dir`, one line each.
 fn problems(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
@@ -178,6 +200,7 @@ fn problems(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
         }
         if (ri == 0) portable = seen.items;
     }
+    try out.appendSlice(a, try orphanTests(io, a, dir));
     return out.toOwnedSlice(a);
 }
 
@@ -185,7 +208,7 @@ test "library: the files each root reaches, it names; each imports only the modu
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const io = testing.io;
-    var src = try Io.Dir.cwd().openDir(io, "src", .{});
+    var src = try Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
     defer src.close(io);
     const found = try problems(io, arena.allocator(), src);
     for (found) |p| std.debug.print("library: {s}\n", .{p});
@@ -197,7 +220,7 @@ test "library: its check finds each kind of mistake, on planted trees" {
     defer arena.deinit();
     const a = arena.allocator();
     const io = testing.io;
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const w = struct {
         fn f(d: Io.Dir, name: []const u8, body: []const u8) !void {
@@ -223,11 +246,13 @@ test "library: its check finds each kind of mistake, on planted trees" {
         .{ .file = "a.zig", .body = "const l = @import(\"webbox_linux\");\n", .says = "a.zig imports the module webbox_linux" },
         .{ .file = "a.zig", .body = "const l = @import(\"l.zig\");\n", .says = "a.zig reaches the Linux half's l.zig" },
         .{ .file = "l.zig", .body = "const a = @import(\"a.zig\");\n", .says = "l.zig reaches a.zig by path" },
+        .{ .file = "z_test.zig", .body = "test \"nobody runs me\" {}\n", .says = "z_test.zig is imported by no file" },
         .{ .file = "sub/t.zig", .body = "const std = @import(\"std\");\nconst Io = " ++ "std.Io;\n", .says = "sub/t.zig takes Io from std" },
         .{ .file = "a.zig", .body = "const Io = " ++ "@import(\"std\").Io;\n", .says = "a.zig takes Io from std" },
         .{ .file = "webbox.zig", .body = "pub const a = @import(\"a.zig\");\npub const s = @import(\"sub/s.zig\");\n\ntest {\n    _ = a;\n}\n", .says = "webbox.zig names s but its test block does not" },
     }) |c| {
-        const was = try tmp.dir.readFileAlloc(io, c.file, a, .limited(1 << 16));
+        // A planted file that was not there is taken away again after.
+        const was: ?[]u8 = tmp.dir.readFileAlloc(io, c.file, a, .limited(1 << 16)) catch null;
         try w(tmp.dir, c.file, c.body);
         const found = try problems(io, a, tmp.dir);
         errdefer for (found) |p| std.debug.print("  found: {s}\n", .{p});
@@ -236,6 +261,6 @@ test "library: its check finds each kind of mistake, on planted trees" {
         var hit = false;
         for (found) |p| hit = hit or std.mem.indexOf(u8, p, c.says) != null;
         try testing.expect(hit);
-        try w(tmp.dir, c.file, was);
+        if (was) |body| try w(tmp.dir, c.file, body) else try tmp.dir.deleteFile(io, c.file);
     }
 }
