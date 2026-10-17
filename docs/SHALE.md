@@ -15,8 +15,8 @@ checkout or any folder): [`SHALE-AGENTS.md`](SHALE-AGENTS.md). **The
 budgets are the feature there:** every run is bounded in its steps, its
 reads, its changes and **what it prints**, so its output is a bounded
 context cost; a stop says where and why in one line, with the calls that
-led there; and nothing changes a file unless asked, each change shown as
-its diff first.
+led there; and an `edit` says what it changes before it writes, as a
+one-line summary, or the whole diff with `--verbose`.
 
 This page is in three parts:
 - **for a script's author:** a first script, what a run may do, the
