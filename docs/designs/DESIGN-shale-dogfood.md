@@ -233,13 +233,22 @@ most 200 ms and stop reading. **The keep is a pure file:** the first N lines,
 a ring of the last M, each cut at `width`, the counts: memory bounded by
 `(N+M)·width`. About 900 lines and 500 of tests.
 
-**What it cannot promise:** a death signal reaches only the direct child; a
-child that makes its own session escapes the group kill. So "a run never
-outlives its tool call" rests on `shale` relaying the signal it gets, and
-**first, a one-minute experiment: how Claude Code ends a Bash call past its
-timeout.** If it is SIGKILL to `shale` alone, the death signal kills the
-direct child, and grandchildren are said, in the design and SHALE.md, to be
-able to outlive it.
+**Chunk 0's experiment, done (the box, 2026-10-18):** a script that traps and
+logs every signal, with one child in its process group and one in a session
+of its own, run under a 4-second Bash timeout.
+- **Claude Code does not kill a Bash call past its timeout: it moves it to
+  the background, still running.** So a `shale` past the call's timeout keeps
+  going, and **`run`'s own `timeout_ms` is what ends a program**, always:
+  Claude sets it, the tool's timeout does not.
+- **Stopping a task (TaskStop, or the session ending) sends TERM to the whole
+  process tree**, the child that made its own session included, **then KILL**
+  to what survives (the script trapped TERM and was still gone).
+- So a death signal and `shale`'s relaying of TERM are a second line, for a
+  `shale` ended some other way; Claude Code's own stop already reaches every
+  descendant. And a job must not be a descendant of any task when its starter
+  is stopped: **`job_start`'s reaper detaches by a double fork** (re-parented to
+  init), or stopping the `shale` that waits on a job would kill the job.
+- The box's curl is 8.5.0: `--variable` and `--expand-header` are there.
 
 ## Text
 
@@ -341,7 +350,8 @@ Reading calls give data and stop (`fail`) on a git error; changing calls are
 - `job_start(argv, {log, cwd, env})` → a job: **`log` required**; its own
   session, no terminal, stdin `/dev/null`, no death signal (it outlives
   `shale` by design). **A detached `shale` reaps it** (a small supervisor in
-  the same binary), writing the job's record to `<log>.job` (pid, pgid,
+  the same binary, detached by a double fork so it is no task's descendant:
+  stopping the `shale` that waits on a job must not kill the job), writing the job's record to `<log>.job` (pid, pgid,
   start time, and, once it ends, its exit code and when). No `secrets`: a
   detached job's log has nobody to scrub it.
 - **A job is found again by that path:** `job_alive`, `job_stop` and
@@ -505,9 +515,9 @@ common pitfall for Claude is that numbering gets out of whack."
 
 ## The order of work
 
-0. **The experiment** (the box's, one minute): how Claude Code ends a
-   timed-out Bash call; the box's curl version (8.3 or later for
-   `--variable`, for a later `http_get`). Results into this file.
+0. **The experiment: done** (see "Running a program": a timed-out call is
+   backgrounded, not killed; a stop is TERM then KILL to the whole tree; curl
+   8.5.0).
 1. **The core** (CC's, metal-vmm QUEUE 232, under way): split
    builtins_store.zig; long strings and block comments, fuzzed first; `edit`'s
    list form, capped; `last`; `fail`; regex `|`, `\b`, `nocase` and the cache
