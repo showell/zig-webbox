@@ -85,3 +85,76 @@ test "prelude: an error inside a prelude function says it is the prelude's" {
     try testing.expectEqual(script.diag.Class.store, s.class);
     try testing.expectEqualStrings("the prelude's count_all", s.function);
 }
+
+test "prelude: walk_upto walks as far as its reads allow, keeps what it is told to, and goes on from `more` to the rest (QUEUE 229)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    try f.tmp.dir.createDirPath(io, "data/chat/deep/deeper");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/deep/deeper/c.md", .data = "x" });
+    const whole = "local got = {} for e in walk_all(\"\", {}) do push(got, e.path) end print(join(got, \",\"))";
+    var all = f.run(whole, .{});
+    defer all.deinit();
+    try testing.expectEqual(@as(?script.Stop, null), all.stop);
+    // The runs below share the fixture's output buffer.
+    const want = try testing.allocator.dupe(u8, all.output[0 .. all.output.len - 1]);
+    defer testing.allocator.free(want);
+    // Plenty of reads: the whole walk, done.
+    try f.expectOutput("local p = walk_upto(\"\", {}, 1) print(#p.entries, p.done, p.more == \"\")", "7\ttrue\ttrue\n");
+    // For every budget of reads and every count to keep: the run finishes,
+    // keeps at least that many, and the parts it says to go on from add up
+    // to the whole walk, each entry once.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for (3..14) |reads| for (0..4) |keep| {
+        var start: []const u8 = "";
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(testing.allocator);
+        var turns: usize = 0;
+        var done = false;
+        while (true) : (turns += 1) {
+            if (turns == 40) return error.NeverEnds;
+            var src_buf: [512]u8 = undefined;
+            const src = try std.fmt.bufPrint(&src_buf, "local p = walk_upto(\"\", {{after = \"{s}\"}}, {d}) local paths = {{}} for e in p.entries do push(paths, e.path) end print(budget().reads >= {d}, p.done) print(p.more) print(join(paths, \",\"))", .{ start, keep, keep });
+            var r = f.run(src, .{ .reads = reads });
+            defer r.deinit();
+            errdefer std.debug.print("reads {d} keep {d} from \"{s}\":\n{s}\n", .{ reads, keep, start, r.output });
+            try testing.expectEqual(@as(?script.Stop, null), r.stop);
+            var lines = std.mem.splitScalar(u8, r.output, '\n');
+            const head = lines.next().?;
+            try testing.expect(std.mem.startsWith(u8, head, "true\t"));
+            const more = lines.next().?;
+            const paths = lines.next().?;
+            if (paths.len > 0) {
+                if (got.items.len > 0) try got.append(testing.allocator, ',');
+                try got.appendSlice(testing.allocator, paths);
+            }
+            if (std.mem.endsWith(u8, head, "true")) {
+                done = true;
+                break;
+            }
+            // A run with too few reads for any entry takes none: the
+            // budget, not the walk, is what ends it, and that is a fixed
+            // budget here.
+            if (std.mem.eql(u8, more, start)) break;
+            start = try arena.allocator().dupe(u8, more);
+        }
+        if (done) try testing.expectEqualStrings(want, got.items);
+        // Room for the walk's head, an entry and what is kept: it ends.
+        if (reads >= 4 + 2 + keep + 4) try testing.expect(done);
+    };
+}
+
+test "prelude: room_for says whether the budgets left hold what is asked, by budget()'s names" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(room_for({reads = 5}), room_for({reads = 10001}), room_for({}))", "true\tfalse\ttrue\n");
+    var r = f.run("print(room_for({reads = 5}), room_for({reads = 6}), room_for({}))", .{ .reads = 5 });
+    defer r.deinit();
+    try testing.expectEqualStrings("true\tfalse\ttrue\n", r.output);
+    var bad = f.run("print(room_for({readz = 1}))", .{});
+    defer bad.deinit();
+    try testing.expectEqual(script.diag.Class.index, bad.stop.?.class);
+}

@@ -10,9 +10,14 @@
 -- transcript's size when it was counted, then "<offset> <uid>". A cache
 -- whose size is not the transcript's is stale: the server recounts it at
 -- its next read.
+--
+-- A chat larger than the read budget is told in parts: the walk takes at
+-- most half the reads, the caches the rest, and the run says where the next
+-- one goes on (`resume after <path>`: set START to it).
 
 const MOST = 15
 const QUIET_DAYS = 90
+const START = ""
 
 -- The topic's label from its path's parts, or nil when it is no topic.
 function label(parts)
@@ -43,9 +48,16 @@ local quiet = {}
 local stale = {}
 local messages = 0
 local bytes = 0
-for e in walk_all("chat", {}) do
+local part = walk_upto("chat", {after = START}, budget().reads // 2)
+local last = START
+local resume = nil
+for e in part.entries do
   local topic = nil
   if e.kind == "file" then topic = label(split(e.path, "/")) end
+  if topic ~= nil and not room_for({reads = 1}) then
+    resume = last
+    break
+  end
   if topic ~= nil then
     local text = read_or(strip_suffix(e.path, ".md") .. ".count", nil)
     local c = {count = -1, size = -1}
@@ -64,7 +76,9 @@ for e in walk_all("chat", {}) do
     -- A modified time of 0 is one the host doesn't keep.
     if e.modified > 0 and e.modified < quiet_before then push(quiet, row) end
   end
+  last = e.path
 end
+if resume == nil and not part.done then resume = part.more end
 
 print("topics", #rows, "messages", messages, "bytes", human(bytes))
 print("")
@@ -76,3 +90,8 @@ if #quiet > 0 then print(table(quiet, {"topic", "messages", "changed"})) end
 print("")
 print("count caches that are stale or missing (the server recounts them): " .. #stale)
 if #stale > 0 then print(table(stale, {"topic", "bytes", "cache"})) end
+if resume ~= nil then
+  print("")
+  print("a part of the chat: the read budget ended it")
+  print("resume after " .. resume)
+end

@@ -121,7 +121,8 @@ const cases = [_]Case{
     .{ .src = "local x = read(\"none.txt\")", .line = 1, .column = 11, .class = .store, .message = "`read(\"none.txt\")`: not found (FileNotFound): `exists(p)` asks first" },
     .{ .src = "remove(\"none.txt\")", .line = 1, .column = 1, .class = .store, .message = "`remove(\"none.txt\")`: not found (FileNotFound): `exists(p)` asks first" },
     .{ .src = "local x = read(\"x\", -1)", .line = 1, .column = 11, .class = .argument, .message = "`read`: offset -1 is before the file's start" },
-    .{ .src = "local x = walk(\"\", {deep = 1})", .line = 1, .column = 11, .class = .argument, .message = "`walk` takes `depth`, `like`, `kind` and `after`, not `deep`" },
+    .{ .src = "local x = walk(\"\", {deep = 1})", .line = 1, .column = 11, .class = .argument, .message = "`walk` takes `depth`, `like`, `kind`, `after` and `keep_reads`, not `deep`" },
+    .{ .src = "local x = walk(\"\", {keep_reads = -1})", .line = 1, .column = 11, .class = .argument, .message = "`walk`: `keep_reads` of -1: it is a count of reads" },
     .{ .src = "local x = walk(\"\", {depth = 0})", .line = 1, .column = 11, .class = .argument, .message = "`walk`: a depth of 0: 1 is the folder's own entries" },
     .{ .src = "local x = count_in(\"x\", \"\")", .line = 1, .column = 11, .class = .argument, .message = "`count_in` of \"\" is an error: there is nothing to look for" },
     .{ .src = "mkdir(\"\")", .line = 1, .column = 1, .class = .argument, .message = "`mkdir(\"\")` would act on the whole root: a change needs a path of at least one part" },
@@ -201,10 +202,18 @@ const trail_cases = [_]TrailCase{
     .{ .src = "function r(n)\n  if n == 0 then return 1 // 0 end\n  return r(n - 1)\nend\nr(2)", .line = 2, .column = 27, .function = "r", .trail = &.{ .{ .function = "r", .line = 3, .column = 10 }, .{ .function = "r", .line = 3, .column = 10 }, .{ .function = "", .line = 5, .column = 1 } } },
     // A stop in the prelude, called from the script: the stop's own line is
     // the prelude's, and the trail says where the script called it.
-    .{ .src = "function f() return count_all(\"none\", \"x\") end\nf()", .line = 29, .column = 16, .function = "the prelude's count_all", .trail = &.{ .{ .function = "f", .line = 1, .column = 21 }, .{ .function = "", .line = 2, .column = 1 } } },
+    .{ .src = "function f() return count_all(\"none\", \"x\") end\nf()", .line = 0, .column = 16, .function = "the prelude's count_all", .trail = &.{ .{ .function = "f", .line = 1, .column = 21 }, .{ .function = "", .line = 2, .column = 1 } } },
     // At the top level: no trail.
     .{ .src = "local x = 1 // 0", .line = 1, .column = 13, .function = "", .trail = &.{} },
 };
+
+/// The 1-based line of the prelude that is `text`.
+fn preludeLine(text: []const u8) u32 {
+    var it = std.mem.splitScalar(u8, script.parse.prelude, '\n');
+    var n: u32 = 1;
+    while (it.next()) |l| : (n += 1) if (std.mem.eql(u8, l, text)) return n;
+    unreachable;
+}
 
 fn trailRoot(io: std.Io, tmp: *testing.TmpDir) ![]u8 {
     try tmp.dir.createDir(io, "data", .default_dir);
@@ -223,7 +232,9 @@ test "errors: a stop names every call between it and the top level, innermost fi
         var r = script.run(io, testing.allocator, root, c.src, .{}, 0, &out_buf);
         defer r.deinit();
         const s = r.stop orelse return error.TestUnexpectedResult;
-        try testing.expectEqual(c.line, s.line);
+        // Line 0: the prelude's own line of `count_all`'s stat, wherever
+        // the prelude has it.
+        try testing.expectEqual(if (c.line == 0) preludeLine("  local size = stat(path).size") else c.line, s.line);
         try testing.expectEqual(c.column, s.column);
         try testing.expectEqualStrings(c.function, s.function);
         try testing.expectEqual(c.trail.len, s.trail.len);
@@ -252,9 +263,10 @@ test "errors: the report keeps its first line, then says where each call was mad
     try script.report(&r, "seq 7", &w);
     const want =
         \\── effects (0) ──
-        \\── stopped at seq 7:29:16 (in `the prelude's count_all`): store: `stat("none")`: not found (FileNotFound): `exists(p)` asks first (
+        \\── stopped at seq 7:{d}:16 (in `the prelude's count_all`): store: `stat("none")`: not found (FileNotFound): `exists(p)` asks first (
     ;
-    try testing.expect(std.mem.startsWith(u8, w.buffered(), want));
+    var want_buf: [512]u8 = undefined;
+    try testing.expect(std.mem.startsWith(u8, w.buffered(), try std.fmt.bufPrint(&want_buf, want, .{preludeLine("  local size = stat(path).size")})));
     try testing.expect(std.mem.endsWith(u8, w.buffered(), " steps)\n   called from seq 7:1:21 (in `f`)\n   called from seq 7:2:1\n"));
 }
 

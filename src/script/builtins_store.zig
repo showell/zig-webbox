@@ -404,7 +404,16 @@ const WalkOptions = struct {
     /// Where an earlier call stopped: the walk goes on after this path, in
     /// its order, whether the path is still there or not.
     after: ?[]const u8 = null,
+    /// **THE READS TO KEEP** (metal-vmm QUEUE 229, chunk 2): the part ends,
+    /// with its `more` entry, before an entry could take the run's reads
+    /// left below this, so a script that walks as far as its budget allows
+    /// still has the reads to say what it found. Counts only: deterministic.
+    keep_reads: ?u64 = null,
 };
+
+/// The most reads one entry of a walk takes: its stat, and its listing if
+/// it is a folder walked into.
+const entry_reads = 2;
 
 fn walkOptions(run: *Run, pos: ast.Pos, v: Value) Error!WalkOptions {
     const m = try bi.mapArg(run, pos, .walk, v);
@@ -418,10 +427,14 @@ fn walkOptions(run: *Run, pos: ast.Pos, v: Value) Error!WalkOptions {
             o.like = try bi.stringArg(run, pos, .walk, x, "its `like`");
         } else if (std.mem.eql(u8, k, "after")) {
             o.after = try bi.stringArg(run, pos, .walk, x, "its `after`");
+        } else if (std.mem.eql(u8, k, "keep_reads")) {
+            const n = try bi.intArg(run, pos, .walk, x, "its `keep_reads`");
+            if (n < 0) return run.fail(pos, .argument, "`walk`: `keep_reads` of {d}: it is a count of reads", .{n});
+            o.keep_reads = @intCast(n);
         } else if (std.mem.eql(u8, k, "kind")) {
             const s = try bi.stringArg(run, pos, .walk, x, "its `kind`");
             o.kind = std.meta.stringToEnum(store.Kind, s) orelse return run.fail(pos, .argument, "`walk`: a kind of \"{s}\": \"file\", \"directory\" or \"other\"", .{s});
-        } else return run.fail(pos, .argument, "`walk` takes `depth`, `like`, `kind` and `after`, not `{s}`", .{k});
+        } else return run.fail(pos, .argument, "`walk` takes `depth`, `like`, `kind`, `after` and `keep_reads`, not `{s}`", .{k});
     }
     return o;
 }
@@ -439,6 +452,19 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .walk, args[0], true);
     const o: WalkOptions = if (args.len > 1) try walkOptions(run, pos, args[1]) else .{};
     const a = run.alloc;
+    // **NO ROOM TO START** (`keep_reads`): the walk's own stat and listing,
+    // the listings that put it back where `after` left it, and one entry,
+    // past what is kept: none of it is read, and the part is its `more`
+    // entry alone, where it was.
+    if (o.keep_reads) |keep| {
+        const head = 2 + if (o.after) |after| std.mem.count(u8, after, "/") + 1 else 0;
+        if (run.budgets.reads -| run.reads < keep +| head +| entry_reads) {
+            const out = try run.newTable(pos);
+            out.kind = .list;
+            out.list.append(a, try moreEntry(run, pos, o.after orelse "")) catch return run.oom(pos);
+            return .{ .table = out };
+        }
+    }
     try countRead(run, pos);
     const st = (store.statOrNull(run.io, a, p.full) catch |e| return storeFailed(run, pos, .walk, p.rel, e)) orelse return storeFailed(run, pos, .walk, p.rel, error.FileNotFound);
     if (st.kind != .directory) return storeFailed(run, pos, .walk, p.rel, error.NotDir);
@@ -455,16 +481,12 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             _ = levels.pop();
             continue;
         }
-        // **AT MOST `call_entries` A CALL** (QUEUE 211, the caps): with
-        // more to come, the list ends with where to go on from.
-        if (considered == run.budgets.call_entries) {
-            const m = try run.newTable(pos);
-            m.map.put(a, "path", .{ .string = last }) catch return run.oom(pos);
-            m.map.put(a, "kind", .{ .string = "more" }) catch return run.oom(pos);
-            m.map.put(a, "size", .{ .int = 0 }) catch return run.oom(pos);
-            m.map.put(a, "modified", .{ .int = 0 }) catch return run.oom(pos);
-            m.kind = .map;
-            out.list.append(a, .{ .table = m }) catch return run.oom(pos);
+        // **AT MOST `call_entries` A CALL** (QUEUE 211, the caps), and no
+        // entry past the reads it is to keep (`keep_reads`): with more to
+        // come, the list ends with where to go on from.
+        const kept_back = if (o.keep_reads) |keep| run.budgets.reads -| run.reads < keep +| entry_reads else false;
+        if (considered == run.budgets.call_entries or kept_back) {
+            out.list.append(a, try moreEntry(run, pos, if (considered == 0) o.after orelse "" else last)) catch return run.oom(pos);
             break;
         }
         considered += 1;
@@ -522,6 +544,19 @@ fn walk(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         }
     }
     return .{ .table = out };
+}
+
+/// A walk's last entry when there is more: `{path, kind = "more"}`, where
+/// the next part goes on after.
+fn moreEntry(run: *Run, pos: ast.Pos, path: []const u8) Error!Value {
+    const a = run.alloc;
+    const m = try run.newTable(pos);
+    m.map.put(a, "path", .{ .string = path }) catch return run.oom(pos);
+    m.map.put(a, "kind", .{ .string = "more" }) catch return run.oom(pos);
+    m.map.put(a, "size", .{ .int = 0 }) catch return run.oom(pos);
+    m.map.put(a, "modified", .{ .int = 0 }) catch return run.oom(pos);
+    m.kind = .map;
+    return .{ .table = m };
 }
 
 // ── changing ─────────────────────────────────────────────────────────────

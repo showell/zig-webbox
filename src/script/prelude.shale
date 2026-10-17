@@ -23,6 +23,40 @@ function walk_all(path, opts)
   end
 end
 
+-- **AS FAR AS THE READS ALLOW** (metal-vmm QUEUE 229): every entry `walk`
+-- gives from `opts.after` on, a part at a time, until the walk ends or
+-- its reads would leave fewer than `keep` for the rest of the script:
+-- `{entries, more, done}`. Not `done`, `more` is the path a later walk goes
+-- on after (`opts.after = more`), and every entry up to it is in
+-- `entries`. `opts` is not changed.
+function walk_upto(path, opts, keep)
+  local o = {after = ""}
+  for k in keys(opts) do o[k] = opts[k] end
+  o.keep_reads = keep
+  local got = {}
+  while true do
+    local more = nil
+    for e in walk(path, o) do
+      if e.kind == "more" then more = e.path else push(got, e) end
+    end
+    if more == nil then return {entries = got, more = "", done = true} end
+    -- A part that took nothing had no room to: the reads are what is kept.
+    if more == o.after then return {entries = got, more = more, done = false} end
+    o.after = more
+  end
+end
+
+-- Whether what is left of the budgets holds `need`, a map of `budget()`'s
+-- names (`{reads = 2, read_bytes = 4096}`): the guard before work a
+-- budget would stop half done.
+function room_for(need)
+  local left = budget()
+  for k in keys(need) do
+    if left[k] < need[k] then return false end
+  end
+  return true
+end
+
 -- How many times `s` occurs in the file, a part at a time: one scan brings
 -- at most the call-bytes cap (1 MiB). A stat, then a scan a part.
 function count_all(path, s)

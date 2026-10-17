@@ -543,6 +543,11 @@ the errors column says the rest.
   or "" for the start). The walk goes on after it in its own order, the
   path there or not: each folder on it is listed again, and the walk
   takes the first name past it. In parts, a walk gives each entry once.
+- `keep_reads`: the reads to keep for the rest of the run (QUEUE 229).
+  The part ends with its `more` entry before an entry could leave fewer:
+  an entry takes at most two (its stat, and a folder's listing). With no
+  room for the walk's own listings and one entry, it reads nothing and
+  gives only `{kind = "more"}` at `after`. The prelude's `walk_upto` uses it.
 
 An entry that `like` or `kind` leaves out is never stat'ed.
 
@@ -654,6 +659,27 @@ own, from its line on.
 | `walk_all(p, opts)` | every entry `walk(p, opts)` gives, across all its parts, the `more` entries left out; `opts` is not changed | `walk`'s, a part at a time |
 | `count_all(p, s)` | `s`'s occurrences in the whole file | a stat, then a `count_in` a megabyte |
 | `find_next(p, s, at)` | the 0-based offset of the first `s` at or after `at`, or nil | a `find_in` from `at`; a stat and more parts only when that finds nothing |
+| `walk_upto(p, opts, keep)` | `{entries, more, done}`: every entry from `opts.after` on, as `walk_all`, until the walk ends (`done`, `more` is "") or its reads would leave fewer than `keep` (not `done`: `more` is the path the next walk goes on after) | `walk`'s, a part at a time, with `keep_reads = keep` |
+| `room_for(need)` | whether what is left of the budgets holds `need`, a map of `budget()`'s names: `room_for({reads = 3, read_bytes = n})` | a `budget()` |
+
+**A walk past what the budget walks, told in parts** (metal-vmm QUEUE
+229): `walk_upto` walks as far as the reads allow, keeping `keep` for what
+the script does next, and says where it stopped; the script prints what it
+found and `resume after <path>`, and a later run starts from there (`const
+START`, given to `opts.after`). Work done an entry at a time guards each
+with `room_for` and resumes after the last entry it finished. The
+cookbook's walks all do this:
+
+```shale
+const START = ""
+local part = walk_upto("chat", {kind = "file", after = START}, 1)
+local bytes = 0
+for e in part.entries do bytes = bytes + e.size end
+print(#part.entries, bytes, part.done)
+if not part.done then print("resume after " .. part.more) end
+-- prints:
+-- 10<TAB>4780<TAB>true
+```
 
 **The walk in parts, in full,** as `walk_all` does it: each call
 considers at most 256 entries and ends its part with `{kind = "more"}`,
@@ -819,12 +845,12 @@ budgets, and changes nothing.
 
 | script | what it does | how it keeps to the budgets |
 |---|---|---|
-| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | the prelude's `walk_all`: a read a folder and an entry |
-| `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars |
-| `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_all`, a transcript of any size, until the read budget has no room for the next; the rest are listed by size |
-| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_next`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget and says how far it got |
+| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | the prelude's `walk_upto`: a read a folder and an entry, as far as the reads go, then `resume after` |
+| `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars; the walk takes at most half the reads, each cache `room_for` one, then `resume after` |
+| `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_all`, a transcript of any size, until the read budget has no room for the next; the rest are listed by size; past the reads, `resume after` |
+| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_next`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget, says how far it got and where to resume |
 | `topics.shale` | every topic with its message count | `count_in` of `MSG_` a transcript, `count_all` past the cap: none held |
-| `big_files.shale` | files over a size | `walk_all`, files only |
+| `big_files.shale` | files over a size | `walk_upto`, files only, then `resume after` |
 | `delete_topic.shale` | one topic deleted, as `chat_retire.zig` does: its transcript, sidecars and uploads | a change each |
 | `first_change.shale` | one small change, a folder and a file, easy to check and to undo | |
 
