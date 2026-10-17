@@ -925,3 +925,36 @@ test "builtins: re_find's alternatives, \\b and nocase (the design, final; QUEUE
     // The cache keeps a pattern's two compilations apart.
     try f.expectOutput("print(re_match(\"A\", \"a\"), re_match(\"A\", \"a\", {nocase = true}), re_match(\"A\", \"a\"))", "false\ttrue\tfalse\n");
 }
+
+test "builtins: an edit's diff in full, or one line a change when the run says `summary` (metal-vmm QUEUE 234, 1)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    for (1..21) |i| try body.print(testing.allocator, "line {d:0>2}\n", .{i});
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/n.txt", .data = body.items });
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator, "local es = {}\n");
+    // Each within its line: twenty hunks.
+    for (1..21) |i| try src.print(testing.allocator, "push(es, {{old = \"line {d:0>2}\", new = \"LINE {d:0>2}\"}})\n", .{ i, i });
+    try src.appendSlice(testing.allocator, "print(edit(\"n.txt\", es))\n");
+    var full = script.runWith(f.threaded.io(), testing.allocator, f.root, src.items, .{}, 0, &out_buf, .{ .mode = .dry_run });
+    defer full.deinit();
+    try testing.expect(full.stop == null);
+    const full_bytes = full.output.len;
+    try testing.expect(std.mem.startsWith(u8, full.output, "--- a/n.txt\n+++ b/n.txt\n@@ -1,1 +1,1 @@\n-line 01\n+LINE 01\n"));
+    var short = script.runWith(f.threaded.io(), testing.allocator, f.root, src.items, .{}, 0, &out_buf, .{ .mode = .dry_run, .diffs = .summary });
+    defer short.deinit();
+    try testing.expect(short.stop == null);
+    try testing.expectEqualStrings("edit n.txt: 20 hunks, -20 +20 lines\n20\n", short.output);
+    try testing.expect(short.output.len * 10 < full_bytes);
+    // The hunk walk is charged either way (charge_test's `edit` case); only
+    // the writes' charge goes.
+    try testing.expect(short.steps < full.steps);
+    // One hunk, one line.
+    var one = script.runWith(f.threaded.io(), testing.allocator, f.root, "edit(\"n.txt\", \"line 03\\nline 04\\n\", \"x\\n\")", .{}, 0, &out_buf, .{ .mode = .dry_run, .diffs = .summary });
+    defer one.deinit();
+    try testing.expectEqualStrings("edit n.txt: 1 hunk, -3 +2 lines\n", one.output);
+}

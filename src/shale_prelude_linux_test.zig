@@ -141,6 +141,32 @@ test "linux prelude: edits_all checks every file's edits before it writes any" {
     try testing.expectEqualStrings("thrEE\n", try t.file("b.txt"));
 }
 
+test "linux prelude: edits_all checks a word edit as edit applies it, so the next is checked against its result (QUEUE 234, 0)" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("w.txt", "foo foobar\n");
+    try t.put("x.txt", "keep\n");
+    // The second edit is against the first's result: it holds.
+    var r = t.run("print(edits_all({{\"w.txt\", {{old = \"foo\", new = \"baz\", word = true}, {old = \"baz foobar\", new = \"ok\"}}}}))", .atomic);
+    defer r.deinit();
+    try testing.expect(r.stop == null);
+    try testing.expectEqualStrings("ok\n", try t.file("w.txt"));
+    // A word that is only inside longer words is not there: refused before
+    // any file is written.
+    try t.put("w.txt", "foobar\n");
+    try t.expectStop("edits_all({{\"x.txt\", {{old = \"keep\", new = \"kept\"}}}, {\"w.txt\", {{old = \"foo\", new = \"baz\", word = true}}}})", .atomic, .fail, "`edits_all`: w.txt's edit 1: `old` is not there as a whole word; nothing written");
+    try testing.expectEqualStrings("keep\n", try t.file("x.txt"));
+    // Twice as a word, without `all`: refused; with it, both.
+    try t.put("w.txt", "a foo b foo foox\n");
+    try t.expectStop("edits_all({{\"w.txt\", {{old = \"foo\", new = \"z\", word = true}}}})", .atomic, .fail, "`old` is there 2 times as a whole word");
+    var all = t.run("print(edits_all({{\"w.txt\", {{old = \"foo\", new = \"z\", word = true, all = true}, {old = \"z b z foox\", new = \"done\"}}}}))", .atomic);
+    defer all.deinit();
+    try testing.expect(all.stop == null);
+    try testing.expect(std.mem.endsWith(u8, all.output, "\n3\n"));
+    try testing.expectEqualStrings("a done\n", try t.file("w.txt"));
+}
+
 test "linux prelude: the repo's and the user's preludes come after it, SHALE_PRELUDE pinning the user's" {
     var t: T = undefined;
     try init(&t);

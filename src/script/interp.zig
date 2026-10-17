@@ -84,6 +84,11 @@ pub const Host = struct {
     call: *const fn (ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []const Value) Error!Value,
 };
 
+/// **HOW A CHANGE'S DIFF IS PRINTED** (metal-vmm QUEUE 234): in `full`,
+/// the route's and metal's way and the CLI's with `--verbose`; or one line
+/// a change, `summary`, the CLI's otherwise.
+pub const Diffs = enum { full, summary };
+
 /// **THE ONE HOOK ON PATHS**: called first by every path argument, when
 /// set; the OS path a script's path names, or null for the root's rules.
 /// What a mount is (`runs:x`) is the host's. Metal sets none.
@@ -133,6 +138,8 @@ pub const Run = struct {
     /// The host's door and hook, where it has them (`Host`, `PathHook`).
     host: ?Host = null,
     path_hook: ?PathHook = null,
+    /// How a change's diff is printed (`Diffs`).
+    diffs: Diffs = .full,
     /// The programs this run's host has run for it: the host's cap is
     /// counted here, in the run, so each engine of the gate counts its own.
     host_runs: u32 = 0,

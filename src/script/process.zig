@@ -54,6 +54,9 @@ pub const Options = struct {
     /// The preludes after the core's, in order (the Linux host's, a
     /// repo's, a user's): none on metal.
     preludes: []const parse.Prelude = &.{},
+    /// How a change's diff is printed: in full unless the host says
+    /// `summary` (the Linux CLI without `--verbose`).
+    diffs: interp.Diffs = .full,
 };
 
 pub const State = enum { running, finished, stopped };
@@ -144,6 +147,7 @@ pub const Process = struct {
             .args = options.args,
             .host = options.host,
             .path_hook = options.path_hook,
+            .diffs = options.diffs,
         };
         p.preludes = options.preludes;
         p.ready(source) catch {};

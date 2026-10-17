@@ -117,7 +117,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const out = try gpa.alloc(u8, c.budgets.output_bytes);
     defer gpa.free(out);
-    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .mode = c.mode, .args = c.args, .host = seam.host, .path_hook = seam.path_hook, .preludes = preludes });
+    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .mode = c.mode, .args = c.args, .host = seam.host, .path_hook = seam.path_hook, .preludes = preludes, .diffs = if (c.verbose) .full else .summary });
     defer result.deinit();
 
     var out_buf: [4096]u8 = undefined;

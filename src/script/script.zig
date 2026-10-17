@@ -204,6 +204,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .args = options.args,
         .host = options.host,
         .path_hook = options.path_hook,
+        .diffs = options.diffs,
     };
     defer r.deinit();
     // The VM's runs went through its Process above: here, the walker's.

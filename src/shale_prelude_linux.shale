@@ -180,26 +180,66 @@ function create(p, text)
   replace(p, text)
 end
 
+-- Whether `c` (one byte, or "" at an end) is a word's, as `edit`'s
+-- `word` reads it: a letter, a digit or `_`.
+function edit_word_byte(c)
+  return c ~= "" and re_find(c, "^[A-Za-z0-9_]$") ~= nil
+end
+
+-- `text` with each whole-word `old` replaced by `new`, as `edit`'s
+-- `{word = true, all = true}` does: `{text, n}`.
+function edit_words(text, old, new)
+  local out = {}
+  local rest = text
+  local before = ""
+  local n = 0
+  while true do
+    local at = find(rest, old)
+    if at == nil then break end
+    local prev = before
+    if at > 1 then prev = sub(rest, at - 1, at - 1) end
+    local next = sub(rest, at + #old, at + #old)
+    push(out, sub(rest, 1, at - 1))
+    if not edit_word_byte(prev) and not edit_word_byte(next) then
+      push(out, new)
+      n = n + 1
+    else
+      push(out, old)
+    end
+    before = sub(old, #old, #old)
+    rest = sub(rest, at + #old)
+  end
+  push(out, rest)
+  return {text = join(out, ""), n = n}
+end
+
 -- **EDITS TO SEVERAL FILES** (`{{p, {{old, new[, all][, word]}, ...}}, ...}`):
 -- every file's edits checked against it first, in sequence as `edit`'s
 -- list form applies them, and nothing written unless all hold; then each
 -- file is edited, atomically. The set is not atomic: a file changed
 -- between the check and its edit stops there, the files before it
--- written. A `word` edit is checked for its `old` being there at all;
--- `edit` holds it to whole words. The replacements made in all.
+-- written. A `word` edit is checked as `edit` applies it, whole words
+-- only, so the edits after it are checked against its result. The
+-- replacements made in all.
 function edits_all(list)
   for item in list do
     local text = read(item[1])
     local j = 0
     for e in item[2] do
       j = j + 1
-      local times = #split(text, e.old) - 1
       local where = "`edits_all`: " .. item[1] .. "'s edit " .. j .. ": "
-      if times == 0 then fail(where .. "`old` is not there; nothing written") end
       local all = get(e, "all", false)
-      local word = get(e, "word", false)
-      if times > 1 and not all and not word then fail(where .. "`old` is there " .. times .. " times, and the edit does not say `all`; nothing written") end
-      if not word then text = substitute(text, e.old, e.new) end
+      if get(e, "word", false) then
+        local r = edit_words(text, e.old, e.new)
+        if r.n == 0 then fail(where .. "`old` is not there as a whole word; nothing written") end
+        if r.n > 1 and not all then fail(where .. "`old` is there " .. r.n .. " times as a whole word, and the edit does not say `all`; nothing written") end
+        text = r.text
+      else
+        local times = #split(text, e.old) - 1
+        if times == 0 then fail(where .. "`old` is not there; nothing written") end
+        if times > 1 and not all then fail(where .. "`old` is there " .. times .. " times, and the edit does not say `all`; nothing written") end
+        text = substitute(text, e.old, e.new)
+      end
     end
   end
   local n = 0
