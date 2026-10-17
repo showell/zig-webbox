@@ -34,6 +34,7 @@ const free_space = @import("webbox").free_space;
 const linux_config = @import("linux_config.zig");
 const linux_durable = @import("linux_durable.zig");
 const linux_fetch = @import("linux_fetch.zig");
+const linux_writes = @import("linux_writes.zig");
 
 /// The environment variables a host reads, named whole by the application,
 /// so a search for one finds where it is read.
@@ -301,11 +302,11 @@ pub fn Server(comptime S: type) type {
             // The socket's own writer, unbuffered, under the one every byte
             // goes through: it syncs the writes before it (linux_durable.zig).
             var socket_w = stream.writer(io, &.{});
-            // Every write to the socket under a deadline (`Sent`).
-            var sent: Sent = .{ .to = &socket_w.interface, .stream = stream, .io = io };
+            // Every write to the socket under a deadline (`linux_writes.Sent`).
+            var sent: linux_writes.Sent = .{ .to = &socket_w.interface, .stream = stream, .io = io };
             var sw: linux_durable.Writer = .init(&sent.interface, &durable, &write_buf);
-            // An answer held in memory while its handler has the turn (`Hold`).
-            var hold: Hold = .{ .to = &sw.interface, .gpa = alloc };
+            // An answer held in memory while its handler has the turn (`linux_writes.Hold`).
+            var hold: linux_writes.Hold = .{ .to = &sw.interface, .gpa = alloc };
             defer hold.list.deinit(alloc);
             // And above it, what each answer's head says of the connection.
             var said: HeadWatch = .{ .to = &hold.interface };
@@ -313,7 +314,7 @@ pub fn Server(comptime S: type) type {
             var conn: Connection = .{};
             defer conn.letGo();
             // A write shut at its deadline ends the connection, counted
-            // (`writes_shut`), not logged as a connection's error.
+            // (`linux_writes.writes_shut`), not logged as a connection's error.
             while (serveOne(io, alloc, hub, stream, &server, &sr.interface, &sw, &said, &conn, &hold, &sent) catch |e| {
                 if (sent.shut) return;
                 return e;
@@ -322,7 +323,7 @@ pub fn Server(comptime S: type) type {
 
         /// One request on the connection, answered: whether the connection
         /// serves another.
-        fn serveOne(io: std.Io, alloc: std.mem.Allocator, hub: *bus.Hub, stream: net.Stream, server: *std.http.Server, socket_r: *std.Io.Reader, sw: *linux_durable.Writer, said: *HeadWatch, conn: *Connection, hold: *Hold, sent: *Sent) !bool {
+        fn serveOne(io: std.Io, alloc: std.mem.Allocator, hub: *bus.Hub, stream: net.Stream, server: *std.http.Server, socket_r: *std.Io.Reader, sw: *linux_durable.Writer, said: *HeadWatch, conn: *Connection, hold: *linux_writes.Hold, sent: *linux_writes.Sent) !bool {
             // The socket again, wherever the last request's body was read from.
             server.reader.in = socket_r;
             var arena = std.heap.ArenaAllocator.init(alloc);
@@ -435,7 +436,7 @@ pub fn Server(comptime S: type) type {
             // of 213: a client that pipelined answers and read none blocked
             // a write in the turn, and the whole site with it): the answer is
             // held in memory while the handler has the turn, and goes out
-            // after, on this connection's own task. Past `held_most` it is
+            // after, on this connection's own task. Past `linux_writes.held_most` it is
             // written in the turn, each write under the turn's deadline.
             hold.begin();
             sent.in_turn = true;
@@ -480,8 +481,8 @@ pub fn Server(comptime S: type) type {
                 // unmoved past the deadline has its socket shut, so it fails
                 // and the stream ends. A stream with no watcher is not
                 // served without one.
-                var watched: WriteWatch = .{ .stream = stream, .ms = write_deadline_for_test_ms orelse kept_write_deadline_ms };
-                const watcher = std.Thread.spawn(.{}, WriteWatch.run, .{ &watched, io }) catch {
+                var watched: linux_writes.WriteWatch = .{ .stream = stream, .ms = linux_writes.write_deadline_for_test_ms orelse linux_writes.kept_write_deadline_ms };
+                const watcher = std.Thread.spawn(.{}, linux_writes.WriteWatch.run, .{ &watched, io }) catch {
                     std.debug.print("{s}: a kept stream's writes could not be watched; the stream ends\n", .{host_name});
                     bus.drop(hub, kept);
                     return false;
@@ -497,246 +498,6 @@ pub fn Server(comptime S: type) type {
         }
     };
 }
-
-/// **A KEPT STREAM'S WRITE HAS A DEADLINE** (metal-vmm QUEUE 198.6): a
-/// reader that stays connected and stops reading blocked `serveKept`'s
-/// write for good, and the stream ended only when a newer one displaced it.
-/// A send taking no byte for this long fails, and the stream ends (as
-/// metal's does after `idle_timeout_ms` with nothing taken).
-pub const kept_write_deadline_ms: u64 = 30_000;
-pub var turn_write_deadline_for_test_ms: ?u64 = null;
-
-/// **AN ANSWER'S WRITES HAVE DEADLINES** (the box's cold review of 213): a
-/// write in the turn (an answer past `held_most`) that takes no byte for
-/// `turn_write_deadline_ms` has its socket shut, so the turn is held up by
-/// one stuck client for that long at most; one after the turn, for
-/// `answer_write_deadline_ms`, as a kept stream's (it holds only its own
-/// connection, but a client that never reads must not hold it for good).
-pub const turn_write_deadline_ms: u64 = 5_000;
-pub const answer_write_deadline_ms: u64 = kept_write_deadline_ms;
-pub var answer_write_deadline_for_test_ms: ?u64 = null;
-/// Writes whose socket was shut at their deadline, for tests and reports.
-pub var writes_shut: std.atomic.Value(u64) = .init(0);
-
-/// **THE MOST AN ANSWER HOLDS IN MEMORY** while its handler has the turn:
-/// every ordinary page; a larger answer is written in the turn, under the
-/// turn's write deadline.
-pub const held_most: usize = 1024 * 1024;
-
-/// An answer held while its handler has the turn, and written after.
-const Hold = struct {
-    to: *std.Io.Writer,
-    gpa: std.mem.Allocator,
-    holding: bool = false,
-    /// Past `held_most`: what was held has been written, and the rest goes
-    /// straight on.
-    spilled: bool = false,
-    list: std.ArrayList(u8) = .empty,
-    interface: std.Io.Writer = .{ .buffer = &.{}, .vtable = &vtable },
-
-    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .sendFile = sendFile, .flush = flush };
-
-    fn begin(h: *Hold) void {
-        h.holding = true;
-        h.spilled = false;
-    }
-
-    /// What was held, written and flushed; holding no more. Its memory
-    /// given back, so a kept connection holds none between requests.
-    fn release(h: *Hold) std.Io.Writer.Error!void {
-        h.holding = false;
-        defer h.list.clearAndFree(h.gpa);
-        if (h.list.items.len > 0) try h.to.writeAll(h.list.items);
-        try h.to.flush();
-    }
-
-    fn spill(h: *Hold) std.Io.Writer.Error!void {
-        h.spilled = true;
-        try h.to.writeAll(h.list.items);
-        h.list.clearAndFree(h.gpa);
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const h: *Hold = @alignCast(@fieldParentPtr("interface", w));
-        if (!h.holding or h.spilled) return h.to.writeSplat(data, splat);
-        var total: usize = 0;
-        for (data[0 .. data.len - 1]) |d| total += d.len;
-        total += data[data.len - 1].len * splat;
-        if (h.list.items.len + total > held_most) {
-            try h.spill();
-            return h.to.writeSplat(data, splat);
-        }
-        h.list.ensureUnusedCapacity(h.gpa, total) catch {
-            try h.spill();
-            return h.to.writeSplat(data, splat);
-        };
-        for (data[0 .. data.len - 1]) |d| h.list.appendSliceAssumeCapacity(d);
-        for (0..splat) |_| h.list.appendSliceAssumeCapacity(data[data.len - 1]);
-        return total;
-    }
-
-    fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
-        const h: *Hold = @alignCast(@fieldParentPtr("interface", w));
-        // Held, a file is read into memory by `drain`.
-        if (h.holding and !h.spilled) return error.Unimplemented;
-        return h.to.sendFile(file_reader, limit);
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const h: *Hold = @alignCast(@fieldParentPtr("interface", w));
-        if (h.holding and !h.spilled) return;
-        return h.to.flush();
-    }
-};
-
-/// The socket's writes, each under its deadline (`watchWrite`).
-const Sent = struct {
-    to: *std.Io.Writer,
-    stream: net.Stream,
-    io: Io,
-    /// Whether this connection's handler has the turn: its writes then
-    /// hold up the site, and have the turn's shorter deadline.
-    in_turn: bool = false,
-    /// Whether the watchdog shut the socket at a write's deadline.
-    shut: bool = false,
-    interface: std.Io.Writer = .{ .buffer = &.{}, .vtable = &vtable },
-
-    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .sendFile = sendFile, .flush = flush };
-
-    fn deadline(s: *const Sent) u64 {
-        return if (s.in_turn) turn_write_deadline_for_test_ms orelse turn_write_deadline_ms else answer_write_deadline_for_test_ms orelse answer_write_deadline_ms;
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
-        const t = watchWrite(s.io, s.stream, s.deadline());
-        defer if (!doneWrite(s.io, t)) {
-            s.shut = true;
-        };
-        return s.to.writeSplat(data, splat);
-    }
-
-    fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
-        const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
-        const t = watchWrite(s.io, s.stream, s.deadline());
-        defer if (!doneWrite(s.io, t)) {
-            s.shut = true;
-        };
-        return s.to.sendFile(file_reader, limit);
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
-        return s.to.flush();
-    }
-};
-
-/// **THE WRITES UNDER WAY**, each with when it began and its deadline, and
-/// the one watchdog that shuts a socket whose write is past it. A table, not
-/// a thread a connection: one thread watches them all.
-const writes_most = 256;
-var writes: [writes_most]?struct { stream: net.Stream, since_ms: i64, deadline_ms: u64, ticket: u64 } = @splat(null);
-var writes_lock: Io.Mutex = .init;
-var writes_tickets: u64 = 0;
-var watchdog_started: std.atomic.Value(bool) = .init(false);
-
-const WriteTicket = struct { slot: ?usize, ticket: u64 };
-
-fn nowMs(io: Io) i64 {
-    return @intCast(@divTrunc(Io.Clock.now(.awake, io).nanoseconds, std.time.ns_per_ms));
-}
-
-fn watchWrite(io: Io, stream: net.Stream, deadline_ms: u64) WriteTicket {
-    if (!watchdog_started.swap(true, .acq_rel)) {
-        const t = std.Thread.spawn(.{}, writeWatchdog, .{io}) catch {
-            watchdog_started.store(false, .release);
-            return .{ .slot = null, .ticket = 0 };
-        };
-        t.detach();
-    }
-    writes_lock.lockUncancelable(io);
-    defer writes_lock.unlock(io);
-    writes_tickets += 1;
-    for (&writes, 0..) |*w, i| if (w.* == null) {
-        w.* = .{ .stream = stream, .since_ms = nowMs(io), .deadline_ms = deadline_ms, .ticket = writes_tickets };
-        return .{ .slot = i, .ticket = writes_tickets };
-    };
-    // A full table: the write goes unwatched, as every write did before.
-    return .{ .slot = null, .ticket = 0 };
-}
-
-/// Whether the write ended before its deadline: false when the watchdog
-/// took it out of the table and shut its socket.
-fn doneWrite(io: Io, t: WriteTicket) bool {
-    const i = t.slot orelse return true;
-    writes_lock.lockUncancelable(io);
-    defer writes_lock.unlock(io);
-    if (writes[i]) |w| if (w.ticket == t.ticket) {
-        writes[i] = null;
-        return true;
-    };
-    return false;
-}
-
-fn writeWatchdog(io: Io) void {
-    while (true) {
-        sleepMs(io, 50) catch {};
-        const now = nowMs(io);
-        writes_lock.lockUncancelable(io);
-        for (&writes) |*slot| if (slot.*) |w| if (now - w.since_ms >= @as(i64, @intCast(w.deadline_ms))) {
-            // Its write fails, its handler or task ends, its turn (if it
-            // holds it) is let go.
-            w.stream.shutdown(io, .both) catch {};
-            _ = writes_shut.fetchAdd(1, .acq_rel);
-            slot.* = null;
-        };
-        writes_lock.unlock(io);
-    }
-}
-pub var write_deadline_for_test_ms: ?u64 = null;
-
-/// A kept stream's watcher: it samples the write count a quarter-deadline at
-/// a time, and a write under way (odd) that has not moved for the whole
-/// deadline has its socket shut. Not SO_SNDTIMEO: std's Io takes the EAGAIN
-/// it gives for a programmer's error.
-pub var writes_ended_by_deadline: std.atomic.Value(u64) = .init(0);
-const WriteWatch = struct {
-    stream: net.Stream,
-    ms: u64,
-    writes: std.atomic.Value(u64) = .init(0),
-    /// Woken as well as stored: the watcher waits on it, so the stream's end
-    /// is not held for the rest of a step (a quarter of the deadline).
-    state: std.atomic.Value(State) = .init(.watching),
-
-    const State = enum(u32) { watching, ended };
-
-    fn end(self: *WriteWatch, io: Io) void {
-        self.state.store(.ended, .release);
-        io.futexWake(State, &self.state.raw, 1);
-    }
-
-    fn run(self: *WriteWatch, io: Io) void {
-        const step = @max(self.ms / 4, 10);
-        var last = self.writes.load(.acquire);
-        var still: u64 = 0;
-        while (self.state.load(.acquire) == .watching) {
-            io.futexWaitTimeout(State, &self.state.raw, .watching, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(@intCast(step)) } }) catch {};
-            if (self.state.load(.acquire) == .ended) return;
-            const now = self.writes.load(.acquire);
-            if (now != last or now % 2 == 0) {
-                last = now;
-                still = 0;
-                continue;
-            }
-            still += step;
-            if (still >= self.ms) {
-                _ = writes_ended_by_deadline.fetchAdd(1, .acq_rel);
-                self.stream.shutdown(io, .both) catch {};
-                return;
-            }
-        }
-    }
-};
 
 /// A connection there is no task to serve: a 503 written straight to it (a
 /// few bytes, which the socket's own buffer takes), and closed.
@@ -1424,7 +1185,7 @@ fn linuxFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const host_facts.Fact
     // **WHAT DURABILITY COST** (198.6): a sync that failed is a response
     // that went out with the writes before it not yet on the disk.
     try facts.append(alloc, .{ .label = "data syncs failed", .value = try std.fmt.allocPrint(alloc, "{d} (each a response sent before the writes it followed were durable)", .{durable.failures.load(.acquire)}) });
-    try facts.append(alloc, .{ .label = "kept streams ended by a stalled write", .value = try std.fmt.allocPrint(alloc, "{d} (a reader that stayed connected and stopped reading for {d} s)", .{ writes_ended_by_deadline.load(.acquire), kept_write_deadline_ms / std.time.ms_per_s }) });
+    try facts.append(alloc, .{ .label = "kept streams ended by a stalled write", .value = try std.fmt.allocPrint(alloc, "{d} (a reader that stayed connected and stopped reading for {d} s)", .{ linux_writes.writes_ended_by_deadline.load(.acquire), linux_writes.kept_write_deadline_ms / std.time.ms_per_s }) });
     const status = readProcFile(alloc, "/proc/self/status") catch |e| {
         try facts.append(alloc, .{ .label = "memory", .value = try std.fmt.allocPrint(alloc, "/proc/self/status: {s}", .{@errorName(e)}) });
         return facts.items;
@@ -2291,8 +2052,8 @@ test "linux_host: a request head not finished within its deadline is a 408, coun
 }
 
 test "linux_host: a kept stream whose reader stays connected but stops reading ends at its write's deadline (metal-vmm QUEUE 198.6)" {
-    write_deadline_for_test_ms = 300;
-    defer write_deadline_for_test_ms = null;
+    linux_writes.write_deadline_for_test_ms = 300;
+    defer linux_writes.write_deadline_for_test_ms = null;
     var bench: Bench = undefined;
     try bench.init();
     defer bench.deinit();
@@ -2939,13 +2700,13 @@ test "linux_host: a client that pipelines answers and never reads them holds up 
 }
 
 test "linux_host: an answer past what the turn holds, to a client that never reads, holds the turn no longer than the in-turn write deadline (the box's cold review of 213)" {
-    turn_write_deadline_for_test_ms = 300;
-    defer turn_write_deadline_for_test_ms = null;
+    linux_writes.turn_write_deadline_for_test_ms = 300;
+    defer linux_writes.turn_write_deadline_for_test_ms = null;
     var bench: Bench = undefined;
     try bench.init();
     defer bench.deinit();
     const io = bench.threaded.io();
-    // Eight megabytes in one answer: past `held_most`, written in the turn.
+    // Eight megabytes in one answer: past `linux_writes.held_most`, written in the turn.
     var stuck = try neverReads(&bench, 1, 8 * 1024);
     sleepMs(io, 100) catch {};
     const began = Io.Clock.now(.awake, io).nanoseconds;
