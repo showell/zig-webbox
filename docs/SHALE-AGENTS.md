@@ -339,6 +339,32 @@ function for the digits and two `substitute`s for the punctuation around
 a reference, the pattern does both; with one group, the number is what
 follows the name in the match.
 
+## If you write Lua
+
+Shale reads like Lua, and an agent's Lua habits are most of its first
+stops (the box's first afternoon under the gate: essay
+`notes/shale-from-the-inside.md`). Each is a clear stop, never a wrong
+answer, except the `grep` one:
+
+- **Patterns are regular expressions, not Lua's.** The escape is `\`
+  (`"\\."` in a string), and `%` is a plain character. One capture group at
+  most, and no `(?:`. A match is `{at, text, group}`.
+- **`grep(p, text)` is plain text**, and finding nothing is an empty list,
+  not an error. So `grep(p, "edit%(")` quietly finds nothing. A pattern over
+  a file is `re_lines(read(p), pattern)`.
+- **A missing key is a stop, not nil**: `has_key(m, k)` first, or
+  `get(m, k, default)`. `(m[k] or 0)` stops on the index.
+- **`take`, `last` and `drop` take lists**; a part of a string is
+  `sub(s, i, j)`.
+- **There is no `write`**: `replace(p, s)` writes a file whole, `append`
+  adds, and `create` refuses one already there.
+- **Functions are not values**: no closures and no anonymous functions.
+  Declare `function name(...)` at the top level.
+- **`run`'s keep is a size**: `whole = <bytes>` or `tail = <lines>`, and
+  `timeout_ms` is required.
+- **A path is the root's.** Another place is a mount, `name:path` (the box
+  mounts `zig`, `repos` and `mine` in `~/.config/shale/mounts`).
+
 ## The gate: `shale-gate` (installed on the box, 2026-10-17, in `~/.claude/settings.json`)
 
 **A PreToolUse hook on Bash and Monitor** holds a session to Shale

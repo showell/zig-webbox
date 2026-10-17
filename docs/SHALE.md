@@ -619,7 +619,7 @@ the errors column says the rest.
 | `arg(name[, default])` | the run's value by that name, or `default` | `argument` for a value not of an integer or boolean default's kind |
 | `fail(msg)` | never returns: the run stops | `fail`, with `msg` |
 | `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function, trail}` | (the language's own: see `attempt`) |
-| the prelude's `walk_all(p, opts)`, `walk_upto(p, opts, keep)`, `count_all(p, s)`, `find_next(p, s, at)`, `room_for(need)`, `glob(pattern[, {hidden}])` | every entry; as many as the reads allow; every occurrence; the next one; whether the budgets hold `need`; the files a glob names | as `walk`, `count_in`, `find_in`, `match_path` |
+| the prelude's `walk_all(p, opts)`, `walk_upto(p, opts, keep)`, `count_all(p, s)`, `find_next(p, s, at)`, `room_for(need)`, `glob(pattern[, {hidden}])`, `drop(l, n)` | every entry; as many as the reads allow; every occurrence; the next one; whether the budgets hold `need`; the files a glob names; all but the first `n` | as `walk`, `count_in`, `find_in`, `match_path` |
 
 ### The store
 
@@ -855,6 +855,7 @@ are the prelude's, whatever the script has declared.
 | `walk_upto(p, opts, keep)` | `{entries, more, done}`: every entry from `opts.after` on, as `walk_all`, until the walk ends (`done`, `more` is "") or its reads would leave fewer than `keep` (not `done`: `more` is the path the next walk goes on after) | `walk`'s, a part at a time, with `keep_reads = keep` |
 | `glob(pattern[, {hidden}])` | every file whose path matches `pattern` (`match_path`), in the walk's order; the walk starts at the parts before the first wildcard and passes by hidden names (`walk`'s `skip = ".*"`) unless `{hidden = true}`. A pattern with no wildcard is that file, if it is one | `walk_all`'s |
 | `room_for(need)` | whether what is left of the budgets holds `need`, a map of `budget()`'s names: `room_for({reads = 3, read_bytes = n})` | a `budget()` |
+| `drop(l, n)` | a new list of all but `l`'s first `n` items, in order (none of a list no longer than `n`), so a part of a list is `take(drop(l, from), count)`; a count below 0 is a stop (class `fail`) | a `last` |
 
 **A walk past what the budget walks, told in parts** (metal-vmm QUEUE
 229): `walk_upto` walks as far as the reads allow, keeping `keep` for what

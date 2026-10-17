@@ -120,3 +120,10 @@ function find_next(path, s, at)
   end
   return nil
 end
+-- All of `l` but its first `n` items, in order (none of a list no longer
+-- than `n`): `take`'s other half, so a part of a list is
+-- `take(drop(l, from), count)`. A count below 0 is a stop, as `take`'s is.
+function drop(l, n)
+  if n < 0 then fail("`drop`: a count of " .. n) end
+  return last(l, max(0, #l - n))
+end

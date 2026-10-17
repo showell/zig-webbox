@@ -159,6 +159,18 @@ test "prelude: room_for says whether the budgets left hold what is asked, by bud
     try testing.expectEqual(script.diag.Class.index, bad.stop.?.class);
 }
 
+test "prelude: drop gives all but the first n items, in order; a part of a list is take(drop(l, from), n); a count below 0 is a stop" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(join(drop({\"a\", \"b\", \"c\", \"d\"}, 1), \",\"), #drop({1, 2}, 0), #drop({1, 2}, 2), #drop({1, 2}, 9))", "b,c,d\t2\t0\t0\n");
+    try f.expectOutput("print(join(take(drop({\"a\", \"b\", \"c\", \"d\", \"e\"}, 1), 3), \",\"))", "b,c,d\n");
+    var bad = f.run("print(drop({1}, -1))", .{});
+    defer bad.deinit();
+    try testing.expectEqual(script.diag.Class.fail, bad.stop.?.class);
+    try testing.expect(std.mem.indexOf(u8, bad.stop.?.message, "`drop`: a count of -1") != null);
+}
+
 test "prelude: the functions found in prelude.shale are every function a parse of it declares, and it declares nothing else (QUEUE 230)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -186,6 +198,7 @@ test "prelude: every prelude function is reached when a script calls it, one scr
         .{ "glob", "print(#glob(\"*.txt\"))" },
         .{ "count_all", "print(count_all(\"top.txt\", \"o\"))" },
         .{ "find_next", "print(find_next(\"top.txt\", \"p\", 3))" },
+        .{ "drop", "print(#drop({1, 2, 3}, 1))" },
     };
     try testing.expectEqual(script.parse.prelude_index.len, calls.len);
     for (script.parse.prelude_index, calls) |at, c| {
