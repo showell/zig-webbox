@@ -312,6 +312,8 @@ asserted, one write, every literal multi-line.
 
 ## The dry run, honest
 
+**Superseded (2026-10-17):** Steve deleted the dry run; every run writes, and on Linux git is the undo (SHALE.md, "What was decided"). This section and the dry run's mentions below are the design as it was.
+
 A program escapes the root and any dry run (`zig build` writes into the tree;
 `git status` rewrites the index). So **a dry run runs no program**
 (`Mode.dry_run`, above). It checks and

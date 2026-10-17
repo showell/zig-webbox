@@ -51,7 +51,7 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     const cut_out = std.testing.allocator.alloc(u8, out.len) catch @panic("the gate's output");
     defer std.testing.allocator.free(cut_out);
     const slice = 1 + std.hash.Wyhash.hash(0, source) % 29;
-    // A run already a background one, or a dry run, is cut as itself.
+    // A run already a background one is cut as itself.
     const engine: script.Engine = if (!v.tried_change and options.mode == .atomic) .{ .vm_background = slice } else .{ .vm_sliced = slice };
     var cut = script.runOn(engine, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out, options);
     defer cut.deinit();

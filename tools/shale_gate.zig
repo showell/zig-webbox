@@ -4,8 +4,8 @@
 //! (exit 0) exactly:
 //!
 //!   - **the launch:** optionally `cd WORD && `, then `shale` (or an
-//!     absolute path ending `/shale`) and its words (`--write`,
-//!     `--verbose`, `--budget N=V`, a FILE, `NAME=VALUE`), each plain (no
+//!     absolute path ending `/shale`) and its words (`--verbose`,
+//!     `--budget N=V`, a FILE, `NAME=VALUE`), each plain (no
 //!     quotes, `$`, backticks, `;|&<>()*?`, `\`), and optionally `<<'TAG'`
 //!     ending the first line (TAG `[A-Z_]+`), a body, and a last line that
 //!     is `TAG` (trailing spaces allowed) and that no other line is;
@@ -27,7 +27,7 @@ pub const Escape = struct { kind: []const u8, tag: []const u8, text: []const u8 
 pub const Verdict = union(enum) { launch, escape: Escape, refused: []const u8 };
 
 /// The two forms, as every refusal names them.
-pub const forms = "a launch, `shale [--write] [--verbose] [FILE] [NAME=VALUE]... <<'TAG'` (after `cd DIR && ` if wanted; the script on stdin, the last line `TAG`), or the escape, a first line `# want: <tag>: <text>` or `# out-of-scope: <tag>: <text>`";
+pub const forms = "a launch, `shale [--verbose] [FILE] [NAME=VALUE]... <<'TAG'` (after `cd DIR && ` if wanted; the script on stdin, the last line `TAG`), or the escape, a first line `# want: <tag>: <text>` or `# out-of-scope: <tag>: <text>`";
 
 var why_buf: [1024]u8 = undefined;
 
@@ -73,7 +73,7 @@ pub fn classify(cmd: []const u8) Verdict {
     while (i < n) : (i += 1) {
         const w = words[i];
         if (!plain(w)) return refuse("`{s}` is not a plain word; ", .{w});
-        if (std.mem.eql(u8, w, "--write") or std.mem.eql(u8, w, "--verbose")) continue;
+        if (std.mem.eql(u8, w, "--verbose")) continue;
         if (std.mem.eql(u8, w, "--budget")) {
             if (i + 1 >= n or std.mem.indexOfScalar(u8, words[i + 1], '=') == null or !plain(words[i + 1])) return refuse("`--budget` takes `NAME=N`; ", .{});
             i += 1;

@@ -10,17 +10,14 @@ there to stay safe is what an agent wants on Linux too:**
 - **A stop is one line that says where and why**, with the calls that led
   there (`called from file:line:column (in f)`), and a class: `type`,
   `index`, `store`, `budget reads`. No traceback to read through.
-- **Nothing changes unless asked.** `shale` runs dry unless told
-  `--write`: every change is checked and logged, an `edit`'s diff is
-  printed, and none is made. Read the diff, then run it again with
-  `--write`. The dry run sees its own changes: a `replace` and then an
-  `edit` of the same file previews the edit against the replaced text,
-  and a read after either gets what `--write` would. Listing (`ls`,
-  `walk`) a folder it changed stops, saying so: run `--write` on a copy.
+- **A run makes its changes; git is the undo.** There is no dry run
+  (Steve, 2026-10-17): every change is checked and logged, an `edit`'s
+  diff is printed before it is written, and an edit that would not pin its
+  text down is refused before anything is changed. Work in a checkout, so
+  `git diff` shows what a run did and `git checkout --` takes it back.
 - **It reads only what it is rooted at** (`--root`, else the working
   directory) and its mounts (`runs:x`): no `..`, no absolute paths. It
-  reaches past them only by running a program (`run`), which needs
-  `--write`.
+  reaches past them only by running a program (`run`).
 
 `shale` is terse: past half of any budget, or on a stop, it says what the
 run used of four, steps, reads, read bytes and output bytes (`── used:
@@ -33,8 +30,8 @@ no file and no `-e`, the script is stdin (`shale <<'SHALE'`).
 
 ```sh
 zig build                      # zig-out/bin/shale: put it on PATH
-shale count.shale dir=src      # dry: changes logged, none made
-shale --write rename.shale from=old to=new
+shale count.shale dir=src
+shale rename.shale from=old to=new
 shale -e 'for p in glob("src/*.zig") do print(p) end'
 ```
 
@@ -95,7 +92,7 @@ has none of it):
   (`same_tests.shale`).
 
 **Git, in the git prelude** (`src/shale_prelude_git.shale`). Every call
-runs git under `run`, so it needs `--write`. A `repo` is a Shale path, `""`
+runs git under `run`. A `repo` is a Shale path, `""`
 or `"."` for the root and `repos:dog-park` for a mount.
 - **Reading:** `git_status(repo)` gives `{code, path[, from]}`.
   `git_log(repo, {n, range, ref, fields})` gives `{hash, subject, date,
@@ -145,7 +142,7 @@ be optional (`function f(a, opts?)`): a call that leaves them out gives
 them nil.
 
 Every block of Shale below runs as a test (`src/script/agent_test.zig`), on
-a small checkout shaped like zig-metal-unikernel's, as a dry run. What it
+a small checkout shaped like zig-metal-unikernel's, a fresh one each. What it
 prints is under `-- prints:` (a tab shows as `<TAB>`).
 
 ## The cookbook, beside what an agent would write otherwise
@@ -340,8 +337,8 @@ p.write_text(s)
 **Uses** `edit`'s list form and long strings: each `old` is held to being
 there exactly once, in the file as the edit before left it; one diff is
 printed, and the file is written once, or not at all if any edit fails.
-**About even**, and Shale's prints the diff before anything is written (and
-writes nothing without `--write`). The text goes in as it is, quotes and
+**About even**, and Shale's prints the diff before anything is written.
+The text goes in as it is, quotes and
 lines and all, with no escaping.
 
 ### A doc's `file:line` references, checked
@@ -419,7 +416,7 @@ two can give a quiet wrong answer, an empty list:
 (`tools/shale_gate.zig`, run by `tools/shale-gate.sh`, which turns any
 failure, a missing binary included, into a refusal). It passes exactly:
 
-- **a launch:** `[cd DIR && ]shale [--write] [--verbose] [--budget N=V]
+- **a launch:** `[cd DIR && ]shale [--verbose] [--budget N=V]
   [FILE] [NAME=VALUE]...`, every word plain (no quotes, `$`, backticks,
   `;|&<>()*?`), optionally ending `<<'TAG'` (TAG `[A-Z_]+`), with the
   script below and a last line `TAG` that no earlier line is;
@@ -460,9 +457,7 @@ here is what every launch runs. The hook, in `~/.claude/settings.json`:
   out of a `glob` unless `{hidden = true}`.
 - **A program is run whole, not piped:** `run`'s `stdin` is a string or a
   `whole` result, so a pipeline is two runs with the first's output in
-  memory, not a stream. Every run needs `timeout_ms` and a keep, and a dry
-  run runs none: a script that runs programs is written with `--write`
-  in mind.
+  memory, not a stream. Every run needs `timeout_ms` and a keep.
 - **No network but a program's** (`run({"curl", ...})`), and **no
   environment**: a script cannot read a variable, only give one to a
   program (`env`, `secrets`).

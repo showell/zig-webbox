@@ -3,14 +3,14 @@
 //! code checkout, inside its budgets, so whatever it does is bounded: its
 //! steps, its reads, what it prints, what it changes, the programs it runs.
 //!
-//!     shale [--root DIR] [--write] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
+//!     shale [--root DIR] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
 //!     shale <<'SHALE' ... SHALE        (no FILE, no -e: the script is stdin)
 //!     zig build script -- <the same>
 //!
 //! The root is `--root`, else `SHALE_ROOT`, else the working directory.
-//! `now()` is the wall clock; `SHALE_NOW` pins it. **A DRY RUN UNLESS
-//! `--write`**: changes are checked and logged, an `edit`'s diff printed,
-//! none made, and no program run. The Linux host (`shale_host_linux.zig`)
+//! `now()` is the wall clock; `SHALE_NOW` pins it. A run makes its changes
+//! (an `edit`'s diff printed first) and runs its programs: git is the
+//! undo. The Linux host (`shale_host_linux.zig`)
 //! is the core's seam: `host("run", ...)`, `host("real", ...)` and mount
 //! paths (`runs:x`), the mounts from `SHALE_MOUNTS` or
 //! `~/.config/shale/mounts`. **The preludes after the core's**: the Linux
@@ -117,7 +117,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const out = try gpa.alloc(u8, c.budgets.output_bytes);
     defer gpa.free(out);
-    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .mode = c.mode, .args = c.args, .host = seam.host, .path_hook = seam.path_hook, .preludes = preludes, .diffs = if (c.verbose) .full else .summary });
+    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .args = c.args, .host = seam.host, .path_hook = seam.path_hook, .preludes = preludes, .diffs = if (c.verbose) .full else .summary });
     defer result.deinit();
 
     var out_buf: [4096]u8 = undefined;
@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !u8 {
     try w.flush();
     const records = try arena.alloc([]const u8, host.records.items.len);
     for (host.records.items, records) |r, *line| line.* = r.line;
-    try cli.printReport(&result, cli.scriptName(c), preludes, .{ .verbose = c.verbose, .dry_run = c.mode == .dry_run, .records = records, .budgets = c.budgets }, err);
+    try cli.printReport(&result, cli.scriptName(c), preludes, .{ .verbose = c.verbose, .records = records, .budgets = c.budgets }, err);
     return if (result.finished()) 0 else 1;
 }
 

@@ -129,10 +129,6 @@ pub const Run = struct {
     /// **A BACKGROUND RUN ONLY READS** (`process.Mode`): a change is an
     /// `argument` error naming `atomic`.
     read_only: bool = false,
-    /// **A DRY RUN CHANGES NOTHING** (`process.Mode.dry_run`, QUEUE 229): a
-    /// change is checked and counted as if made, logged with the outcome
-    /// "dry run", and not made. What the Linux tool runs unless `--write`.
-    dry_run: bool = false,
     /// The values the run was given by name (`arg`).
     args: []const Arg = &.{},
     /// The host's door and hook, where it has them (`Host`, `PathHook`).
@@ -190,10 +186,6 @@ pub const Run = struct {
     /// The lowest frame address the walk reached: the Zig stack it took,
     /// measured (docs/SHALE.md, "The Zig stack").
     stack_low: usize = std.math.maxInt(usize),
-    /// A dry run's own changes, which its reads see (overlay.zig): nothing
-    /// on metal. **Last, and kept last**: a zero-size field among the others
-    /// moved metal's code by ~1.4 KB (dogpark.elf, measured), here by none.
-    overlay: @import("overlay.zig").Overlay = .{},
 
     /// The machine's memory, given back (the arena is the Result's).
     pub fn deinit(self: *Run) void {
@@ -225,7 +217,7 @@ pub const Run = struct {
             .depth => "calls and the expressions inside them nest deeper than the depth budget",
             .machine => std.fmt.allocPrint(self.alloc, "the machine's memory (the code, the frames, the operands) is past its budget ({d} bytes)", .{self.budgets.machine_bytes}) catch "the machine's memory is past its budget",
             .kept => std.fmt.allocPrint(self.alloc, "what the run keeps at a `yield` is past the kept budget ({d} bytes)", .{self.budgets.kept_bytes}) catch "what the run keeps at a `yield` is past the kept budget",
-            .runs => "a dry run runs no program; --write runs it",
+            .runs => "the run's programs are past their cap",
         } };
         return error.Stop;
     }

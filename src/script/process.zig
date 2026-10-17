@@ -37,9 +37,8 @@ const vm = @import("vm.zig");
 pub const Budgets = interp.Budgets;
 pub const Stop = diag.Stop;
 
-/// `dry_run` (QUEUE 229, chunk 4): an atomic run whose changes are logged
-/// and not made, as the Linux tool runs a script unless told `--write`.
-pub const Mode = enum { atomic, background, dry_run };
+/// An `atomic` run may change the store; a `background` one only reads.
+pub const Mode = enum { atomic, background };
 
 /// **WHAT A RUN IS GIVEN BESIDE ITS SOURCE**: its mode, and its values by
 /// name (`arg`), which the caller keeps alive as long as the run.
@@ -143,7 +142,6 @@ pub const Process = struct {
             .out = out,
             .out_cap = out.len,
             .read_only = mode == .background,
-            .dry_run = mode == .dry_run,
             .args = options.args,
             .host = options.host,
             .path_hook = options.path_hook,

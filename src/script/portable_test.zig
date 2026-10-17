@@ -27,7 +27,6 @@ const sources = .{
     .{ "compile.zig", @embedFile("compile.zig") },
     .{ "vm.zig", @embedFile("vm.zig") },
     .{ "collect.zig", @embedFile("collect.zig") },
-    .{ "overlay.zig", @embedFile("overlay.zig") },
     .{ "process.zig", @embedFile("process.zig") },
     .{ "cli.zig", @embedFile("cli.zig") },
     .{ "regex.zig", @embedFile("regex.zig") },
