@@ -47,6 +47,10 @@ const Edit = struct {
     word: bool = false,
 };
 
+/// The most edits one call of the list form makes (the design's cap):
+/// each is a pass over the file.
+const edits_most = 64;
+
 fn wordByte(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
@@ -70,6 +74,7 @@ fn editsArg(run: *Run, pos: ast.Pos, args: []const Value) Error![]Edit {
             else => return run.fail(pos, .type, "`edit` of two arguments takes a list of edits, `{{{{old = ..., new = ...}}, ...}}`, not {s}: or `edit(p, old, new)`", .{args[1].typeName()}),
         };
         if (l.kind == .empty or l.list.items.len == 0) return run.fail(pos, .argument, "`edit` of no edits: the list is empty", .{});
+        if (l.list.items.len > edits_most) return run.fail(pos, .argument, "`edit` takes at most {d} edits a call, given {d}: call it again for the rest", .{ edits_most, l.list.items.len });
         const edits = a.alloc(Edit, l.list.items.len) catch return run.oom(pos);
         for (l.list.items, edits, 1..) |v, *e, n| {
             const m = switch (v) {

@@ -230,6 +230,10 @@ test "agent: a list of edits that fails anywhere writes nothing and prints no di
     try t.expectStop("edit(\"src/tcp.zig\", {{old = \"x\", new = \"y\", every = true}})", .{}, .argument, "takes `old`, `new`, `all` and `word`");
     try t.expectStop("edit(\"src/tcp.zig\", {\"x\"})", .{}, .type, "a map");
     try t.expectStop("edit(\"src/tcp.zig\", \"x\")", .{}, .type, "a list of edits");
+    // At most 64 edits a call; a background run refuses the call before
+    // its list is read, a wrong one included.
+    try t.expectStop("local l = {} for i = 1, 65 do push(l, {old = \"const x\", new = \"const x\"}) end edit(\"src/tcp.zig\", l)", .{}, .argument, "at most 64 edits");
+    try t.expectStop("edit(\"src/tcp.zig\", {\"not an edit\"})", .{ .mode = .background }, .argument, "only reads");
     // A dry run: the diff, one effect, the file as it was.
     var d = t.run("edit(\"src/tcp.zig\", {{old = \"const x\", new = \"const y\"}, {old = \"fn send\", new = \"fn go\"}})", .{ .mode = .dry_run });
     defer d.deinit();
