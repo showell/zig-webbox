@@ -76,6 +76,7 @@ pub const Builtin = enum {
     now,
     arg,
     fail,
+    host,
     budget,
     yield,
     print,

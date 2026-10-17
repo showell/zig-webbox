@@ -107,6 +107,7 @@ const cases = [_]Case{
     // the host
     .{ .b = .now, .grows = .constant, .why = "an integer the host handed in" },
     .{ .b = .arg, .grows = .constant, .why = "a name compared with each value the run was given, a handful, their bytes charged" },
+    .{ .b = .host, .grows = .constant, .why = "the host's door: none here (a stop); a host charges its own work" },
     .{ .b = .fail, .grows = .constant, .why = "the run stops: its message's bytes charged once" },
     .{ .b = .budget, .grows = .constant, .why = "six counters" },
     .{ .b = .yield, .grows = .constant, .why = "its argument checked; in the VM the copy it makes is charged a step a value and a step for 16 bytes, by collect.zig" },

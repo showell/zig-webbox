@@ -54,6 +54,8 @@ const cases = [_]Case{
     // `fail` (the design, final; QUEUE 232): the script's own stop, its
     // message as given; Lua's `error` refused, naming it.
     .{ .src = "function f() fail(\"no config in \" .. \"etc\") end\nf()", .line = 1, .column = 14, .function = "f", .class = .fail, .message = "no config in etc" },
+    // The seam (QUEUE 233): a call no host here has.
+    .{ .src = "local r = host(\"run\", {\"zig\", \"build\"}, {})", .line = 1, .column = 11, .class = .host, .message = "`run`: not on this host" },
     .{ .src = "error(\"x\")", .line = 1, .column = 1, .class = .refused, .message = "`error` is not in this language: `fail(msg)` stops the run with your message, and `attempt` catches it" },
     .{ .src = "local x = 1.5", .line = 1, .column = 11, .class = .refused, .message = "float literals are not in this language: integers only" },
     // Long strings (QUEUE 232): a level is required, and a syntax error

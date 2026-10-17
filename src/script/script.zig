@@ -181,7 +181,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         result.stop = machine_stop;
         return result;
     };
-    program.* = parse.parseMeasured(tree, mm.budget.allocator(), source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
+    program.* = parse.parseMeasured(tree, mm.budget.allocator(), source, budgets.nesting, &stop, &result.stack_bytes, options.preludes) catch |e| {
         result.stop = switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => machine_stop,
@@ -202,6 +202,8 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .read_only = options.mode == .background,
         .dry_run = options.mode == .dry_run,
         .args = options.args,
+        .host = options.host,
+        .path_hook = options.path_hook,
     };
     defer r.deinit();
     // The VM's runs went through its Process above: here, the walker's.
@@ -251,5 +253,7 @@ test {
     _ = @import("yield_test.zig");
     _ = @import("process_test.zig");
     _ = @import("agent_test.zig");
+    _ = @import("host_test.zig");
+    _ = @import("cli_test.zig");
     _ = cli;
 }

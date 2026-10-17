@@ -36,12 +36,15 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/script_runner.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "webbox", .module = webbox }},
+        .imports = &.{
+            .{ .name = "webbox", .module = webbox },
+            .{ .name = "webbox_linux", .module = webbox_linux },
+        },
     }) });
     b.installArtifact(runner);
     const run_script = b.addRunArtifact(runner);
     if (b.args) |a| run_script.addArgs(a);
-    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--write] <file.shale> [name=value ...]").dependOn(&run_script.step);
+    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--write] [--verbose] [<file.shale> | -e SOURCE] [name=value ...]").dependOn(&run_script.step);
 
     // **SHALE'S HOT PATHS, TIMED** (src/script_bench.zig): no tier runs it.
     const script_bench = b.addExecutable(.{ .name = "script-bench", .root_module = b.createModule(.{
@@ -107,6 +110,16 @@ pub fn build(b: *std.Build) void {
         .{ .path = b.path("tools/timing_runner.zig"), .mode = .simple }
     else
         null;
+    // **THE FIXTURE PROGRAM** `run`'s tests run (src/shale_fixture.zig,
+    // metal-vmm QUEUE 233): never /bin/sh. Its path reaches the tests as
+    // `shale_test_options.fixture`.
+    const fixture = b.addExecutable(.{ .name = "shale-fixture", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/shale_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const shale_options = b.addOptions();
+    shale_options.addOptionPath("fixture", fixture.getEmittedBin());
     for ([_][]const u8{ "src/store.zig", "src/counter.zig", "src/bus.zig", "src/mem_meter.zig", "src/host_facts.zig", "src/bind.zig", "src/webbox.zig", "src/webbox_linux.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
@@ -119,6 +132,7 @@ pub fn build(b: *std.Build) void {
         unit.root_module.addImport("webbox_linux", webbox_linux);
         unit.root_module.addImport("host_io", host_io);
         unit.root_module.addImport("script_test_options", options_of(b, fuzz_runs, false));
+        unit.root_module.addImport("shale_test_options", shale_options.createModule());
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
     // The expensive tests are all reached from webbox.zig's test block.
@@ -131,6 +145,7 @@ pub fn build(b: *std.Build) void {
     hunt.root_module.addImport("webbox_linux", webbox_linux);
     hunt.root_module.addImport("host_io", host_io);
     hunt.root_module.addImport("script_test_options", options_of(b, fuzz_runs, true));
+    hunt.root_module.addImport("shale_test_options", shale_options.createModule());
     fuzz_step.dependOn(&b.addRunArtifact(hunt).step);
     test_step.dependOn(&b.addRunArtifact(signer_test).step);
 }

@@ -46,6 +46,14 @@ pub const Mode = enum { atomic, background, dry_run };
 pub const Options = struct {
     mode: Mode = .atomic,
     args: []const interp.Arg = &.{},
+    /// The host's door, `host(name, ...)` (metal-vmm QUEUE 233): none on
+    /// metal, where `host` stops with class `host`.
+    host: ?interp.Host = null,
+    /// The host's hook on paths, called first when set: none on metal.
+    path_hook: ?interp.PathHook = null,
+    /// The preludes after the core's, in order (the Linux host's, a
+    /// repo's, a user's): none on metal.
+    preludes: []const parse.Prelude = &.{},
 };
 
 pub const State = enum { running, finished, stopped };
@@ -88,6 +96,8 @@ pub const Process = struct {
     /// Whether `code` was made, its lists the machine's to give back.
     coded: bool = false,
     out: []u8,
+    /// The preludes after the core's the parse is given (`Options.preludes`).
+    preludes: []const parse.Prelude = &.{},
     state: State = .running,
     slices: u64 = 0,
     /// The Zig stack the parse took.
@@ -132,7 +142,10 @@ pub const Process = struct {
             .read_only = mode == .background,
             .dry_run = mode == .dry_run,
             .args = options.args,
+            .host = options.host,
+            .path_hook = options.path_hook,
         };
+        p.preludes = options.preludes;
         p.ready(source) catch {};
         return p;
     }
@@ -146,7 +159,7 @@ pub const Process = struct {
         const own = tree.dupe(u8, source) catch return p.stopWith(machine_stop);
         const program = tree.create(ast.Program) catch return p.stopWith(machine_stop);
         var stop: ?Stop = null;
-        program.* = parse.parseMeasured(tree, p.machine.budget.allocator(), own, budgets.nesting, &stop, &p.parse_stack) catch |e| return p.stopWith(switch (e) {
+        program.* = parse.parseMeasured(tree, p.machine.budget.allocator(), own, budgets.nesting, &stop, &p.parse_stack, p.preludes) catch |e| return p.stopWith(switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => machine_stop,
         });

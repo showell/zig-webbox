@@ -23,6 +23,10 @@ pub const Class = enum {
     /// The script's own stop: `fail(msg)`, its message as given (the
     /// design, final; metal-vmm QUEUE 232). `attempt` catches it.
     fail,
+    /// A call this host does not have (`host(name, ...)` where there is
+    /// none, as on metal), or one the host could not make: its program not
+    /// found (metal-vmm QUEUE 233).
+    host,
 };
 
 pub const Budget = enum {
@@ -43,6 +47,10 @@ pub const Budget = enum {
     /// The machine's own memory: the tree, the code, the frames, the
     /// operands (the box's review of 211).
     machine,
+    /// Programs a host runs (metal-vmm QUEUE 233): none in a dry run, and
+    /// the host's own cap on a run's (the Linux CLI's, 64). Not a field of
+    /// the budgets: the host counts and says.
+    runs,
 };
 
 /// Where and why a run stopped. `message` is owned by the run's arena (or

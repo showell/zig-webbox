@@ -1127,27 +1127,41 @@ first.
 ## The runner
 
 ```sh
-shale [--root DIR] [--write] [--budget NAME=N]... (FILE | -e SOURCE) [NAME=VALUE]...
+shale [--root DIR] [--write] [--verbose] [--budget NAME=N]... [FILE | -e SOURCE] [NAME=VALUE]...
+shale <<'SHALE'                  # no FILE, no -e: the script is stdin
 SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
 ```
 
 - **The root** is `--root`, else `SHALE_ROOT`, else the working
   directory.
-- **A dry run unless `--write`**: its changes are logged, none made, and
-  it says so at the end.
+- **A dry run unless `--write`**: its changes are logged, none made, no
+  program run, and it says so at the end.
 - `--budget NAME=N` sets one budget: `steps`, `reads`, `read_bytes`,
   `output_bytes`, `changes`, `change_bytes`, `arena_bytes`, `call_bytes`
-  or `call_entries`.
-- `-e SOURCE` is the script itself, in place of a file.
-- `NAME=VALUE` after the script is a value it reads with `arg(NAME,
-  default)`. On the live site's route a script has no values: `arg` gives
-  its default.
-- `SHALE_NOW` sets `now()` (default 0).
+  or `call_entries`. **The runner's own defaults** (metal-vmm QUEUE 233):
+  output 64 KiB, `call_bytes` 64 MiB, 64 programs a run; the rest the
+  core's.
+- `-e SOURCE` is the script itself, in place of a file. **With neither,
+  the script is stdin**, and a stop names it `stdin`; a terminal on stdin
+  is refused.
+- `NAME=VALUE` is a value the script reads with `arg(NAME, default)`.
+  On the live site's route a script has no values: `arg` gives its
+  default.
+- `now()` is the wall clock; `SHALE_NOW` pins it.
+- **The Linux host** is behind the core's seam (`src/shale_host_linux.zig`):
+  `host("run", argv, opts)` runs a program, `host("real", path)` gives a
+  path's OS path, and a path whose first part has a `:` is a mount's
+  (`runs:gates/summary`). The mounts are in `SHALE_MOUNTS`'s file, else
+  `~/.config/shale/mounts` (`name = /abs/path` or `name = ~/path` a line).
 - The runner sets the store's bases as a server does, so path limits are
   measured as metal measures them.
-- It prints the output, the effects log, and how the run ended, the stop
-  as `name:line:column (in \`f\`)`.
-- It exits 0 if the script finished and 1 if it stopped.
+- **Terse**: it prints the output, then a stop as `name:line:column (in
+  \`f\`)` (a later prelude's line by that prelude's name) and its trail;
+  what the run used only past half a budget or on a stop; a dry run's
+  changes. `--verbose` adds the effects, the programs run and their logs,
+  and what the run used, always.
+- It exits 0 if the script finished, 1 if it stopped, 2 if the command
+  line, the script's file or the mounts could not be taken.
 
 **Run it against a copy**, never the live data folder.
 
