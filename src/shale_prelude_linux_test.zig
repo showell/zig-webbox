@@ -33,7 +33,8 @@ test "linux prelude: must gives a run that exited 0, and fails on one that did n
     try t.expectStop("must(run({\"shale-fixture\", \"kill-self\"}, {timeout_ms = 10000, tail = 5}))", .atomic, .fail, "`shale-fixture kill-self` was ended by a signal");
     // A failing run's output is printed before the stop, its last newline
     // the print's; a run that printed nothing prints nothing.
-    var r = t.run("must(run({\"shale-fixture\", \"ignore-term\", \"5000\"}, {timeout_ms = 100, tail = 5}))", .atomic);
+    // Once, not through the gate: each engine would wait out the grace.
+    var r = t.runOnce("must(run({\"shale-fixture\", \"ignore-term\", \"5000\"}, {timeout_ms = 100, tail = 5}))", .atomic);
     defer r.deinit();
     try testing.expect(r.stop != null);
     try testing.expectEqualStrings("ignoring\n", r.output);
