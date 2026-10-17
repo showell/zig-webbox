@@ -53,6 +53,9 @@ pub const script_route = @import("script_route.zig");
 pub const shale_suite = @import("shale_suite.zig");
 /// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
+/// The library's number parses that no request reaches, for an
+/// application's request-edge check (edge_sites.zig).
+pub const edge_sites = @import("edge_sites.zig");
 /// One GET from the application, through its host (host_fetch.zig).
 pub const host_fetch = @import("host_fetch.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
@@ -92,6 +95,7 @@ test {
     _ = mem_meter;
     _ = host_facts;
     _ = host_fetch;
+    _ = edge_sites;
     _ = wake;
     _ = log_view;
     _ = admin_log;
