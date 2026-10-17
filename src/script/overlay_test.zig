@@ -7,6 +7,7 @@ const std = @import("std");
 const script = @import("script.zig");
 const testing = std.testing;
 const Fixture = @import("builtins_test.zig").Fixture;
+const overlay = @import("overlay.zig");
 
 var out_buf: [64 * 1024]u8 = undefined;
 
@@ -58,6 +59,38 @@ test "overlay: a new file reads back, with its size; a removed one is gone; an a
     try expectDry(&f, "append(\"fresh.txt\", \"a\\nb\\n\") print(#read_lines(\"fresh.txt\").lines, count_lines(\"fresh.txt\"), line_at(\"fresh.txt\", 2), #grep(\"fresh.txt\", \"b\"))", "2\t2\tb\t1\n");
     // A replace after a remove is there again.
     try expectDry(&f, "remove(\"top.txt\") replace(\"top.txt\", \"back\") print(read(\"top.txt\"))", "back\n");
+}
+
+test "overlay: an append to a real file reads none of it for its size, and only what a read asks for" {
+    // Under the gate, which copies a test's folder, an unreadable file
+    // can't be had: the overlay's own reads, here, on one.
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "locked.txt", .data = "0123456789" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "open.txt", .data = "0123456789" });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const locked = try std.fmt.allocPrintSentinel(a, "{s}/locked.txt", .{dir}, 0);
+    const open = try std.fmt.allocPrint(a, "{s}/open.txt", .{dir});
+    // Its bytes can't be read (unless as root), its size can.
+    try testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.fchmodat(std.os.linux.AT.FDCWD, locked, 0)));
+    defer _ = std.os.linux.fchmodat(std.os.linux.AT.FDCWD, locked, 0o644);
+    const appended: overlay.Entry = .{ .seq = 1, .kind = .file, .suffix = "ab" };
+    try testing.expectEqual(@as(u64, 12), try overlay.size(appended, io, a, locked));
+    var buf: [8]u8 = undefined;
+    try testing.expectEqualStrings("ab", buf[0..try overlay.readAt(appended, io, a, locked, 10, buf[0..2])]);
+    try testing.expectEqualStrings("b", buf[0..try overlay.readAt(appended, io, a, locked, 11, buf[0..5])]);
+    try testing.expectEqual(@as(usize, 0), try overlay.readAt(appended, io, a, locked, 12, buf[0..5]));
+    // Across the real file's end and the suffix; a buffer the real part fills.
+    try testing.expectEqualStrings("89ab", buf[0..try overlay.readAt(appended, io, a, open, 8, buf[0..8])]);
+    try testing.expectEqualStrings("23", buf[0..try overlay.readAt(appended, io, a, open, 2, buf[0..2])]);
+    // A base, the same way.
+    const based: overlay.Entry = .{ .seq = 2, .kind = .file, .base = "xyz", .suffix = "!" };
+    try testing.expectEqual(@as(u64, 4), try overlay.size(based, io, a, locked));
+    try testing.expectEqualStrings("yz!", buf[0..try overlay.readAt(based, io, a, locked, 1, buf[0..8])]);
 }
 
 test "overlay: folders: mkdir and remove_tree are seen; listing a folder the dry run changed stops, saying so" {

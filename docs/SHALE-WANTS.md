@@ -26,6 +26,8 @@ in, its log (`~/.local/state/shale/wants.tsv`) feeds this file instead.
 | 2026-10-17 | slice-and-grep | no `drop` (a slice is `last(take(l, j), j - i)`); `grep(p, "edit%(")`, a Lua habit, silently matched nothing | `drop`/`slice`; a plain-text `grep` that warns on a pattern character, or `grep_re` |
 | 2026-10-17 | default-mounts | couldn't grep zig's std (outside the root), nor `edit` my own scratch scripts | a read-only mount of the zig install by default; the script's own folder readable |
 | 2026-10-17 | walk-more-trap | on v33's prod, `walk("chat", {like = "*.md"})` ended with a `more` entry whose path was a `.png`; my script took it for a transcript (SHALE.md's checklist says to read `kind` first; I didn't) | a filtered walk's `more` entry still trips a careful author: name it so it can't be taken for a match (a `resume` field on the walk's result, not an entry), or make `like` apply to it |
+| 2026-10-17 | git-prelude-dot | `git_commit(".", ...)` from the repo's own root stopped: `"."` is not a name; I ran from the parent instead | the git prelude takes `"."` (or no repo) as the root itself |
+| 2026-10-17 | transcript-search | grepped the session's transcript for a test failure's lost output; no mount reaches it | none yet: an output the gate made me cut short (`tail`) was the real loss; a failed run's whole output kept in a file Shale can read |
 
 ## Out of scope
 

@@ -209,15 +209,19 @@ function edit_words(text, old, new)
     local prev = before
     if at > 1 then prev = sub(rest, at - 1, at - 1) end
     local next = sub(rest, at + #old, at + #old)
-    push(out, sub(rest, 1, at - 1))
     if not edit_word_byte(prev) and not edit_word_byte(next) then
+      push(out, sub(rest, 1, at - 1))
       push(out, new)
       n = n + 1
+      before = sub(old, #old, #old)
+      rest = sub(rest, at + #old)
     else
-      push(out, old)
+      -- On by one byte, as `edit` steps: a match overlapping this one
+      -- may still hold.
+      push(out, sub(rest, 1, at))
+      before = sub(rest, at, at)
+      rest = sub(rest, at + 1)
     end
-    before = sub(old, #old, #old)
-    rest = sub(rest, at + #old)
   end
   push(out, rest)
   return {text = join(out, ""), n = n}

@@ -97,11 +97,18 @@ fn start(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         return run.fail(pos, .host, "`job_start`: `{s}` is not found{s}", .{ argv[0], if (std.mem.indexOfScalar(u8, argv[0], '/') == null) " along PATH" else "" });
     const log_os = try hl.osPath(h, run, pos, log_v, false);
     const record_os = std.fmt.allocPrint(a, "{s}.job", .{log_os}) catch return run.oom(pos);
+    // A job still running on this log: its record is its one handle, and
+    // the old job's end would be written over the new one's record.
+    if (std.Io.Dir.cwd().readFileAlloc(run.io, record_os, a, .limited(64 * 1024))) |text| {
+        try chargeRead(run, pos, text.len);
+        if (jobs.parseRecord(text)) |old| if (jobs.alive(old) or jobs.reaperAlive(old))
+            return run.fail(pos, .host, "`job_start`: a job still runs on {s} (pid {d}, its record {s}.job): `job_stop` or `job_wait` it, or give another log", .{ log_shown, old.pid, log_shown });
+    } else |_| {}
     run.host_runs += 1;
     const r = jobs.launch(a, run.io, reaper, record_os, log_os, cwd, program, argv, env.items) catch |e| switch (e) {
         error.OutOfMemory => return run.oom(pos),
         error.Spawn => return run.fail(pos, .host, "`job_start`: the reaper could not be forked", .{}),
-        error.NoRecord => return run.fail(pos, .host, "`job_start`: the reaper wrote no record at {s}.job in 5 seconds", .{log_shown}),
+        error.NoRecord => return run.fail(pos, .host, "`job_start`: the reaper ended without writing a record at {s}.job", .{log_shown}),
     };
     const joined = std.mem.join(a, " ", argv) catch return run.oom(pos);
     h.record("job {s}{s}{s} started (pid {d}), log {s}", .{ joined, if (want != null) " (want: " else "", if (want) |w| std.fmt.allocPrint(a, "{s})", .{w}) catch w else "", r.pid, log_shown });
@@ -141,7 +148,10 @@ fn find(h: *Host, run: *Run, pos: ast.Pos, v: Value, name: []const u8) Error!Fou
 
 /// **WAITING ON A JOB**: until it ends (`exited`, and its `code` if it
 /// exited or the `signal` that ended it), a `file` (the log unless named) holds `contains` (`found`), or
-/// `timeout_ms` passes (`timeout`). It looks at once, then every second.
+/// `timeout_ms` passes (`timeout`). It looks at once, then every second. A
+/// job gone while its reaper lives is still ending: the reaper writes its
+/// end after it reaps it. Gone with its reaper and no end written, it is
+/// `lost`.
 fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (args.len != 2) return run.fail(pos, .argument, "`job_wait` takes a job and its options, `{{timeout_ms = ...}}`, given {d} arguments", .{args.len});
     const m = switch (args[1]) {
@@ -169,14 +179,16 @@ fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             } else |_| {}
         }
         if (j.record.done()) return result(run, pos, "exited", j.record.exit, j.record.signal);
-        // Gone without a word: the reaper itself was ended.
-        if (!jobs.alive(j.record)) {
+        const gone = !jobs.alive(j.record);
+        if (gone and !jobs.reaperAlive(j.record)) {
+            // The reaper's last write, if it made one, is there now.
             const again = try find(h, run, pos, args[0], "job_wait");
-            return result(run, pos, "exited", again.record.exit, again.record.signal);
+            if (again.record.done()) return result(run, pos, "exited", again.record.exit, again.record.signal);
+            return result(run, pos, "lost", null, null);
         }
         const spent = monoMs() - began;
         if (spent >= limit) return result(run, pos, "timeout", null, null);
-        sleepMs(@min(1000, limit - spent));
+        sleepMs(@min(if (gone) @as(u64, 10) else 1000, limit - spent));
     }
 }
 

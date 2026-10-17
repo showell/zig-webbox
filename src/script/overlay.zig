@@ -81,17 +81,37 @@ pub fn touches(o: *const Overlay, full: []const u8) bool {
     return false;
 }
 
-/// A file entry's whole content: its base, or the real file's, then its
-/// suffix. Reading the real file is a read the script asked for.
-pub fn content(e: Entry, io: std.Io, a: std.mem.Allocator, full: []const u8) ![]const u8 {
-    const base = e.base orelse real: {
-        const st = (try store.statOrNull(io, a, full)) orelse break :real ""; // the view
-        const buf = try a.alloc(u8, @intCast(st.size));
-        const n = try store.readAt(io, a, full, 0, buf); // the view
-        break :real buf[0..n];
-    };
-    if (e.suffix.len == 0) return base;
-    return std.mem.concat(a, u8, &.{ base, e.suffix });
+/// The size of the real file under an entry with no base, 0 if none.
+fn realSize(io: std.Io, a: std.mem.Allocator, full: []const u8) !u64 {
+    return if (try store.statOrNull(io, a, full)) |st| st.size else 0; // the view
+}
+
+/// **A FILE ENTRY'S SIZE**: its base's, or the real file's (its stat, none
+/// of its bytes), and its suffix's.
+pub fn size(e: Entry, io: std.Io, a: std.mem.Allocator, full: []const u8) !u64 {
+    const first: u64 = if (e.base) |b| b.len else try realSize(io, a, full);
+    return first + e.suffix.len;
+}
+
+/// **A FILE ENTRY'S BYTES FROM `offset`**, up to `buf.len`; how many. Of the
+/// real file under it, only the part asked for is read, as the store's own
+/// read would.
+pub fn readAt(e: Entry, io: std.Io, a: std.mem.Allocator, full: []const u8, offset: u64, buf: []u8) !usize {
+    const first_len: u64 = if (e.base) |b| b.len else try realSize(io, a, full);
+    var n: usize = 0;
+    if (offset < first_len) {
+        const want: usize = @intCast(@min(buf.len, first_len - offset));
+        n = if (e.base) |b| copied: {
+            @memcpy(buf[0..want], b[@intCast(offset)..][0..want]);
+            break :copied want;
+        } else try store.readAt(io, a, full, offset, buf[0..want]); // the view
+        if (n < want or n == buf.len) return n;
+    }
+    const at: u64 = (offset + n) - first_len;
+    if (at >= e.suffix.len) return n;
+    const more: usize = @min(buf.len - n, e.suffix.len - @as(usize, @intCast(at)));
+    @memcpy(buf[n..][0..more], e.suffix[@intCast(at)..][0..more]);
+    return n + more;
 }
 
 /// **THE OVERLAY, COPIED** into `a` at a `yield`: its keys and its bytes.

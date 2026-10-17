@@ -264,12 +264,12 @@ fn writeDiff(run: *Run, pos: ast.Pos, rel: []const u8, was: []const u8, now: []c
         const s = spans[k];
         const start = if (std.mem.lastIndexOfScalar(u8, was[0..s.o0], '\n')) |i| i + 1 else 0;
         const now_start = s.c0 - (s.o0 - start);
-        var end = lineEnd(was, s.o1);
-        var now_end = spans[k].c1 + (end - s.o1);
+        var end = hunkEnd(was, now, s);
+        var now_end = (s.c1 + end) - s.o1;
         var j = k + 1;
         while (j < spans.len and spans[j].o0 <= end) : (j += 1) {
-            end = lineEnd(was, spans[j].o1);
-            now_end = spans[j].c1 + (end - spans[j].o1);
+            end = hunkEnd(was, now, spans[j]);
+            now_end = (spans[j].c1 + end) - spans[j].o1;
         }
         const before_text = was[start..end];
         const after_text = now[now_start..now_end];
@@ -292,6 +292,15 @@ fn writeDiff(run: *Run, pos: ast.Pos, rel: []const u8, was: []const u8, now: []c
         k = j;
     }
     if (summary) try run.write(pos, std.fmt.allocPrint(a, "edit {s}: {d} hunk{s}, -{d} +{d} lines\n", .{ rel, hunks, if (hunks == 1) "" else "s", lines_old, lines_new }) catch return run.oom(pos));
+}
+
+/// Where a span's hunk ends in the old file: the newline that ends the
+/// line its end is in; or, when its old and new text both end with a
+/// newline, that newline, so the untouched line after it stays out of the
+/// hunk.
+fn hunkEnd(was: []const u8, now: []const u8, s: Span) usize {
+    if (s.o1 > s.o0 and was[s.o1 - 1] == '\n' and s.c1 > s.c0 and now[s.c1 - 1] == '\n') return s.o1 - 1;
+    return lineEnd(was, s.o1);
 }
 
 /// The offset of the newline that ends the line `i` is in, or the end.

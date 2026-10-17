@@ -134,6 +134,38 @@ test "git prelude: branches, worktrees, and a remote: push, fetch, pull and merg
     try expectOnce(&t, "git_push(\"\", {}) git_pull_ff(\"\") print(git_head(\"\") == git_log(\"\", {n = 1, ref = \"origin/main\"})[1].hash)", "true\n");
 }
 
+test "git prelude: a merge makes its commit; a conflicted one is undone and named; \".\" is the root" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try repo(&t);
+    try git(&t, "", &.{ "add", "-A" });
+    try git(&t, "", &.{ "commit", "-q", "-m", "second" });
+    try t.expectOutput("print(git_head(\".\") == git_head(\"\"))", "true\n");
+    // Apart on two files: a merge commit.
+    try git(&t, "", &.{ "branch", "side" });
+    try t.put("h.txt", "h\n");
+    try git(&t, "", &.{ "add", "h.txt" });
+    try git(&t, "", &.{ "commit", "-q", "-m", "main's" });
+    try git(&t, "", &.{ "checkout", "-q", "side" });
+    try t.put("i.txt", "i\n");
+    try git(&t, "", &.{ "add", "i.txt" });
+    try git(&t, "", &.{ "commit", "-q", "-m", "side's" });
+    try git(&t, "", &.{ "checkout", "-q", "main" });
+    try expectOnce(&t, "git_merge(\".\", \"side\") print(git_log(\"\", {n = 1})[1].subject, exists(\"i.txt\"))", "Merge branch 'side'\ttrue\n");
+    // Both change a.txt: undone, named, the tree clean.
+    try git(&t, "", &.{ "checkout", "-q", "-b", "other" });
+    try t.put("a.txt", "theirs\n");
+    try git(&t, "", &.{ "commit", "-q", "-a", "-m", "other's" });
+    try git(&t, "", &.{ "checkout", "-q", "main" });
+    try t.put("a.txt", "ours\n");
+    try git(&t, "", &.{ "commit", "-q", "-a", "-m", "ours" });
+    var r = t.runOnce("git_merge(\"\", \"other\")", .atomic);
+    defer r.deinit();
+    try testing.expectEqualStrings("`git merge other`: conflicts in a.txt; the merge is undone", r.stop.?.message);
+    try expectOnce(&t, "print(git_is_clean(\"\"), read(\"a.txt\"))", "true\tours\n\n");
+}
+
 test "git prelude: SHALE-AGENTS.md's user-prelude commit refuses a message without its attribution" {
     var t: T = undefined;
     try init(&t);

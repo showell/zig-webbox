@@ -1,8 +1,8 @@
 -- **THE GIT PRELUDE** (metal-vmm QUEUE 233, chunk 3; the dogfood design's
 -- "Git"): git over `run`, no reading of `.git` itself. A `repo` is a
--- Shale path (`""` the root, `repos:dog-park`), given to git as `-C` by
--- its `real` path. The reading calls give data and take no lock (git's
--- `--no-optional-locks`: a `status` never rewrites the index, though a
+-- Shale path (`""` or `"."` the root, `repos:dog-park`), given to git as
+-- `-C` by its `real` path. The reading calls give data and take no lock
+-- (git's `--no-optional-locks`: a `status` never rewrites the index, though a
 -- `diff` still refreshes its stat data, as git 2.43 does); the
 -- changing ones print what git said when it fails. Either way a git error
 -- stops the run, naming the call as typed and git's first line. Each call
@@ -32,13 +32,20 @@ function git_opts(name, opts, allowed)
   return nil
 end
 
+-- `repo`'s real path, `"."` and `""` the root's; a stop, naming the call
+-- as `shown`, when it is not a folder.
+function git_real(repo, shown)
+  if repo == "." then repo = "" end
+  if repo ~= "" and not is_dir(repo) then fail(shown .. ": " .. repo .. " is not a folder") end
+  return real(repo)
+end
+
 -- One git command in `repo`: its result when it exited 0, else a stop.
 -- A reading call keeps git's whole output; a changing one its ends, and
 -- prints them when it fails.
 function git_call(repo, args, opts, reading, stdin)
   local shown = "`git " .. join(args, " ") .. "`"
-  if repo ~= "" and not is_dir(repo) then fail(shown .. ": " .. repo .. " is not a folder") end
-  local argv = {"git", "-C", real(repo), "-c", "color.ui=never"}
+  local argv = {"git", "-C", git_real(repo, shown), "-c", "color.ui=never"}
   if reading then push(argv, "--no-optional-locks") end
   for a in args do push(argv, a) end
   local o = {timeout_ms = 60000, env = {GIT_TERMINAL_PROMPT = "0"}}
@@ -219,6 +226,30 @@ end
 function git_merge_ff(repo, ref)
   git_call(repo, {"merge", "-q", "--ff-only", ref}, nil, false, nil)
   return nil
+end
+
+-- Merge `ref`, with a merge commit when it needs one (`--no-edit`): HEAD's
+-- short hash after. **A conflict undoes the merge** (`merge --abort`, the
+-- tree as it was) and stops, naming the conflicted paths: a checkout is
+-- never left half merged for what runs next.
+function git_merge(repo, ref, opts?)
+  git_opts("git_merge", opts, {"timeout_ms"})
+  local shown = "`git merge " .. ref .. "`"
+  local o = {timeout_ms = 60000, env = {GIT_TERMINAL_PROMPT = "0"}, head = 10, tail = 10}
+  if opts ~= nil and has_key(opts, "timeout_ms") then o.timeout_ms = opts.timeout_ms end
+  local r = run({"git", "-C", git_real(repo, shown), "-c", "color.ui=never", "merge", "-q", "--no-edit", ref}, o)
+  if r.ended == "exit" and r.code == 0 then return git_head(repo) end
+  local conflicted = {}
+  for p in split(git_call(repo, {"diff", "--name-only", "--diff-filter=U", "-z"}, nil, true, nil).out, "\0") do
+    if p ~= "" then push(conflicted, p) end
+  end
+  if #conflicted > 0 then
+    git_call(repo, {"merge", "--abort"}, nil, false, nil)
+    fail(shown .. ": conflicts in " .. join(conflicted, ", ") .. "; the merge is undone")
+  end
+  if r.out ~= "" then print(trim(r.out)) end
+  if r.ended == "exit" then fail(shown .. " exited " .. r.code) end
+  fail(shown .. " did not finish (" .. r.ended .. ")")
 end
 
 -- A worktree at `dir` (a Shale path): of `branch`, or a `new` branch.

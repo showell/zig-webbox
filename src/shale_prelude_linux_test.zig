@@ -167,6 +167,31 @@ test "linux prelude: edits_all checks a word edit as edit applies it, so the nex
     try testing.expectEqualStrings("a done\n", try t.file("w.txt"));
 }
 
+test "linux prelude: edits_all's word check finds what edit's word mode finds, case by case" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const a = t.arena.allocator();
+    // `old` with a byte that is no word's, where a rejected match overlaps
+    // one that holds: the check must step as edit steps.
+    const cases = [_][2][]const u8{
+        .{ "xa-a-a\n", "a-a" },  .{ "foo foobar\n", "foo" }, .{ "_foo foo\n", "foo" },
+        .{ "a.b a.b\n", "a.b" }, .{ "--x--x\n", "-x-" },    .{ "aaa aa\n", "aa" },
+        .{ "x-x-x\n", "-x" },    .{ "ab ab\n", " ab" },     .{ "q.q.q q\n", "q.q" },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("text {s}old {s}\n", .{ c[0], c[1] });
+        try t.put("e.txt", c[0]);
+        try t.put("w.txt", c[0]);
+        var by_edit = t.run(try std.fmt.allocPrint(a, "print(edit(\"e.txt\", {{{{old = \"{s}\", new = \"#\", word = true, all = true}}}}))", .{c[1]}), .atomic);
+        defer by_edit.deinit();
+        var by_all = t.run(try std.fmt.allocPrint(a, "print(edits_all({{{{\"w.txt\", {{{{old = \"{s}\", new = \"#\", word = true, all = true}}}}}}}}))", .{c[1]}), .atomic);
+        defer by_all.deinit();
+        try testing.expectEqual(by_edit.stop == null, by_all.stop == null);
+        try testing.expectEqualStrings(try t.file("e.txt"), try t.file("w.txt"));
+    }
+}
+
 test "linux prelude: the repo's and the user's preludes come after it, SHALE_PRELUDE pinning the user's" {
     var t: T = undefined;
     try init(&t);
