@@ -91,9 +91,16 @@ pub const Parser = struct {
     /// its index in `functions`. One never called is never parsed, and
     /// takes none of the machine.
     prelude_loaded: [prelude_index.len]?u32 = @splat(null),
-    /// Whether a prelude function is being parsed: its calls are to the
-    /// prelude's functions and the builtins, never to the script's.
-    in_prelude: bool = false,
+    /// **THE PRELUDES AFTER THE CORE'S** (metal-vmm QUEUE 233): the Linux
+    /// host's, a repo's, a user's, in order, each indexed when the parse
+    /// starts and loaded as the core's is, at a function's first call.
+    /// Metal has none.
+    extra: []Extra = &.{},
+    /// Which prelude is being parsed (0 the core's, then `extra`'s), or
+    /// null for the script: a prelude's calls are to its own functions,
+    /// the preludes before it and the builtins, never to the script's or a
+    /// later prelude's.
+    in_prelude: ?usize = null,
     /// The top-level `const`s declared so far: what a function declared
     /// after them sees (QUEUE 206).
     consts: std.ArrayList([]const u8) = .empty,
@@ -463,14 +470,16 @@ pub const Parser = struct {
         // 220): from its line on, its calls by that name are to it, so a
         // function added to the prelude never breaks a script that already
         // declared one; declared twice by the script, it is refused.
-        if (!self.in_prelude and self.function_names.contains(name))
+        if (self.in_prelude == null and self.function_names.contains(name))
             return self.failf(pos, .name, "a function `{s}` is already declared", .{name});
         const index: u32 = @intCast(self.functions.items.len);
         // An error in a prelude function names it so: its line is the
         // prelude's, never the script's.
-        const shown = if (self.in_prelude) try std.fmt.allocPrint(self.alloc, "the prelude's {s}", .{name}) else name;
-        if (self.in_prelude) {
-            self.prelude_loaded[preludeAt(name).?] = index;
+        const shown = if (self.in_prelude) |k| try std.fmt.allocPrint(self.alloc, "{s}'s {s}", .{ self.preludeName(k), name }) else name;
+        if (self.in_prelude) |k| {
+            if (k == 0) {
+                self.prelude_loaded[preludeAt(name).?] = index;
+            } else self.extra[k - 1].loaded[indexAt(self.extra[k - 1].index, name).?] = index;
         } else try self.function_names.put(self.scratch, name, index);
         // Reserved now, so it may call itself.
         try self.functions.append(self.scratch, undefined);
@@ -717,10 +726,24 @@ pub const Parser = struct {
     /// above (never, from inside the prelude); else the prelude's, parsed
     /// now if this is its first call; else none.
     fn functionNamed(self: *Parser, name: []const u8) Error!?u32 {
-        if (!self.in_prelude) if (self.function_names.get(name)) |i| return i;
-        const k = preludeAt(name) orelse return null;
-        if (self.prelude_loaded[k] == null) try self.loadPrelude(k);
-        return self.prelude_loaded[k].?;
+        if (self.in_prelude == null) if (self.function_names.get(name)) |i| return i;
+        if (preludeAt(name)) |i| {
+            if (self.prelude_loaded[i] == null) try self.loadPrelude(0, i);
+            return self.prelude_loaded[i].?;
+        }
+        // The preludes after the core's, up to the one being parsed.
+        const last = if (self.in_prelude) |k| k else self.extra.len;
+        for (self.extra[0..@min(last, self.extra.len)], 1..) |*x, k| if (indexAt(x.index, name)) |i| {
+            if (x.loaded[i] == null) try self.loadPrelude(k, i);
+            return x.loaded[i].?;
+        };
+        return null;
+    }
+
+    /// The name a prelude's functions are shown under: "the prelude" for
+    /// the core's, else its own ("the Linux prelude").
+    fn preludeName(self: *const Parser, k: usize) []const u8 {
+        return if (k == 0) "the prelude" else self.extra[k - 1].prelude.name;
     }
 
     /// **A PRELUDE FUNCTION, PARSED AT ITS FIRST CALL** (QUEUE 230), from
@@ -728,16 +751,18 @@ pub const Parser = struct {
     /// before the script: no `const` of the script's, no local, no depth
     /// of the call it was met in. Its own calls to the prelude parse what
     /// they reach in turn.
-    fn loadPrelude(self: *Parser, k: usize) Error!void {
+    fn loadPrelude(self: *Parser, k: usize, i: usize) Error!void {
         const saved_lexer = self.lexer;
         const saved_tok = self.tok;
         const saved_ahead = self.ahead;
         const saved_in_prelude = self.in_prelude;
         const saved_nesting = self.nesting;
         const saved_consts = self.consts;
-        self.lexer = .{ .src = prelude, .at = prelude_index[k].at, .line = prelude_index[k].line, .alloc = self.alloc };
+        const src = if (k == 0) prelude else self.extra[k - 1].prelude.source;
+        const at = if (k == 0) prelude_index[i] else self.extra[k - 1].index[i];
+        self.lexer = .{ .src = src, .at = at.at, .line = at.line, .alloc = self.alloc };
         self.ahead = null;
-        self.in_prelude = true;
+        self.in_prelude = k;
         self.nesting = 0;
         self.consts = .empty;
         defer {
@@ -805,43 +830,111 @@ pub const prelude = @embedFile("prelude.shale");
 /// Where a prelude function begins: its `function`, at the start of `line`.
 pub const PreludeFunction = struct { name: []const u8, at: usize, line: u32 };
 
+/// A prelude after the core's (metal-vmm QUEUE 233): its name as a stop
+/// shows it ("the Linux prelude") and its source, only functions, each
+/// from the start of a line.
+pub const Prelude = struct { name: []const u8, source: []const u8 };
+
+/// A later prelude as a parse holds it: its functions, and which are loaded.
+const Extra = struct { prelude: Prelude, index: []const PreludeFunction, loaded: []?u32 };
+
+/// **THE INDEXER, ONE FUNCTION FOR EVERY PRELUDE** (QUEUE 233): the next
+/// line from `at` on that begins `function name(`, or null at the end; run
+/// at comptime for the core's prelude and at runtime for the rest.
+pub fn nextFunction(src: []const u8, at: *usize, line: *u32) ?PreludeFunction {
+    while (at.* < src.len) {
+        const start = at.*;
+        const end = std.mem.indexOfScalarPos(u8, src, start, '\n') orelse src.len;
+        const text = src[start..end];
+        const this_line = line.*;
+        at.* = end + 1;
+        line.* += 1;
+        if (std.mem.startsWith(u8, text, "function ")) {
+            const paren = std.mem.indexOfScalar(u8, text, '(') orelse continue;
+            return .{ .name = std.mem.trim(u8, text["function ".len..paren], " "), .at = start, .line = this_line };
+        }
+    }
+    return null;
+}
+
 /// **THE PRELUDE'S FUNCTIONS, FOUND WHEN THIS IS BUILT** (QUEUE 230): each
 /// line of prelude.shale that begins `function name(`. The prelude holds
 /// only functions, each from the start of a line; parse_test holds this
 /// list to a parse of the whole prelude.
 pub const prelude_index: []const PreludeFunction = blk: {
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(200_000);
     var found: []const PreludeFunction = &.{};
     var at: usize = 0;
     var line: u32 = 1;
-    while (at < prelude.len) {
-        const end = std.mem.indexOfScalarPos(u8, prelude, at, '\n') orelse prelude.len;
-        const text = prelude[at..end];
-        if (std.mem.startsWith(u8, text, "function ")) {
-            const paren = std.mem.indexOfScalar(u8, text, '(') orelse @compileError("prelude.shale: a function without its `(`");
-            found = found ++ [_]PreludeFunction{.{ .name = text["function ".len..paren], .at = at, .line = line }};
-        }
-        at = end + 1;
-        line += 1;
-    }
+    while (nextFunction(prelude, &at, &line)) |f| found = found ++ [_]PreludeFunction{f};
     break :blk found;
 };
 
 /// The prelude function named `name`, as its place in `prelude_index`.
 fn preludeAt(name: []const u8) ?usize {
-    for (prelude_index, 0..) |f, k| if (std.mem.eql(u8, f.name, name)) return k;
+    return indexAt(prelude_index, name);
+}
+
+fn indexAt(index: []const PreludeFunction, name: []const u8) ?usize {
+    for (index, 0..) |f, k| if (std.mem.eql(u8, f.name, name)) return k;
     return null;
+}
+
+/// **A LATER PRELUDE, CHECKED BEFORE THE SCRIPT** (QUEUE 233): no name an
+/// earlier prelude has (or one it has twice), and only functions, every
+/// one of which parses, in a parse of its own thrown away after. A failure
+/// is a stop naming the prelude, at its line.
+fn checkPrelude(p: *Parser, k: usize) Error!void {
+    const x = p.extra[k - 1];
+    for (x.index, 0..) |f, i| {
+        const pos: ast.Pos = .{ .line = f.line, .column = 1 };
+        if (preludeAt(f.name) != null) return p.failf(pos, .name, "{s}'s `{s}` is the prelude's already: a later prelude may not redefine an earlier one's function", .{ x.prelude.name, f.name });
+        for (p.extra[0 .. k - 1]) |e| if (indexAt(e.index, f.name) != null)
+            return p.failf(pos, .name, "{s}'s `{s}` is {s}'s already: a later prelude may not redefine an earlier one's function", .{ x.prelude.name, f.name, e.prelude.name });
+        if (indexAt(x.index[0..i], f.name) != null) return p.failf(pos, .name, "{s} declares `{s}` twice", .{ x.prelude.name, f.name });
+    }
+    var arena = std.heap.ArenaAllocator.init(p.scratch);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var q: Parser = .{ .alloc = a, .scratch = a, .lexer = lex.Lexer.init(a, x.prelude.source), .tok = undefined, .max_nesting = p.max_nesting, .extra = p.extra, .in_prelude = k };
+    // Its own loaded slots, so the check leaves the real parse's alone.
+    var own: [16]Extra = undefined;
+    if (p.extra.len > own.len) return p.failAt(.{ .line = 1, .column = 1 }, .argument, "more than 16 preludes");
+    for (p.extra, own[0..p.extra.len]) |e, *o| {
+        o.* = e;
+        o.loaded = try a.alloc(?u32, e.loaded.len);
+        @memset(o.loaded, null);
+    }
+    q.extra = own[0..p.extra.len];
+    q.frame.depth = 0;
+    onlyFunctions(&q, x.prelude.name) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Parse => {
+            const s = q.stop.?;
+            const message = if (std.mem.indexOf(u8, s.message, x.prelude.name) != null) try p.alloc.dupe(u8, s.message) else try std.fmt.allocPrint(p.alloc, "{s}: {s}", .{ x.prelude.name, s.message });
+            return p.failAt(.{ .line = s.line, .column = s.column }, s.class, message);
+        },
+    };
+}
+
+/// A prelude's source from its start: function after function to its end.
+fn onlyFunctions(q: *Parser, name: []const u8) Error!void {
+    try q.advance();
+    while (q.tok.tag != .eof) {
+        if (q.tok.tag != .kw_function) return q.failf(q.here(), .syntax, "{s} holds only functions, found {s}", .{ name, q.describe(q.tok) });
+        try q.function(q.here());
+    }
 }
 
 /// The whole source, parsed. On `error.Parse`, `stop` says where and why.
 pub fn parse(alloc: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop) Error!ast.Program {
-    return parseMeasured(alloc, alloc, source, max_nesting, stop, null);
+    return parseMeasured(alloc, alloc, source, max_nesting, stop, null, &.{});
 }
 
 /// `parse`, saying how many bytes of the Zig stack it took.
 /// What it builds and drops comes from `scratch` and is given back to it;
 /// the tree, from `alloc`, exactly its size.
-pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize) Error!ast.Program {
+pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, source: []const u8, max_nesting: u32, stop: *?diag.Stop, stack_used: ?*usize, preludes: []const Prelude) Error!ast.Program {
     const top = @frameAddress();
     var p: Parser = .{ .alloc = alloc, .scratch = scratch, .lexer = lex.Lexer.init(alloc, source), .tok = undefined, .max_nesting = max_nesting };
     defer if (stack_used) |u| {
@@ -859,6 +952,28 @@ pub fn parseMeasured(alloc: std.mem.Allocator, scratch: std.mem.Allocator, sourc
     }
     errdefer stop.* = p.stop;
     p.frame.depth = 0;
+    // **THE LATER PRELUDES, INDEXED AND CHECKED** (QUEUE 233): each holds
+    // only functions that parse, and none takes an earlier prelude's name.
+    const extra = try scratch.alloc(Extra, preludes.len);
+    defer {
+        for (extra[0..p.extra.len]) |x| {
+            scratch.free(x.index);
+            scratch.free(x.loaded);
+        }
+        scratch.free(extra);
+    }
+    for (preludes, extra) |pre, *x| {
+        var index: std.ArrayList(PreludeFunction) = .empty;
+        errdefer index.deinit(scratch);
+        var at: usize = 0;
+        var line: u32 = 1;
+        while (nextFunction(pre.source, &at, &line)) |f| try index.append(scratch, f);
+        const loaded = try scratch.alloc(?u32, index.items.len);
+        @memset(loaded, null);
+        x.* = .{ .prelude = pre, .index = try index.toOwnedSlice(scratch), .loaded = loaded };
+        p.extra = extra[0 .. p.extra.len + 1];
+        try checkPrelude(&p, p.extra.len);
+    }
     // The script; a prelude function (prelude.shale, QUEUE 220) is parsed
     // at its first call (QUEUE 230).
     try p.advance();

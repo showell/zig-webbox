@@ -212,3 +212,76 @@ test "prelude: a prelude function's own calls are the prelude's, though the scri
     // of the prelude's.
     try f.expectOutput("const walk_all = 1\nfunction f() return #glob(\"*.txt\") end\nprint(f())", "1\n");
 }
+
+// ── preludes beyond the core's (metal-vmm QUEUE 233, chunk 1) ───────────
+
+var list_out: [8 * 1024]u8 = undefined;
+
+fn runPreludes(src: []const u8, preludes: []const script.parse.Prelude) script.Result {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    return script.runWith(threaded.io(), testing.allocator, ".zig-cache/no-root", src, .{}, 0, &list_out, .{ .preludes = preludes });
+}
+
+const linux_prelude: script.parse.Prelude = .{ .name = "the Linux prelude", .source =
+    \\-- A Linux prelude's functions, as the host's would be.
+    \\function twice(s) return s .. s end
+    \\
+    \\function thrice(s)
+    \\  return twice(s) .. s
+    \\end
+    \\
+    \\function counted(p) return count_all(p, "x") end
+    \\
+    \\function bad() return 1 + {} end
+};
+
+test "preludes: a later prelude's function is reached as the core's are, its calls to itself and to earlier preludes too" {
+    var r = runPreludes("print(thrice(\"ab\"), room_for({reads = 1}))", &.{linux_prelude});
+    defer r.deinit();
+    try testing.expectEqual(@as(?script.Stop, null), r.stop);
+    try testing.expectEqualStrings("ababab\ttrue\n", r.output);
+    // A script's own function of its name is the script's, as the core's.
+    var own = runPreludes("function twice(s) return \"mine\" end print(twice(\"x\"), thrice(\"x\"))", &.{linux_prelude});
+    defer own.deinit();
+    try testing.expectEqualStrings("mine\txxx\n", own.output);
+    // A stop inside it names its prelude, and its line is the prelude's.
+    var b = runPreludes("bad()", &.{linux_prelude});
+    defer b.deinit();
+    try testing.expectEqualStrings("the Linux prelude's bad", b.stop.?.function);
+    try testing.expectEqual(@as(u32, 10), b.stop.?.line);
+}
+
+test "preludes: an earlier prelude never calls a later one's; a later one may not redefine an earlier one's name; one that holds more than functions is refused" {
+    const user: script.parse.Prelude = .{ .name = "the user prelude", .source = "function shout(s) return upper(thrice(s)) end\n" };
+    var r = runPreludes("print(shout(\"a\"))", &.{ linux_prelude, user });
+    defer r.deinit();
+    try testing.expectEqualStrings("AAA\n", r.output);
+    // The Linux prelude cannot reach the user's: the order is the list's.
+    const calls_later: script.parse.Prelude = .{ .name = "the Linux prelude", .source = "function early() return shout(\"x\") end\n" };
+    var e = runPreludes("print(early())", &.{ calls_later, user });
+    defer e.deinit();
+    try testing.expectEqual(script.diag.Class.name, e.stop.?.class);
+    // A redefinition, of a core function or an earlier prelude's: a stop
+    // naming both, whatever the script calls.
+    for ([_][]const u8{ "function glob(p) return {} end\n", "function twice(s) return s end\n" }) |src| {
+        const again: script.parse.Prelude = .{ .name = "the user prelude", .source = src };
+        var d = runPreludes("print(1)", &.{ linux_prelude, again });
+        defer d.deinit();
+        const s = d.stop orelse return error.TestUnexpectedResult;
+        errdefer std.debug.print("{s}\n", .{s.message});
+        try testing.expectEqual(script.diag.Class.name, s.class);
+        try testing.expect(std.mem.indexOf(u8, s.message, "the user prelude") != null);
+        try testing.expect(std.mem.indexOf(u8, s.message, if (src[9] == 'g') "the prelude" else "the Linux prelude") != null);
+    }
+    // More than functions, or a function that does not parse: refused at
+    // the start, naming the prelude.
+    for ([_][]const u8{ "local x = 1\n", "function f( return end\n" }) |src| {
+        const odd: script.parse.Prelude = .{ .name = "the repo prelude", .source = src };
+        var o = runPreludes("print(1)", &.{odd});
+        defer o.deinit();
+        const s = o.stop orelse return error.TestUnexpectedResult;
+        errdefer std.debug.print("{s}\n", .{s.message});
+        try testing.expect(std.mem.indexOf(u8, s.message, "the repo prelude") != null);
+    }
+}

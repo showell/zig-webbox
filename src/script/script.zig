@@ -181,7 +181,7 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         result.stop = machine_stop;
         return result;
     };
-    program.* = parse.parseMeasured(tree, mm.budget.allocator(), source, budgets.nesting, &stop, &result.stack_bytes) catch |e| {
+    program.* = parse.parseMeasured(tree, mm.budget.allocator(), source, budgets.nesting, &stop, &result.stack_bytes, options.preludes) catch |e| {
         result.stop = switch (e) {
             error.Parse => stop.?,
             error.OutOfMemory => machine_stop,
