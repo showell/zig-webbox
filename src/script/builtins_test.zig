@@ -766,8 +766,8 @@ test "builtins: walk's stats count as reads, a call considers at most call_entri
     // atomic one, which holds the turn, says so.
     const b_md = try std.fs.path.join(testing.allocator, &.{ f.root, "chat", "b.md" });
     defer testing.allocator.free(b_md);
-    script.builtins_store.between_list_and_stat_for_test = vanishOnce;
-    defer script.builtins_store.between_list_and_stat_for_test = null;
+    script.builtins_walk.between_list_and_stat_for_test = vanishOnce;
+    defer script.builtins_walk.between_list_and_stat_for_test = null;
     vanish_io = io;
     for ([_]script.process.Mode{ .background, .atomic }) |mode| {
         try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/b.md", .data = "world!" });
