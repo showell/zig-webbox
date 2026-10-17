@@ -52,6 +52,11 @@ const cases = [_]Case{
     .{ .src = "local x = (1\n", .line = 2, .column = 1, .class = .syntax, .message = "expected `)`, found the end of the script" },
     .{ .src = "print(1) = 2", .line = 1, .column = 1, .class = .syntax, .message = "only a local or an element `t[k]`, `t.k` can be assigned" },
     .{ .src = "local x = 1.5", .line = 1, .column = 11, .class = .refused, .message = "float literals are not in this language: integers only" },
+    // Long strings (QUEUE 232): a level is required, and a syntax error
+    // right after one says where it closed.
+    .{ .src = "local s = [=[\nfirst\nsecond ]] ]=]\nlocal x = 1 // 0", .line = 4, .column = 13, .class = .arithmetic, .message = "integer division by zero" },
+    .{ .src = "local s = [[a]]", .line = 1, .column = 11, .class = .refused, .message = "a long string needs a level: `[=[ ... ]=]` (code being edited is full of `]]`)" },
+    .{ .src = "print([=[a]=]b]=])", .line = 1, .column = 14, .class = .syntax, .message = "expected `)` to close the call, found the name `b` (the long string at 1:7 closed at 1:11; if it holds `]=]`, open it with `[==[`)" },
     .{ .src = "local x = 0x10", .line = 1, .column = 11, .class = .refused, .message = "hexadecimal literals are not in this language: write the number in decimal" },
     .{ .src = "local x = a / b", .line = 1, .column = 13, .class = .refused, .message = "`/` divides into a float, and this language has no floats: use `//` (integer division)" },
     .{ .src = "s:upper()", .line = 1, .column = 2, .class = .refused, .message = "`:` method calls are not in this language: call a builtin, `f(x, ...)`" },

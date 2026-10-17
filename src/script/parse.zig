@@ -75,6 +75,9 @@ pub const Parser = struct {
     tok: Token,
     ahead: ?Token = null,
     stop: ?diag.Stop = null,
+    /// The long string just before `tok`, if it is one: where it opened,
+    /// its level, where it closed.
+    after_long: ?struct { open: ast.Pos, long: lex.Long } = null,
     max_nesting: u32,
     nesting: u32 = 0,
     frame: Frame = .{},
@@ -98,7 +101,17 @@ pub const Parser = struct {
     stack_low: usize = std.math.maxInt(usize),
 
     fn failAt(self: *Parser, pos: ast.Pos, class: diag.Class, message: []const u8) Error {
-        self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message };
+        // **RIGHT AFTER A LONG STRING, WHERE IT CLOSED** (QUEUE 232): a
+        // closer inside the text ends it early, and what follows is the
+        // error; the hint names the closer it met and the level that holds it.
+        const said = if (class == .syntax and self.after_long != null and pos.line == self.tok.line and pos.column == self.tok.column) blk: {
+            const l = self.after_long.?;
+            var buf: [66]u8 = undefined;
+            var up: [66]u8 = undefined;
+            const args = .{ message, l.open.line, l.open.column, l.long.close_line, l.long.close_column, lex.closerText(&buf, l.long.level), lex.openerText(&up, l.long.level + 1) };
+            break :blk std.fmt.allocPrint(self.alloc, "{s} (the long string at {d}:{d} closed at {d}:{d}; if it holds `{s}`, open it with `{s}`)", args) catch message;
+        } else message;
+        self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = said };
         return error.Parse;
     }
 
@@ -123,6 +136,7 @@ pub const Parser = struct {
     }
 
     fn advance(self: *Parser) Error!void {
+        self.after_long = if (self.tok.tag == .string) if (self.tok.long) |l| .{ .open = .{ .line = self.tok.line, .column = self.tok.column }, .long = l } else null else null;
         if (self.ahead) |t| {
             self.tok = t;
             self.ahead = null;

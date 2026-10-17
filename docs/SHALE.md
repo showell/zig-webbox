@@ -261,9 +261,27 @@ print(parity(4, true), parity(3, true))
 | `nil` | |
 | booleans | `true`, `false` |
 | integers | 64-bit and checked: overflow stops the script. Literals are decimal. The smallest, `-9223372036854775808`, is written with its minus; its magnitude alone is too big |
-| strings | bytes, `"..."` or `'...'`. The escapes are `\n \t \r \0 \xHH \\ \" \'`. A string ends on its line |
+| strings | bytes, `"..."` or `'...'`. The escapes are `\n \t \r \0 \xHH \\ \" \'`. A string ends on its line; a long string does not |
 | lists | `{1, 2}`, indexed from 1 |
 | maps | `{a = 1, ["b c"] = 2}`, read as `m.a` or `m["a"]`; keys are strings, kept in the order first set |
+
+**Long strings, for text that holds quotes and lines** (metal-vmm QUEUE
+232): `[=[ ... ]=]`, `[==[ ... ]==]`, a level of one or more `=`, closed by
+`]`, the same number of `=`, `]`. **A level is required**: `[[` is refused,
+since code being edited is full of `]]`. The bytes are the source's, raw:
+no escapes, a CRLF kept as its two bytes; a newline right after the opener
+is dropped (a CRLF one whole), and a newline before the closer is part of
+the string. A syntax error right after a long string says where it closed
+and the level that would hold what closed it.
+
+```shale
+local old = [=[
+if (x[i]] == "a\n") {
+]=]
+print(#old, sub(old, 1, 9), contains(old, "\\n"))
+-- prints:
+-- 22<TAB>if (x[i]]<TAB>true
+```
 
 `{}` takes its kind, list or map, from its first entry; using it as the
 other kind after that is an error. **Tables are shared, not copied:**
@@ -450,7 +468,7 @@ Two things it does not do:
 
 - floats and `/`;
 - `^`, hex literals and the bitwise operators;
-- long strings and long comments;
+- a long string without a level (`[[ ... ]]`), and long comments;
 - decimal escapes (`\65`), `\u{...}`, `\z` and the rest;
 - `:` method calls;
 - `...`;
@@ -497,7 +515,8 @@ binop     = "or" | "and" | "==" | "~=" | "<" | "<=" | ">" | ">=" | ".."
 unop      = "not" | "-" | "#" ;
 ```
 
-`--` starts a comment that runs to the end of its line.
+`--` starts a comment that runs to the end of its line. A `STRING` is
+`"..."`, `'...'` or a long string, `[=[ ... ]=]` at any level of `=`.
 
 ## The builtins
 
