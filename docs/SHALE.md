@@ -1159,7 +1159,8 @@ SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
   `~/.config/shale/mounts` (`name = /abs/path` or `name = ~/path` a line).
 - **The preludes after the core's**: the Linux prelude (`run`, `must`,
   `re_lines`, `head_lines`, `tail_lines`, `grep_all`, `unique`, `newest`,
-  `create`, `edits_all`: SHALE-AGENTS.md), the git prelude (`git_status`,
+  `create`, `edits_all`, and the jobs, `job_start`, `job_alive`, `job_stop`
+  and `job_wait`: SHALE-AGENTS.md), the git prelude (`git_status`,
   `git_log`, `git_commit`, ...), the repo's
   (`.shale/prelude.shale` at the root) and the user's (`SHALE_PRELUDE`'s
   file, `""` none, else `~/.config/shale/prelude.shale`). A later one may

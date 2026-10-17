@@ -59,6 +59,16 @@ has none of it):
   file of any size and give nil for a missing one. `grep_all(p, lit)` is
   `grep` for a file of any size. `unique(list)` gives each item once. `newest(dir, n)`
   gives the names that changed last.
+- **Jobs**, programs that outlive the call:
+  - `job_start(argv, {log, cwd, env})` starts one under a detached reaper.
+    `log` is required, and there are no `secrets`.
+  - Its record is `<log>.job`. `job_alive`, `job_stop` (TERM, 2 seconds,
+    then KILL) and `job_wait(job, {timeout_ms, file, contains})` take the
+    job or that path, so a later call carries on.
+  - `job_wait` gives `{ended = "exited" | "found" | "timeout"[, code |
+    signal]}`.
+  - **Keep `timeout_ms` under the Bash call's own timeout** (120 s unless
+    raised), because Shale cannot see it.
 - **Files:** `create(p, text)` refuses a file already there.
   `edits_all({{p, edits}, ...})` checks every file's edits before it writes
   any.
