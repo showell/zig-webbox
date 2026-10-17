@@ -87,7 +87,7 @@ test "overlay: it survives a yield, in the gate's cut engine" {
     try expectDry(&f, "replace(\"top.txt\", \"kept across\") append(\"top.txt\", \" a yield\") yield() print(read(\"top.txt\"))", "kept across a yield\n");
 }
 
-test "overlay: a builtins_* file reads the store only through the view (builtins_store.zig's `view`)" {
+test "overlay: a builtins_* file reads the store only through the view (builtins_store.zig's `view`), and lists it only after `viewListCheck`" {
     const files = .{
         .{ "builtins_read.zig", @embedFile("builtins_read.zig") },
         .{ "builtins_walk.zig", @embedFile("builtins_walk.zig") },
@@ -99,8 +99,14 @@ test "overlay: a builtins_* file reads the store only through the view (builtins
     inline for (files) |f| {
         var it = std.mem.splitScalar(u8, f[1], '\n');
         var n: usize = 0;
-        while (it.next()) |line| {
+        var prev: []const u8 = "";
+        while (it.next()) |line| : (prev = line) {
             n += 1;
+            // A listing outside the view asks it first, the line before.
+            if (std.mem.indexOf(u8, line, "store.list(") != null and std.mem.indexOf(u8, prev, "viewListCheck(") == null) {
+                std.debug.print("{s}:{d} lists the store without `viewListCheck` the line before\n", .{ f[0], n });
+                found += 1;
+            }
             // The view's own lines say so.
             if (std.mem.indexOf(u8, line, "// the view") != null) continue;
             for (reads) |r| if (std.mem.indexOf(u8, line, r) != null) {

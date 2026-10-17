@@ -111,7 +111,7 @@ pub fn modifiedSeconds(mtime_ns: i96) i64 {
 /// the store, unless a dry run's overlay says otherwise of the path (its
 /// own changes: overlay.zig). Metal compiles the store alone. A test fails
 /// a builtins_* file that reads the store another way.
-pub fn viewStatOrNull(run: *Run, full: []const u8) !?store.Stat {
+pub inline fn viewStatOrNull(run: *Run, full: []const u8) !?store.Stat {
     if (comptime overlay.on) if (run.dry_run) if (overlay.find(&run.overlay, full)) |e| return switch (e.kind) {
         .removed => null,
         .dir => .{ .size = 0, .kind = .directory, .mtime = @as(i96, run.now) * 1_000_000_000 },
@@ -120,16 +120,16 @@ pub fn viewStatOrNull(run: *Run, full: []const u8) !?store.Stat {
     return store.statOrNull(run.io, run.alloc, full); // the view
 }
 
-pub fn viewStat(run: *Run, full: []const u8) !store.Stat {
+pub inline fn viewStat(run: *Run, full: []const u8) !store.Stat {
     return (try viewStatOrNull(run, full)) orelse error.FileNotFound;
 }
 
-pub fn viewHas(run: *Run, full: []const u8) !bool {
+pub inline fn viewHas(run: *Run, full: []const u8) !bool {
     return (try viewStatOrNull(run, full)) != null;
 }
 
 /// Up to `buf.len` bytes from `offset`; how many arrived.
-pub fn viewReadAt(run: *Run, full: []const u8, offset: u64, buf: []u8) !usize {
+pub inline fn viewReadAt(run: *Run, full: []const u8, offset: u64, buf: []u8) !usize {
     if (comptime overlay.on) if (run.dry_run) if (overlay.find(&run.overlay, full)) |e| switch (e.kind) {
         .removed => return error.FileNotFound,
         .dir => return error.IsDir,
@@ -144,21 +144,13 @@ pub fn viewReadAt(run: *Run, full: []const u8, offset: u64, buf: []u8) !usize {
     return store.readAt(run.io, run.alloc, full, offset, buf); // the view
 }
 
-/// A folder's entries, as the store lists them. **A dry run cannot list a
-/// folder it changed**: merging the overlay into a listing's order, its
-/// budgets and a walk's `more` is not worth it, and refusing is honest.
-pub fn viewList(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error![]store.Entry {
+/// **A DRY RUN CANNOT LIST A FOLDER IT CHANGED**, asked before each
+/// `store.list`: merging the overlay into a listing's order, its budgets
+/// and a walk's `more` is not worth it, and refusing is honest. On metal,
+/// nothing.
+pub inline fn viewListCheck(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error!void {
     if (comptime overlay.on) if (run.dry_run and overlay.touches(&run.overlay, full))
         return run.fail(pos, .argument, "`{s}`: a dry run cannot list {s} after changing it: run --write on a copy", .{ @tagName(b), rel });
-    return store.list(run.io, run.alloc, full) catch |e| return storeFailed(run, pos, b, rel, e); // the view
-}
-
-/// `viewList`, or the store's error itself: a background run passes by a
-/// folder gone.
-pub fn viewListOrError(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) !union(enum) { entries: []store.Entry, failed: anyerror } {
-    if (comptime overlay.on) if (run.dry_run and overlay.touches(&run.overlay, full))
-        return run.fail(pos, .argument, "`{s}`: a dry run cannot list {s} after changing it: run --write on a copy", .{ @tagName(b), rel });
-    return .{ .entries = store.list(run.io, run.alloc, full) catch |e| return .{ .failed = e } }; // the view
 }
 
 // ── reading ──────────────────────────────────────────────────────────────

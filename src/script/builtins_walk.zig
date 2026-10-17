@@ -30,19 +30,18 @@ pub const specs = [_]bi.Spec{
 /// What a folder holds, its names sorted, charged as `ls` is: an entry a
 /// step and the sort's bound. The read is the caller's to count.
 pub fn sortedEntries(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error![]store.Entry {
-    const entries = try hub.viewList(run, pos, b, full, rel);
+    try hub.viewListCheck(run, pos, b, full, rel);
+    const entries = store.list(run.io, run.alloc, full) catch |e| return storeFailed(run, pos, b, rel, e); // the view, checked
     return sortEntries(run, pos, entries);
 }
 
 /// `sortedEntries`, or null for a folder gone in a background run, which
 /// reads while others write.
 fn sortedEntriesOrGone(run: *Run, pos: ast.Pos, b: B, full: []const u8, rel: []const u8) Error!?[]store.Entry {
-    const entries = switch (try hub.viewListOrError(run, pos, b, full, rel)) {
-        .entries => |en| en,
-        .failed => |e| {
-            if (run.read_only and e == error.FileNotFound) return null;
-            return storeFailed(run, pos, b, rel, e);
-        },
+    try hub.viewListCheck(run, pos, b, full, rel);
+    const entries = store.list(run.io, run.alloc, full) catch |e| { // the view, checked
+        if (run.read_only and e == error.FileNotFound) return null;
+        return storeFailed(run, pos, b, rel, e);
     };
     return try sortEntries(run, pos, entries);
 }
