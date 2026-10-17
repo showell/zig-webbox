@@ -8,7 +8,16 @@ and on bare metal. Every run stays inside its budgets.
 
 A script **just runs.** Its effects happen as it goes. A run that stops
 keeps what it already did, and its effects log says what that was. There
-is no dry run and no rollback.
+is no rollback. (On Linux, `shale` runs a script dry unless told
+`--write`: its changes are logged, an `edit`'s diff printed, none made.)
+
+**For an agent choosing a tool** (in place of Python, sed or awk, on a code
+checkout or any folder): [`SHALE-AGENTS.md`](SHALE-AGENTS.md). **The
+budgets are the feature there:** every run is bounded in its steps, its
+reads, its changes and **what it prints**, so its output is a bounded
+context cost; a stop says where and why in one line, with the calls that
+led there; and nothing changes a file unless asked, each change shown as
+its diff first.
 
 This page is in three parts:
 - **for a script's author:** a first script, what a run may do, the
@@ -20,6 +29,53 @@ This page is in three parts:
 
 It ends with what was decided and what was refused. The code is
 `src/script/`.
+
+## Before you send a script: the author's checklist
+
+The traps the cookbook's scripts fell into on the live site, each with
+what avoids it:
+
+1. **Guard every budget a loop spends.** A loop over a walk or a file's
+   parts runs until something stops it; let it be you. Walk with
+   `walk_upto(p, opts, keep)`, which stops before the reads would leave
+   fewer than `keep`, and guard each entry's work with `room_for({reads =
+   1, read_bytes = n})`. Print what you have and `resume after <path>`
+   (a `const START` takes it back), never nothing.
+2. **Gather, then print? Print what you have when stopped.** A run that
+   stops on a budget keeps its output so far: a script that gathers
+   everything and prints at the end prints nothing at all.
+3. **The index traps.** `l[0]` and `l[#l + 1]` are errors, and so is
+   `m.k` for a key that is not there. On data you did not write, `get(t,
+   k, default)` never stops the run; `has_key(m, k)` asks first.
+4. **`parse_int` over `tonumber` for data.** `tonumber("log-x")` stops the
+   whole report on one stray file; `parse_int` gives nil, and you decide.
+5. **Read a `more` entry's `kind` first.** A `walk` part ends with `{kind
+   = "more"}` when there is more: its path is where the next goes on, not
+   a file. `walk_all` and `walk_upto` leave it out for you.
+6. **A line is not 200 bytes.** `read(p, f, 200)` cuts a long line;
+   `line_at(p, offset)` gives the whole line around an offset, and
+   `read_lines` whole lines a part at a time.
+7. **Look before you change, and run it dry first.** On Linux, `shale`
+   without `--write` logs every change and makes none; `edit` shows its
+   diff.
+
+When a run stops, its report names the line, and the calls that led
+there:
+
+```text
+── stopped at seq 12:18:14 (in `the prelude's walk_all`): budget reads: the store-read budget (count) ran out (134718 steps)
+   called from seq 12:31:15 (in `sizes`)
+   called from seq 12:40:1
+```
+
+**Where it runs, and what it may do there:**
+
+| where | modes | its budgets |
+|---|---|---|
+| lynrummy.com (`POST /admin/script`, angry-gopher's `admin_script`) | atomic (changes, holds the turn); background (reads only, in slices) | atomic: 2,000,000 steps, 500 reads, 16 MiB read, 100 changes, 8 MiB arena; background: the same but 10,000 reads |
+| Dog Park (`POST /admin/script`, its `src/play/shale.zig`) | background only: an atomic run is refused | 50,000,000 steps, 10,000 reads, 256 MiB read, no changes, 8 MiB arena |
+| an installed suite (`src/shale_suite.zig`) | background, on a schedule | the application's background budgets, its output at most 64 KiB |
+| Linux, `shale` | dry unless `--write`; then atomic | Shale's defaults (the budgets' table), each settable with `--budget NAME=N` |
 
 ## A first script, step by step
 
@@ -132,8 +188,11 @@ The host chooses, not the script; a signed request names it
 | may change the store | yes | **no**: `replace`, `append`, `mkdir`, `remove` and `remove_tree` stop it, an `argument` error naming `atomic` |
 | its budgets on the live sites | the site's own, small: lynrummy.com's 500 reads, 16 MiB read, 2M steps | the background's, larger: 10,000 reads (Dog Park's, `budgets` in its `src/play/shale.zig`) |
 
-- **The runner** (`zig build script`, below) runs atomic, with Shale's
-  default budgets (the table in "The budgets").
+- **The runner** (`shale`, `zig build script`, below) runs **dry**
+  unless told `--write` (QUEUE 229): its changes are checked, counted and
+  logged with the outcome `dry run`, an `edit`'s diff printed, and none
+  made. With `--write` it is atomic. Shale's default budgets, each of
+  which `--budget NAME=N` sets (the table in "The budgets").
 - **Dog Park takes background runs only.** lynrummy.com's route runs
   atomic ones; its background budgets are set for when its host steps
   them (angry-gopher `admin_script.background_budgets`).
@@ -317,11 +376,26 @@ was in. The classes are:
 
 ```text
 ── stopped at <script>:<line>:<column> (in `<function>`): <class>[ <budget>]: <message> (<steps> steps)
+   called from <script>:<line>:<column> (in `<caller>`)
+   called from <script>:<line>:<column>
 ```
 
 `(in ...)` is there when it stopped inside a function, `<budget>` when a
 budget stopped it, and a function of the prelude is named "the prelude's
 <name>", its line the prelude's.
+
+**The trail** (metal-vmm QUEUE 229): after a stop inside a function, one
+`called from` line for each call that led there, innermost first, out to
+the top level, whose line has no `(in ...)`. A call made inside a prelude
+function reads `called from the prelude:<line>:<column>`, its line the
+prelude's. So a budget that runs out in the prelude's `walk_all` names the
+line of the script that called it:
+
+```text
+── stopped at seq 12:18:14 (in `the prelude's walk_all`): budget reads: the store-read budget (count) ran out (134718 steps)
+   called from seq 12:31:15 (in `sizes`)
+   called from seq 12:40:1
+```
 
 
 **The message says what to do.** Each one names what was wrong and, where
@@ -351,7 +425,10 @@ It gives back a map:
 - `{ok = true, value = v}` when `f` returned (with no `value` if it
   returned nil);
 - or `{ok = false, error = "...", class = "store", line = 12, column = 9,
-  in_function = "f"}`.
+  in_function = "f", trail = {...}}`. `trail` is the stop's calls,
+  innermost first, as the report's `called from` lines: a list of `{line,
+  column, in_function}` maps, out to the top level: the `attempt`
+  itself is one of them, the call of `f`, and the calls before it.
 
 Two things it does not do:
 - **It never catches a budget.** A budget is the run's, not the call's, so
@@ -461,6 +538,10 @@ the errors column says the rest.
 | `exists(p)`, `is_dir(p)` | booleans | `store` (never for absence) |
 | `read(p[, offset[, n]])` | a file, or its part | `argument` past the call-bytes cap; `budget read_bytes`; `store` |
 | `read_or(p, default)` | a file, or `default` when nothing is there | as `read`; a folder is `store` |
+| `read_lines(p[, offset[, n]])` | `{lines, next, done}`: whole lines from `offset` | `argument` for `n` past the call-bytes cap or a line longer; `store` |
+| `line_at(p, offset)` | the line holding `offset`, or nil past the end | `argument` for a line past the call-bytes cap; `store` |
+| `grep(p, s)` | the lines holding `s`, as `{line, text}` | `argument` for a file past the call-bytes cap; `store` |
+| `edit(p, old, new[, opts])` | the number replaced, the diff printed first | `argument` for `old` not there, or there twice without `all`; as `replace` |
 | `count_lines(p[, offset[, n]])` | the lines in a file or a range | `argument` past the cap; `store` |
 | `count_in(p, s[, offset[, n]])` | `s`'s occurrences in a file or a range | `argument` for "" or past the cap; `store` |
 | `find_in(p, s[, offset[, n]])` | the first `s`'s 0-based offset, or nil | as `count_in` |
@@ -474,12 +555,15 @@ the errors column says the rest.
 | `sub(s, i[, j])` | a part of `s` | |
 | `trim`, `upper`, `lower` `(s)` | strings | |
 | `like(s, pattern)` | a boolean | |
+| `match_path(path, pattern)` | a boolean | `argument` past 64 parts |
+| `between(s, a, b)` | the text between, or nil | |
 | `rep(s, n)` | `s`, `n` times | `argument` for `n` < 0 |
 | `substitute(s, old, new)` | `s` with each `old` replaced | `argument` for `old` = "" |
 | `path(a, b, ...)` | the parts joined with `/` | |
 | `basename(p)`, `strip_suffix(s, t)` | strings | |
 | `tostring(v)` | a scalar's text | `type` for a list or map |
 | `tonumber(s)` | an integer | `argument` for anything but digits |
+| `parse_int(s)` | an integer, or nil | none: anything but an integer is nil |
 | `min`, `max` `(a, b[, c[, d]])` | integers | `argument` for one or more than four |
 | `abs(n)` | an integer | `arithmetic` for the smallest |
 | `date(seconds)`, `seconds(text)` | each other's inverse | `argument` out of range or unreadable |
@@ -492,7 +576,8 @@ the errors column says the rest.
 | `now()`, `budget()` | the host's time; what is left | |
 | `print(...)` | nil | `type` for a list or map |
 | `yield()` | nil | |
-| `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function}` | (the language's own: see `attempt`) |
+| `arg(name[, default])` | the run's value by that name, or `default` | `argument` for a value not of an integer or boolean default's kind |
+| `attempt(f, ...)` | `{ok, value}` or `{ok = false, error, class, line, column, in_function, trail}` | (the language's own: see `attempt`) |
 | the prelude's `walk_all(p, opts)`, `count_all(p, s)`, `find_next(p, s, at)` | every entry; every occurrence; the next one | as `walk`, `count_in`, `find_in` |
 
 ### The store
@@ -506,6 +591,10 @@ the errors column says the rest.
 | `read(p)` | the whole file | a read; each byte a read byte, and a step for 16 | `argument` for a file over the call-bytes cap (1 MiB): read it in parts; `budget read_bytes` when the file is longer than what is left; `store` |
 | `read_or(p, default)` | the whole file, or `default` when nothing is at `p` | one read: where `exists` then `read` was two; its bytes as `read`'s | as `read`; a folder is `store` |
 | `read(p, offset[, n])` | `n` bytes from byte `offset`, or to the end; fewer where the file ends, and "" from its end or past it. **Offsets are 0-based**, as the site's sidecars count them | a read; only those bytes | `argument` for a negative offset or count, or for more than the call-bytes cap; `store` for a folder or a missing file |
+| `read_lines(p[, offset[, n]])` | `{lines, next, done}`: the whole lines from byte `offset` (0 unset), at least `n` bytes (64 KiB unset) and on to the end of the line it stops in, so no line is cut; `lines` as `lines` splits them; `next` where the next part starts; `done` whether that is the file's end. `offset` is a line's start, as `next` is | a read; the part's bytes, and up to 512 past it for the last line's end; the whole part at most the call-bytes cap | `argument` for a negative offset, `n` under 1 or past the cap, or a line longer than the cap; `store` |
+| `grep(p, s)` | the lines of the file holding `s`, a literal, as `{line, text}`, `line` 1-based, in order, a line once however often it holds `s` | a read; the file whole, a step for 16 bytes, and each line kept a step a byte. At most the call-bytes cap: a bigger file goes through `read_lines` | `argument` for `s` empty or a file past the cap; `store` |
+| `edit(p, old, new[, {all, word}])` | the number of occurrences of `old` replaced by `new`; **the change's diff is printed first** (unified: `--- a/p`, `+++ b/p`, a hunk for the lines each occurrence is on). `old` must be in the file once, unless `all`; `word` takes only whole words (no letter, digit or `_` either side). Logged as `edit`; in a dry run the diff is all it does | a read, the file whole (at most the call-bytes cap), a step for 16 bytes; then `replace`'s change | `argument` for `old` empty, not there, or there more than once without `all`; as `read` and `replace` |
+| `line_at(p, offset)` | the whole line holding byte `offset`, without its newline (a newline is its own line's last byte); nil at the file's end or past it | a read; the line, read back and on from `offset` 512 bytes at a time, then once more whole | `argument` for a negative offset or a line longer than the call-bytes cap; `store` |
 | `count_lines(p[, offset[, n]])` | the lines in a file, as `#lines(read(p))` counts them. **Of a range**, `n` bytes from `offset` (or to the end), the newlines in it and, if it reaches the end, a last line without one: the parts' counts add up to the whole's | a read; each byte a read byte, and a step for 16; a step a line; one buffer of 128 KiB for every scan of the run, whatever the file's size, the needle's length and however many files | `argument` for a range (the whole file, without one) over the call-bytes cap (1 MiB): scan it in parts; `store` |
 | `count_in(p, s[, offset[, n]])` | how many times `s` occurs, none overlapping; of a range, the matches that start in it, each read to its end (at most `#s - 1` bytes past the range). The parts add up to the whole's unless a match that runs past a part's end overlaps one the next part counts, which only a needle that overlaps itself (`aa`) can do | as `count_lines`, and a step for each match, or first byte of one, it stops at | `argument` for "" or a needle over 64 KiB, or as `count_lines` |
 | `find_in(p, s[, offset[, n]])` | the 0-based offset of the first `s`, a `read` offset, or nil; of a range, the first that starts in it, so a file found in parts gives what the whole file's would | as `count_in`, stopping at the first | as `count_in` |
@@ -525,6 +614,11 @@ the errors column says the rest.
   or "" for the start). The walk goes on after it in its own order, the
   path there or not: each folder on it is listed again, and the walk
   takes the first name past it. In parts, a walk gives each entry once.
+- `keep_reads`: the reads to keep for the rest of the run (QUEUE 229).
+  The part ends with its `more` entry before an entry could leave fewer:
+  an entry takes at most two (its stat, and a folder's listing). With no
+  room for the walk's own listings and one entry, it reads nothing and
+  gives only `{kind = "more"}` at `after`. The prelude's `walk_upto` uses it.
 
 An entry that `like` or `kind` leaves out is never stat'ed.
 
@@ -553,10 +647,13 @@ the bytes compared there a step for 16 (see "What a builtin costs").
 | `sub(s, i[, j])` | Lua's: 1-based, inclusive, negatives counted from the end, clamped |
 | `trim(s)`, `upper(s)`, `lower(s)` | ASCII only |
 | `like(s, pattern)` | whether the whole of `s` matches: `*` is any run of bytes, `?` is one byte, any other byte is itself. Every byte looked at is a step, so a pattern that backtracks a long string runs out of steps |
+| `between(s, a, b)` | the text after the first `a` in `s` and before the first `b` after it, or nil when either is not there; `a` of "" is the start, `b` of "" the end: `between(line, "DEPARTS (", ")")`. A field's extraction, without regular expressions |
+| `match_path(path, pattern)` | whether a path matches a glob, part by part on `/`: `**` is any number of parts, none included; in any other part `*` and `?` are `like`'s, never across a `/`. `src/**/*.zig` is every `.zig` under `src`, `src/tcp*.zig` only those in it. The prelude's `glob` uses it |
 | `rep(s, n)` | `s`, `n` times over; charged before it is made |
 | `substitute(s, old, new)` | every `old` replaced by `new`, left to right, none overlapping; `old` = "" is an error |
 | `tostring(v)` | a scalar's text, as `print` writes it |
 | `tonumber(s)` | an optional `-` and decimal digits; anything else is an `argument` error |
+| `parse_int(s)` | the integer `s` says, the blanks around it let be (spaces, tabs, `\r`, `\n`), or nil for anything else: a word, a torn line, a number past 64 bits. nil gives nil and an integer itself, so a field that is missing (`get`) reads as no number. For data the script did not write |
 | `path(a, b, ...)` | the parts (one to four) joined with `/`, each "" left out, so "" is the root: `path("", "top.txt")` is `top.txt` |
 | `basename(p)` | what follows the last `/`, or all of `p` |
 | `strip_suffix(s, t)` | `s` without `t` at its end, or `s` as it is |
@@ -612,6 +709,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 | `reverse(l)` | in place |
 | `keys(m)` | a map's keys, in the order first set |
 | `has_key(m, k)` | whether `m` has `k` |
+| `get(t, k[, default])` | `t[k]`, a map's value or a list's item, or `default` (nil unset) where there is none: no stop for a missing key or an index out of range. A key of the wrong kind for the table is still a `type` error |
 | `count(t)` | a map's entries, or a list's length (`#` works for lists and strings) |
 
 ### The host and output
@@ -621,6 +719,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 | `now()` | the integer the host handed in: the only time a script has |
 | `budget()` | a map of what is left of `steps`, `reads`, `read_bytes`, `changes`, `change_bytes` and `output`, so a script can stop at a point of its own (the other budgets are not in it) |
 | `print(...)` | scalars only. It evaluates every argument first, joins them with tabs, and ends with a newline: `print()` is an empty line, `print(nil, true)` is `nil<TAB>true` |
+| `arg(name[, default])` | the value the run was given as `name` (the runner's `name=value`), or `default` (nil unset): a script's inputs. An integer or boolean default reads the value as one (`true`, `false`, `1`, `0`); any other, the string. The live site's route gives no values |
 | `yield()` | nil: a collection point, where the run keeps only the values it still reaches (see "The VM"). When a run pauses is the host's to say, never the script's |
 
 ## The prelude
@@ -636,6 +735,28 @@ own, from its line on.
 | `walk_all(p, opts)` | every entry `walk(p, opts)` gives, across all its parts, the `more` entries left out; `opts` is not changed | `walk`'s, a part at a time |
 | `count_all(p, s)` | `s`'s occurrences in the whole file | a stat, then a `count_in` a megabyte |
 | `find_next(p, s, at)` | the 0-based offset of the first `s` at or after `at`, or nil | a `find_in` from `at`; a stat and more parts only when that finds nothing |
+| `walk_upto(p, opts, keep)` | `{entries, more, done}`: every entry from `opts.after` on, as `walk_all`, until the walk ends (`done`, `more` is "") or its reads would leave fewer than `keep` (not `done`: `more` is the path the next walk goes on after) | `walk`'s, a part at a time, with `keep_reads = keep` |
+| `glob(pattern)` | every file whose path matches `pattern` (`match_path`), in the walk's order; the walk starts at the parts before the first wildcard and passes by hidden names (`walk`'s `skip = ".*"`). A pattern with no wildcard is that file, if it is one | `walk_all`'s |
+| `room_for(need)` | whether what is left of the budgets holds `need`, a map of `budget()`'s names: `room_for({reads = 3, read_bytes = n})` | a `budget()` |
+
+**A walk past what the budget walks, told in parts** (metal-vmm QUEUE
+229): `walk_upto` walks as far as the reads allow, keeping `keep` for what
+the script does next, and says where it stopped; the script prints what it
+found and `resume after <path>`, and a later run starts from there (`const
+START`, given to `opts.after`). Work done an entry at a time guards each
+with `room_for` and resumes after the last entry it finished. The
+cookbook's walks all do this:
+
+```shale
+const START = ""
+local part = walk_upto("chat", {kind = "file", after = START}, 1)
+local bytes = 0
+for e in part.entries do bytes = bytes + e.size end
+print(#part.entries, bytes, part.done)
+if not part.done then print("resume after " .. part.more) end
+-- prints:
+-- 10<TAB>4780<TAB>true
+```
 
 **The walk in parts, in full,** as `walk_all` does it: each call
 considers at most 256 entries and ends its part with `{kind = "more"}`,
@@ -676,34 +797,44 @@ print(found, count_all("chat/channels/general/sessions/plans.md", "MSG_"))
 -- 40<TAB>40
 ```
 
-**A big file's lines, a part at a time:** `read(p, offset, n)` cuts lines
-at a part's end, so carry the cut line into the next part. Here, the lines
-holding `from:`, in parts of 512 bytes:
+**A big file's lines, a part at a time,** with `read_lines`: each part is
+whole lines, at least the bytes asked and on to the end of the line it
+stops in, and says where the next starts. Here, the lines holding `from:`,
+in parts of 512 bytes:
 
 ```shale
 function lines_with(path, s, part)
-  local size = stat(path).size
   local n = 0
-  local carry = ""
   local at = 0
-  while at < size do
-    local text = carry .. read(path, at, part)
-    at = at + part
-    local ls = lines(text)
-    carry = ""
-    if at < size and not ends_with(text, "\n") then
-      carry = ls[#ls]
-      ls = take(ls, #ls - 1)
-    end
-    for l in ls do
+  while true do
+    local r = read_lines(path, at, part)
+    for l in r.lines do
       if contains(l, s) then n = n + 1 end
     end
+    if r.done then return n end
+    at = r.next
   end
-  return n
 end
 print(lines_with("chat/channels/general/sessions/plans.md", "from:", 512))
 -- prints:
 -- 40
+```
+
+**Data a script did not write** (a log, a sidecar, a line torn by a crash)
+stops a report on its first odd line if it is read strictly. Three
+builtins read it leniently: `parse_int(s)` is an integer or nil where
+`tonumber` stops the run; `get(t, k, default)` is `t[k]` or the default,
+never a missing key's stop; `line_at(p, offset)` is the whole line around
+an offset a search found:
+
+```shale
+local fields = words("2026-10-17 GET /x 200 log-x")
+print(parse_int(get(fields, 4, "")), parse_int(get(fields, 5, "")), get(fields, 9, "none"))
+local at = find_in("chat/channels/general/sessions/plans.md", "message 7,")
+print(line_at("chat/channels/general/sessions/plans.md", at))
+-- prints:
+-- 200<TAB>nil<TAB>none
+-- message 7, a line of it
 ```
 
 ## The store
@@ -801,12 +932,12 @@ budgets, and changes nothing.
 
 | script | what it does | how it keeps to the budgets |
 |---|---|---|
-| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | the prelude's `walk_all`: a read a folder and an entry |
-| `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars |
-| `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_all`, a transcript of any size, until the read budget has no room for the next; the rest are listed by size |
-| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_next`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget and says how far it got |
+| `where_the_bytes_are.shale` | each top-level folder's files, bytes and empty files, then the largest files | the prelude's `walk_upto`: a read a folder and an entry, as far as the reads go, then `resume after` |
+| `chat_topics.shale` | the chat topic by topic: messages from the count caches, the quiet topics, and the caches stale or missing | reads no transcript: the sizes come from `walk`, the messages from the sidecars; the walk takes at most half the reads, each cache `room_for` one, then `resume after` |
+| `stale_caches.shale` | every count cache checked against its transcript's own separators | `count_all`, a transcript of any size, until the read budget has no room for the next; the rest are listed by size; past the reads, `resume after` |
+| `find_message.shale` | a phrase found in each topic, with its message's id, sender and date | `find_next`, a megabyte at a time (the call-bytes cap), then 2 KiB read before the match; stops at the read budget, says how far it got and where to resume |
 | `topics.shale` | every topic with its message count | `count_in` of `MSG_` a transcript, `count_all` past the cap: none held |
-| `big_files.shale` | files over a size | `walk_all`, files only |
+| `big_files.shale` | files over a size | `walk_upto`, files only, then `resume after` |
 | `delete_topic.shale` | one topic deleted, as `chat_retire.zig` does: its transcript, sidecars and uploads | a change each |
 | `first_change.shale` | one small change, a folder and a file, easy to check and to undo | |
 
@@ -884,9 +1015,21 @@ first.
 ## The runner
 
 ```sh
+shale [--root DIR] [--write] [--budget NAME=N]... (FILE | -e SOURCE) [NAME=VALUE]...
 SHALE_ROOT=/a/copy/of/data zig build script -- src/script/examples/topics.shale
 ```
 
+- **The root** is `--root`, else `SHALE_ROOT`, else the working
+  directory.
+- **A dry run unless `--write`**: its changes are logged, none made, and
+  it says so at the end.
+- `--budget NAME=N` sets one budget: `steps`, `reads`, `read_bytes`,
+  `output_bytes`, `changes`, `change_bytes`, `arena_bytes`, `call_bytes`
+  or `call_entries`.
+- `-e SOURCE` is the script itself, in place of a file.
+- `NAME=VALUE` after the script is a value it reads with `arg(NAME,
+  default)`. On the live site's route a script has no values: `arg` gives
+  its default.
 - `SHALE_NOW` sets `now()` (default 0).
 - The runner sets the store's bases as a server does, so path limits are
   measured as metal measures them.
@@ -935,6 +1078,30 @@ zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
 `~/.shale_signing_key`, mode 600, never printed) and signs a script with
 the next sequence number. The steps for the site are in
 zig-metal-unikernel's README, "Release notes: the script route".
+
+## The installed suite: scripts on a schedule
+
+**An application's own scripts, run every so often** (`src/shale_suite.zig`,
+metal-vmm QUEUE 229): it declares each as `{name, source =
+@embedFile(...), args, period_s}`, installs them once (`Suite.install`, with
+its long-lived allocator, the background budgets and the auth paths), and
+calls `suite.step(io, now)` from its `between`, which answers a `Wake`.
+
+- **Each runs as a background run**: it only reads, a slice at a time
+  between requests. A change is the background run's `argument` error.
+- **On a schedule**: every script at the first step, then every
+  `period_s` from when it was due (`wake.periodAfter`), never from when it
+  ran, so lateness does not accumulate. One runs at a time.
+- **A signed background run goes first**: while one is going, the suite
+  waits.
+- **What it keeps**: each name's last run, `{auth}/shale/suite/<name>.out`,
+  replaced whole: its first line `<unix seconds> <how it ended>`, then what
+  it printed, at most 64 KiB (the run's output budget, capped). A line in
+  `shale/log` as each ends. `readKept` reads one; `writeStatus` is a GET's
+  page of them.
+- **Not built: running one by name on request.** It would be a run behind
+  the admin's bearer key alone, with no signature: the auth path's call,
+  proposed, not made.
 
 ## For a host
 

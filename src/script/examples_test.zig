@@ -322,9 +322,9 @@ fn complain(comptime fmt: []const u8, args: anytype) void {
     if (!quiet) std.debug.print(fmt, args);
 }
 
-const Snippet = struct { line: usize, source: []const u8, prints: ?[]const u8, stops: ?[]const u8 };
+pub const Snippet = struct { line: usize, source: []const u8, prints: ?[]const u8, stops: ?[]const u8 };
 
-fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
+pub fn snippets(a: std.mem.Allocator, doc: []const u8) ![]Snippet {
     var out: std.ArrayList(Snippet) = .empty;
     var lines = std.mem.splitScalar(u8, doc, '\n');
     var n: usize = 0;
@@ -459,4 +459,140 @@ test "docs/SHALE.md's check fires: a snippet whose output is wrong, one with no 
     defer quiet = false;
     for (planted) |p| try testing.expectError(error.TestUnexpectedResult, checkDoc(p));
     try testing.expectEqual(@as(usize, 1), try checkDoc("```shale\nprint(1, 2)\n-- prints:\n-- 1<TAB>2\n```\n"));
+}
+
+// ── 229, chunk 2: partial results at a budget ────────────────────────────
+
+/// `src` with its `const START = ""` set to `start`.
+fn startingAt(a: std.mem.Allocator, src: []const u8, start: []const u8) ![]u8 {
+    const line = "const START = \"\"";
+    const at = std.mem.indexOf(u8, src, line) orelse return error.NoStart;
+    return std.fmt.allocPrint(a, "{s}const START = \"{s}\"{s}", .{ src[0..at], start, src[at + line.len ..] });
+}
+
+/// What follows "resume after " on its line, or null.
+fn resumeAfter(output: []const u8) ?[]const u8 {
+    const key = "resume after ";
+    const at = std.mem.indexOf(u8, output, key) orelse return null;
+    const rest = output[at + key.len ..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len];
+}
+
+/// The `all` row's files and bytes, as `where_the_bytes_are` prints it.
+fn allRow(output: []const u8) ![2]u64 {
+    const at = std.mem.indexOf(u8, output, "\nall ") orelse return error.NoAllRow;
+    var it = std.mem.tokenizeScalar(u8, output[at + 5 ..], ' ');
+    return .{ try std.fmt.parseInt(u64, it.next().?, 10), try std.fmt.parseInt(u64, it.next().?, 10) };
+}
+
+test "example: where the bytes are, past what the site's reads walk, prints what it found and where to resume, and the rest from there completes the totals (QUEUE 229)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const io = f.threaded.io();
+    // 600 files in 20 folders: more than 500 reads can stat.
+    for (0..20) |d| {
+        try f.tmp.dir.createDirPath(io, try std.fmt.allocPrint(a, "data/bulk/d{d:0>2}", .{d}));
+        for (0..30) |k| try f.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "data/bulk/d{d:0>2}/f{d:0>2}", .{ d, k }), .data = "x" ** 10 });
+    }
+    var whole_buf: [64 * 1024]u8 = undefined;
+    var whole = script.run(io, testing.allocator, f.root, where_the_bytes_are, .{}, 1791936000, &whole_buf);
+    defer whole.deinit();
+    try finished(&whole);
+    try testing.expectEqual(@as(?[]const u8, null), resumeAfter(whole.output));
+    const total = try allRow(whole.output);
+
+    var first = script.run(io, testing.allocator, f.root, where_the_bytes_are, site_budgets, 1791936000, &out_buf);
+    defer first.deinit();
+    errdefer std.debug.print("{s}\n", .{first.output});
+    try finished(&first);
+    const resume_at = resumeAfter(first.output) orelse return error.NoResumeLine;
+    const part = try allRow(first.output);
+    try testing.expect(part[0] > 0 and part[0] < total[0]);
+
+    var second_buf: [64 * 1024]u8 = undefined;
+    var second = script.run(io, testing.allocator, f.root, try startingAt(a, where_the_bytes_are, resume_at), site_budgets, 1791936000, &second_buf);
+    defer second.deinit();
+    try finished(&second);
+    try testing.expectEqual(@as(?[]const u8, null), resumeAfter(second.output));
+    const rest = try allRow(second.output);
+    try testing.expectEqual(total[0], part[0] + rest[0]);
+    try testing.expectEqual(total[1], part[1] + rest[1]);
+}
+
+/// The integer after `key` (and a tab or a space) in `output`.
+fn numberAfter(output: []const u8, key: []const u8) !u64 {
+    const at = std.mem.indexOf(u8, output, key) orelse return error.NoKey;
+    var rest = output[at + key.len ..];
+    while (rest.len > 0 and (rest[0] == '\t' or rest[0] == ' ')) rest = rest[1..];
+    var n: usize = 0;
+    while (n < rest.len and std.ascii.isDigit(rest[n])) n += 1;
+    return std.fmt.parseInt(u64, rest[0..n], 10);
+}
+
+test "every cookbook script that walks, past what the site's reads reach, goes on from where it says and adds up to the whole run (QUEUE 229)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const io = f.threaded.io();
+    // 300 topics in one channel, each with its count cache, and 300 big
+    // files beside them: more than 500 reads walk.
+    try f.tmp.dir.createDirPath(io, "data/chat/channels/bulk/sessions");
+    try f.tmp.dir.createDirPath(io, "data/bulk");
+    for (0..300) |k| {
+        const sid = try std.fmt.allocPrint(a, "t{d:0>3}", .{k});
+        const text = try transcript(a, sid, 2);
+        try f.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "data/chat/channels/bulk/sessions/{s}.md", .{sid}), .data = text });
+        try f.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "data/chat/channels/bulk/sessions/{s}.count", .{sid}), .data = try std.fmt.allocPrint(a, "2 {d}\n0 7\n", .{text.len}) });
+        try f.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "data/bulk/b{d:0>3}", .{k}), .data = "y" ** 1200 });
+    }
+    const cases = [_]struct { name: []const u8, src: []const u8, key: []const u8 }{
+        .{ .name = "big_files", .src = big_files, .key = "files over 1000 bytes:" },
+        .{ .name = "chat_topics", .src = chat_topics, .key = "topics" },
+        .{ .name = "stale_caches", .src = stale_caches, .key = "topics checked" },
+        .{ .name = "find_message", .src = find_message, .key = "\" in" },
+    };
+    var whole_buf: [256 * 1024]u8 = undefined;
+    for (cases) |c| {
+        errdefer std.debug.print("{s}\n", .{c.name});
+        var whole = script.run(io, testing.allocator, f.root, c.src, .{}, 1791936000, &whole_buf);
+        defer whole.deinit();
+        try finished(&whole);
+        try testing.expectEqual(@as(?[]const u8, null), resumeAfter(whole.output));
+        const total = try numberAfter(whole.output, c.key);
+        var sum: u64 = 0;
+        var start: []const u8 = "";
+        var runs: usize = 0;
+        while (true) : (runs += 1) {
+            if (runs == 20) return error.NeverEnds;
+            var r = script.run(io, testing.allocator, f.root, try startingAt(a, c.src, start), site_budgets, 1791936000, &whole_buf);
+            defer r.deinit();
+            errdefer std.debug.print("run {d} from \"{s}\":\n{s}\n", .{ runs, start, r.output });
+            try finished(&r);
+            sum += try numberAfter(r.output, c.key);
+            const next = resumeAfter(r.output) orelse break;
+            try testing.expect(!std.mem.eql(u8, next, start));
+            start = try a.dupe(u8, next);
+        }
+        try testing.expect(runs > 0);
+        try testing.expectEqual(total, sum);
+    }
+}
+
+test "example: a count cache torn into words, or into nothing, is read as no cache: chat_topics and stale_caches report it and go on (QUEUE 229)" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const io = f.threaded.io();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/channels/general/sessions/plans.count", .data = "log-x 4000\n" });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/hello.count", .data = "\n" });
+    for ([_][]const u8{ chat_topics, stale_caches }) |src| {
+        var r = f.runAt(src, 1791936000, &out_buf);
+        defer r.deinit();
+        errdefer std.debug.print("{s}\n", .{r.output});
+        try finished(&r);
+        try testing.expect(std.mem.indexOf(u8, r.output, "plans") != null);
+    }
 }

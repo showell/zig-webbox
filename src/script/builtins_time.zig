@@ -15,6 +15,7 @@ const spec = bi.spec;
 
 pub const specs = [_]bi.Spec{
     spec(.now, 0, 0, now),
+    spec(.arg, 1, 2, givenArg),
     spec(.budget, 0, 0, budget),
     spec(.yield, 0, 0, yield),
     spec(.date, 1, 1, date),
@@ -23,6 +24,33 @@ pub const specs = [_]bi.Spec{
 
 fn now(run: *Run, _: ast.Pos, _: []const Value) Error!Value {
     return .{ .int = run.now };
+}
+
+/// **`arg(name[, default])`** (metal-vmm QUEUE 229, chunk 4): the value the
+/// run was given as `name` (the Linux tool's `name=value`), or `default`
+/// (nil unset) when it was given none: a script's inputs, where they were
+/// once edited into its source. A default that is an integer or a boolean
+/// reads the value as one (`true`, `false`, `1`, `0`), and a value that
+/// is none is an `argument` error; any other default, the string as given.
+fn givenArg(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    const name = try bi.stringArg(run, pos, .arg, args[0], "its name");
+    try run.charge(pos, name.len);
+    const fallback: Value = if (args.len > 1) args[1] else .nil;
+    for (run.args) |a| {
+        if (!std.mem.eql(u8, a.name, name)) continue;
+        try run.charge(pos, a.value.len);
+        run.tally(name.len + a.value.len);
+        switch (fallback) {
+            .int => return .{ .int = bi.parseInteger(a.value) orelse return run.fail(pos, .argument, "`arg`: {s}={s} is not an integer, and its default is one", .{ name, a.value[0..@min(a.value.len, 40)] }) },
+            .boolean => {
+                if (std.mem.eql(u8, a.value, "true") or std.mem.eql(u8, a.value, "1")) return .{ .boolean = true };
+                if (std.mem.eql(u8, a.value, "false") or std.mem.eql(u8, a.value, "0")) return .{ .boolean = false };
+                return run.fail(pos, .argument, "`arg`: {s}={s} is not true or false, and its default is one", .{ name, a.value[0..@min(a.value.len, 40)] });
+            },
+            else => return .{ .string = run.alloc.dupe(u8, a.value) catch return run.oom(pos) },
+        }
+    }
+    return fallback;
 }
 
 /// **`yield()`** (metal-vmm QUEUE 211, M1, as Steve's model of 2026-10-15

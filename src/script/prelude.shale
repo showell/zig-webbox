@@ -23,6 +23,64 @@ function walk_all(path, opts)
   end
 end
 
+-- **AS FAR AS THE READS ALLOW** (metal-vmm QUEUE 229): every entry `walk`
+-- gives from `opts.after` on, a part at a time, until the walk ends or
+-- its reads would leave fewer than `keep` for the rest of the script:
+-- `{entries, more, done}`. Not `done`, `more` is the path a later walk goes
+-- on after (`opts.after = more`), and every entry up to it is in
+-- `entries`. `opts` is not changed.
+function walk_upto(path, opts, keep)
+  local o = {after = ""}
+  for k in keys(opts) do o[k] = opts[k] end
+  o.keep_reads = keep
+  local got = {}
+  while true do
+    local more = nil
+    for e in walk(path, o) do
+      if e.kind == "more" then more = e.path else push(got, e) end
+    end
+    if more == nil then return {entries = got, more = "", done = true} end
+    -- A part that took nothing had no room to: the reads are what is kept.
+    if more == o.after then return {entries = got, more = more, done = false} end
+    o.after = more
+  end
+end
+
+-- Whether what is left of the budgets holds `need`, a map of `budget()`'s
+-- names (`{reads = 2, read_bytes = 4096}`): the guard before work a
+-- budget would stop half done.
+function room_for(need)
+  local left = budget()
+  for k in keys(need) do
+    if left[k] < need[k] then return false end
+  end
+  return true
+end
+
+-- **THE FILES A GLOB NAMES** (metal-vmm QUEUE 229): every file whose path
+-- matches `pattern` (`match_path`: `**` any parts, `*` and `?` in one),
+-- sorted as the walk goes. The walk starts at the pattern's parts before
+-- its first wildcard, and passes by hidden names (`.git`, `.zig-cache`).
+function glob(pattern)
+  local parts = split(pattern, "/")
+  local base = {}
+  for p in parts do
+    if contains(p, "*") or contains(p, "?") then break end
+    push(base, p)
+  end
+  local from = join(base, "/")
+  local got = {}
+  if #base == #parts then
+    if exists(from) and not is_dir(from) then push(got, from) end
+    return got
+  end
+  if from ~= "" and not exists(from) then return got end
+  for e in walk_all(from, {kind = "file", skip = ".*"}) do
+    if match_path(e.path, pattern) then push(got, e.path) end
+  end
+  return got
+end
+
 -- How many times `s` occurs in the file, a part at a time: one scan brings
 -- at most the call-bytes cap (1 MiB). A stat, then a scan a part.
 function count_all(path, s)

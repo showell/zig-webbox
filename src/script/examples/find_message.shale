@@ -1,10 +1,12 @@
 -- Find a phrase in the chat: the first message in each topic that has it,
 -- with who sent it and when. find_next scans a transcript without
 -- holding it; only the 2 KiB before a match is read, to find its message's start.
--- When the read budget runs low it stops, and says how far it got.
+-- When the read budget runs low it stops, says how far it got, and where
+-- the next run goes on (`resume after <path>`: set START to it).
 
 const PHRASE = "line of it"
 const WINDOW = 2048
+const START = ""
 
 -- A topic's label: "#channel sid" or "conversation sid".
 function label(path)
@@ -21,18 +23,25 @@ function message(path, at)
   local before = read(path, from, at - from)
   local pieces = split(before, "MSG_")
   local head = lines(pieces[#pieces])
-  return {id = "MSG_" .. head[1], from = sub(head[2], 7), date = sub(head[3], 7)}
+  -- A message torn or too long for the window has fewer lines: "?".
+  return {id = "MSG_" .. get(head, 1, "?"), from = sub(get(head, 2, "from: ?"), 7), date = sub(get(head, 3, "date: ?"), 7)}
 end
 
-local topics = walk_all("chat", {like = "*.md", kind = "file"})
+local part = walk_upto("chat", {like = "*.md", kind = "file", after = START}, budget().reads // 2)
+local topics = part.entries
 local found = {}
 local looked = 0
+local last = START
+local resume = nil
 for e in topics do
-  if budget().read_bytes < e.size + WINDOW then
+  -- A scan a part (the call-bytes cap), a stat, and the window's read.
+  if not room_for({reads = 3 + e.size // 1048576, read_bytes = e.size + WINDOW}) then
     print("stopped at the read budget, after " .. looked .. " of " .. #topics .. " topics")
+    resume = last
     break
   end
   looked = looked + 1
+  last = e.path
   -- A transcript of any size: the prelude's find_next scans it a part
   -- (the call-bytes cap) at a time.
   local at = find_next(e.path, PHRASE, 0)
@@ -41,5 +50,7 @@ for e in topics do
     push(found, {topic = label(e.path), message = m.id, from = m.from, date = m.date, offset = at})
   end
 end
+if resume == nil and not part.done then resume = part.more end
 print("\"" .. PHRASE .. "\" in " .. #found .. " of " .. looked .. " topics")
 if #found > 0 then print(table(found, {"topic", "message", "from", "date", "offset"})) end
+if resume ~= nil then print("resume after " .. resume) end

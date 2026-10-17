@@ -241,7 +241,7 @@ test "run: the Zig stack the deepest parse and the deepest walk take, measured (
     // and stops at the same place, by the gate).
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
-    var w = script.runOn(.walker, threaded.io(), testing.allocator, ".zig-cache/no-root", deep.items, .{}, 1_700_000_000, &out_buf);
+    var w = script.runOn(.walker, threaded.io(), testing.allocator, ".zig-cache/no-root", deep.items, .{}, 1_700_000_000, &out_buf, .{});
     defer w.deinit();
     try testing.expectEqual(script.diag.Budget.depth, w.stop.?.budget.?);
     // And the VM, on the same script, takes next to no Zig stack.
@@ -435,8 +435,11 @@ test "run: 208's cold review: attempt needs its commas; a long chain in a loop c
 /// The machine's memory a shape of a few locals and no calls may take
 /// beside its arena (metal-vmm QUEUE 211): the frames, the operand stack
 /// and the compiled code's arena, whatever the loop's count (68 KB
-/// measured, most of it the code arena's first pages).
-const machine_most = 128 * 1024;
+/// measured, most of it the code arena's first pages). **THE PRELUDE IS
+/// IN IT**, parsed and compiled for every run: with `walk_upto` and
+/// `room_for` (QUEUE 229) its tree crossed a chunk's doubling, and the
+/// machine holds 112 KiB after the compile where it held 48 KiB.
+const machine_most = 256 * 1024;
 
 test "run: the arena budget bounds the memory a run takes: the backing allocator's peak stays under it, for the review's shapes (209)" {
     // At 208, std's arena held 1.7x and 2.0x what was counted: 14.1 MB

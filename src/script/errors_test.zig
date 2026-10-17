@@ -121,7 +121,8 @@ const cases = [_]Case{
     .{ .src = "local x = read(\"none.txt\")", .line = 1, .column = 11, .class = .store, .message = "`read(\"none.txt\")`: not found (FileNotFound): `exists(p)` asks first" },
     .{ .src = "remove(\"none.txt\")", .line = 1, .column = 1, .class = .store, .message = "`remove(\"none.txt\")`: not found (FileNotFound): `exists(p)` asks first" },
     .{ .src = "local x = read(\"x\", -1)", .line = 1, .column = 11, .class = .argument, .message = "`read`: offset -1 is before the file's start" },
-    .{ .src = "local x = walk(\"\", {deep = 1})", .line = 1, .column = 11, .class = .argument, .message = "`walk` takes `depth`, `like`, `kind` and `after`, not `deep`" },
+    .{ .src = "local x = walk(\"\", {deep = 1})", .line = 1, .column = 11, .class = .argument, .message = "`walk` takes `depth`, `like`, `kind`, `skip`, `after` and `keep_reads`, not `deep`" },
+    .{ .src = "local x = walk(\"\", {keep_reads = -1})", .line = 1, .column = 11, .class = .argument, .message = "`walk`: `keep_reads` of -1: it is a count of reads" },
     .{ .src = "local x = walk(\"\", {depth = 0})", .line = 1, .column = 11, .class = .argument, .message = "`walk`: a depth of 0: 1 is the folder's own entries" },
     .{ .src = "local x = count_in(\"x\", \"\")", .line = 1, .column = 11, .class = .argument, .message = "`count_in` of \"\" is an error: there is nothing to look for" },
     .{ .src = "mkdir(\"\")", .line = 1, .column = 1, .class = .argument, .message = "`mkdir(\"\")` would act on the whole root: a change needs a path of at least one part" },
@@ -175,4 +176,140 @@ test "errors: the corpus holds every class of stop" {
     var it = missing.iterator();
     while (it.next()) |class| std.debug.print("no case of class {s}\n", .{@tagName(class)});
     try testing.expectEqual(0, missing.count());
+}
+
+// ── the call trail (metal-vmm QUEUE 229, chunk 1) ────────────────────────────
+
+/// A call site in a trail as a case says it: the function the call is in
+/// ("" at the top level), its line and column.
+const Site = struct { function: []const u8, line: u32, column: u32 };
+
+const TrailCase = struct {
+    src: []const u8,
+    /// Where it stopped, and in which function.
+    line: u32,
+    column: u32,
+    function: []const u8,
+    /// The call sites, innermost first: where the stopped function was
+    /// called, then where that one was, out to the top level.
+    trail: []const Site,
+};
+
+const trail_cases = [_]TrailCase{
+    // A nested call: g stopped, called from f, called from the top.
+    .{ .src = "function g(x) return x + {} end\nfunction f() return g(1) end\nprint(f())", .line = 1, .column = 24, .function = "g", .trail = &.{ .{ .function = "f", .line = 2, .column = 21 }, .{ .function = "", .line = 3, .column = 7 } } },
+    // A recursion: the same function at every level, each its own site.
+    .{ .src = "function r(n)\n  if n == 0 then return 1 // 0 end\n  return r(n - 1)\nend\nr(2)", .line = 2, .column = 27, .function = "r", .trail = &.{ .{ .function = "r", .line = 3, .column = 10 }, .{ .function = "r", .line = 3, .column = 10 }, .{ .function = "", .line = 5, .column = 1 } } },
+    // A stop in the prelude, called from the script: the stop's own line is
+    // the prelude's, and the trail says where the script called it.
+    .{ .src = "function f() return count_all(\"none\", \"x\") end\nf()", .line = 0, .column = 16, .function = "the prelude's count_all", .trail = &.{ .{ .function = "f", .line = 1, .column = 21 }, .{ .function = "", .line = 2, .column = 1 } } },
+    // At the top level: no trail.
+    .{ .src = "local x = 1 // 0", .line = 1, .column = 13, .function = "", .trail = &.{} },
+};
+
+/// The 1-based line of the prelude that is `text`.
+fn preludeLine(text: []const u8) u32 {
+    var it = std.mem.splitScalar(u8, script.parse.prelude, '\n');
+    var n: u32 = 1;
+    while (it.next()) |l| : (n += 1) if (std.mem.eql(u8, l, text)) return n;
+    unreachable;
+}
+
+fn trailRoot(io: std.Io, tmp: *testing.TmpDir) ![]u8 {
+    try tmp.dir.createDir(io, "data", .default_dir);
+    return std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "data" });
+}
+
+test "errors: a stop names every call between it and the top level, innermost first" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const root = try trailRoot(io, &tmp);
+    defer testing.allocator.free(root);
+    for (trail_cases) |c| {
+        var r = script.run(io, testing.allocator, root, c.src, .{}, 0, &out_buf);
+        defer r.deinit();
+        const s = r.stop orelse return error.TestUnexpectedResult;
+        // Line 0: the prelude's own line of `count_all`'s stat, wherever
+        // the prelude has it.
+        try testing.expectEqual(if (c.line == 0) preludeLine("  local size = stat(path).size") else c.line, s.line);
+        try testing.expectEqual(c.column, s.column);
+        try testing.expectEqualStrings(c.function, s.function);
+        try testing.expectEqual(c.trail.len, s.trail.len);
+        // `Stop.trail` is outermost first, as the calls were made.
+        for (c.trail, 0..) |want, k| {
+            const got = s.trail[s.trail.len - 1 - k];
+            try testing.expectEqualStrings(want.function, got.function);
+            try testing.expectEqual(want.line, got.line);
+            try testing.expectEqual(want.column, got.column);
+        }
+    }
+}
+
+test "errors: the report keeps its first line, then says where each call was made" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const root = try trailRoot(io, &tmp);
+    defer testing.allocator.free(root);
+    var r = script.run(io, testing.allocator, root, trail_cases[2].src, .{}, 0, &out_buf);
+    defer r.deinit();
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try script.report(&r, "seq 7", &w);
+    const want =
+        \\── effects (0) ──
+        \\── stopped at seq 7:{d}:16 (in `the prelude's count_all`): store: `stat("none")`: not found (FileNotFound): `exists(p)` asks first (
+    ;
+    var want_buf: [512]u8 = undefined;
+    try testing.expect(std.mem.startsWith(u8, w.buffered(), try std.fmt.bufPrint(&want_buf, want, .{preludeLine("  local size = stat(path).size")})));
+    try testing.expect(std.mem.endsWith(u8, w.buffered(), " steps)\n   called from seq 7:1:21 (in `f`)\n   called from seq 7:2:1\n"));
+}
+
+test "errors: a call site in the prelude is the prelude's line, and the report says so" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const root = try trailRoot(io, &tmp);
+    defer testing.allocator.free(root);
+    // `walk_all` calls `walk`, a builtin: a script's own function of a
+    // prelude function's name is the script's. So a prelude function that
+    // calls a function of the script: none does; the line is held through
+    // `walk_all`'s own builtin stop instead, with the script calling it.
+    var r = script.run(io, testing.allocator, root, "local x = walk_all(\"none\", {})", .{}, 0, &out_buf);
+    defer r.deinit();
+    const s = r.stop.?;
+    try testing.expectEqualStrings("the prelude's walk_all", s.function);
+    try testing.expectEqual(@as(usize, 1), s.trail.len);
+    try testing.expectEqualStrings("", s.trail[0].function);
+    try testing.expectEqual(@as(u32, 11), s.trail[0].column);
+}
+
+test "errors: `attempt`'s failure gives the trail too, innermost first" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const root = try trailRoot(io, &tmp);
+    defer testing.allocator.free(root);
+    const src =
+        \\function g() return 1 // 0 end
+        \\function f() return g() end
+        \\local a = attempt(f)
+        \\print(#a.trail)
+        \\for t in a.trail do print(t.in_function, t.line, t.column) end
+        \\local b = attempt(f)
+        \\print(#b.trail)
+    ;
+    var r = script.run(io, testing.allocator, root, src, .{}, 0, &out_buf);
+    defer r.deinit();
+    try testing.expectEqual(@as(?script.Stop, null), r.stop);
+    try testing.expectEqualStrings("2\nf\t2\t21\n\t3\t11\n2\n", r.output);
 }

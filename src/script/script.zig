@@ -19,11 +19,14 @@ pub const builtins_store = @import("builtins_store.zig");
 pub const compile = @import("compile.zig");
 pub const vm = @import("vm.zig");
 pub const process = @import("process.zig");
+pub const cli = @import("cli.zig");
 
 const std = @import("std");
 const Io = @import("host_io").Io;
 
 pub const Budgets = interp.Budgets;
+pub const Options = process.Options;
+pub const Arg = interp.Arg;
 pub const Effect = interp.Effect;
 pub const Stop = diag.Stop;
 
@@ -39,6 +42,11 @@ pub const Result = struct {
     /// stopped: a run has no rollback, so this says what it changed.
     effects: []const Effect,
     steps: u64,
+    /// What the run took of its store budgets (the Linux tool says so at
+    /// its end: a run's cost, beside what it was allowed).
+    reads: u64 = 0,
+    read_bytes: u64 = 0,
+    changes: u64 = 0,
     /// The work counted in tests (`interp.Run.work`); 0 outside them.
     work: u64 = 0,
     /// The most Zig stack the parse or the walk took, in bytes (docs/SHALE.md,
@@ -78,14 +86,24 @@ pub const Result = struct {
 pub const MachineMemory = process.MachineMemory;
 
 /// **WHAT A RUN DID, IN THE ONE LAYOUT** (metal-vmm QUEUE 200): its effects,
-/// a line each, then how it ended, the stop named as `name:line:column`.
-/// The Linux runner and the script route both print it, so a run reads the
+/// a line each, then how it ended, the stop named as `name:line:column`,
+/// and, after a stop in a function, a line for each call that led there,
+/// innermost first (`called from name:line:column (in `f`)`; a call in the
+/// prelude is `the prelude:line:column`, its line the prelude's). The
+/// Linux runner and the script route both print it, so a run reads the
 /// same on the box as on the site.
 pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.print("── effects ({d}) ──\n", .{r.effects.len});
     for (r.effects) |e| try w.print("{s} {s}: {s}\n", .{ e.op, e.path, e.outcome });
     if (r.stop) |s| {
         try w.print("── stopped at {s}:{d}:{d}{s}{s}{s}: {s}{s}{s}: {s} ({d} steps)\n", .{ name, s.line, s.column, if (s.function.len > 0) " (in `" else "", s.function, if (s.function.len > 0) "`)" else "", @tagName(s.class), if (s.budget != null) " " else "", if (s.budget) |b| @tagName(b) else "", s.message, r.steps });
+        var k = s.trail.len;
+        while (k > 0) {
+            k -= 1;
+            const c = s.trail[k];
+            const at = if (diag.inPrelude(c.function)) "the prelude" else name;
+            try w.print("   called from {s}:{d}:{d}{s}{s}{s}\n", .{ at, c.line, c.column, if (c.function.len > 0) " (in `" else "", c.function, if (c.function.len > 0) "`)" else "" });
+        }
     } else try w.print("── finished ({d} steps)\n", .{r.steps});
 }
 
@@ -95,10 +113,15 @@ pub fn report(r: *const Result, name: []const u8, w: *std.Io.Writer) std.Io.Writ
 /// `out`, and the output budget is at most `out.len`. It always returns a
 /// Result: a source however hostile ends finished or stopped.
 pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+    return runWith(io, backing, root, source, budgets, now, out, .{});
+}
+
+/// `run`, with its options: its mode and its values by name (QUEUE 229).
+pub fn runWith(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8, options: Options) Result {
     // **IN THE TESTS, THE GATE** (metal-vmm QUEUE 211): every run is the
     // VM's, held to the tree-walker's on a copy of the store.
-    if (@import("builtin").is_test) return @import("gate_test.zig").run(io, backing, root, source, budgets, now, out);
-    return runOn(.vm, io, backing, root, source, budgets, now, out);
+    if (@import("builtin").is_test) return @import("gate_test.zig").run(io, backing, root, source, budgets, now, out, options);
+    return runOn(.vm, io, backing, root, source, budgets, now, out, options);
 }
 
 /// What runs a script: **the VM**, which the route and the runner use, or
@@ -115,7 +138,7 @@ pub const Engine = union(enum) {
     vm_background: u64,
 };
 
-pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8) Result {
+pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: Budgets, now: i64, out: []u8, options: Options) Result {
     // **THE VM THROUGH ITS CONTRACT** (`process.zig`): what a host runs is
     // what a one-shot run is, in slices or in one.
     switch (engine) {
@@ -125,8 +148,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
                 .vm_sliced, .vm_background => |n| n,
                 else => std.math.maxInt(u64),
             };
-            const mode: process.Mode = if (engine == .vm_background) .background else .atomic;
-            const p = process.Process.start(io, backing, root, source, mode, budgets, now, out.len) catch {
+            var opts = options;
+            if (engine == .vm_background) opts.mode = .background;
+            const p = process.Process.startWith(io, backing, root, source, opts, budgets, now, out.len) catch {
                 return .{ .arena = .{ .backing = backing, .limit = budgets.arena_bytes }, .stop = .{ .line = 1, .column = 1, .class = .budget, .budget = .machine, .message = "the host could not hold the run" }, .output = out[0..0], .effects = &.{}, .steps = 0 };
             };
             while (p.step(.{ .steps = slice }) == .paused) {}
@@ -173,6 +197,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
         .program = program,
         .out = out,
         .out_cap = @min(out.len, budgets.output_bytes),
+        .read_only = options.mode == .background,
+        .dry_run = options.mode == .dry_run,
+        .args = options.args,
     };
     defer r.deinit();
     // The VM's runs went through its Process above: here, the walker's.
@@ -186,6 +213,9 @@ pub fn runOn(engine: Engine, io: Io, backing: std.mem.Allocator, root: []const u
     result.output = out[0..r.out_len];
     result.effects = r.effects.items;
     result.steps = r.steps;
+    result.reads = r.reads;
+    result.read_bytes = r.read_bytes;
+    result.changes = r.changes;
     result.collections = r.collections;
     result.tried_change = r.tried_change;
     result.work = r.work;
@@ -217,4 +247,6 @@ test {
     _ = @import("props_test.zig");
     _ = @import("yield_test.zig");
     _ = @import("process_test.zig");
+    _ = @import("agent_test.zig");
+    _ = cli;
 }

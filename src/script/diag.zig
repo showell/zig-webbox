@@ -52,4 +52,24 @@ pub const Stop = struct {
     message: []const u8,
     /// The script's function it stopped in, by name; "" at the top level.
     function: []const u8 = "",
+    /// **HOW IT GOT THERE** (metal-vmm QUEUE 229, chunk 1): every call
+    /// between the top level and `function`, outermost first, each where it
+    /// was made. Empty at the top level. Owned by the run's machine memory.
+    trail: []const Call = &.{},
 };
+
+/// **ONE CALL IN A TRAIL**: where it was made, and in which function ("" at
+/// the top level; a prelude function's name says so, "the prelude's f", and
+/// its line is the prelude's).
+pub const Call = struct {
+    line: u32,
+    column: u32,
+    function: []const u8,
+};
+
+/// Whether `function` is the prelude's, so a line in it is the prelude's.
+pub fn inPrelude(function: []const u8) bool {
+    return std.mem.startsWith(u8, function, "the prelude's ");
+}
+
+const std = @import("std");

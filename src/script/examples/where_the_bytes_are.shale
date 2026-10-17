@@ -1,12 +1,16 @@
 -- Where the data root's bytes are: each top-level folder's files, bytes and
 -- empty files, then the largest files. Reads only: a store read a folder and
--- an entry (walk).
+-- an entry (walk). A root larger than the read budget walks is told in
+-- parts: what this run found, then where the next one goes on (`resume
+-- after <path>`: set START to it).
 
 const LARGEST = 15
+const START = ""
 
 local folders = {}
 local files = {}
-for e in walk_all("", {}) do
+local part = walk_upto("", {after = START}, 0)
+for e in part.entries do
   if e.kind == "file" then
     local parts = split(e.path, "/")
     local top = "(the root)"
@@ -43,3 +47,8 @@ end
 print("")
 print("the largest files:")
 print(table(largest, {"bytes", "size", "path"}))
+if not part.done then
+  print("")
+  print("a part of the root: the read budget ended the walk")
+  print("resume after " .. part.more)
+end

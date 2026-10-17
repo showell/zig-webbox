@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
             var arena: usize = 0;
             const t0 = std.Io.Clock.awake.now(io).nanoseconds;
             while (runs < 3 or std.Io.Clock.awake.now(io).nanoseconds - t0 < std.time.ns_per_s / 2) : (runs += 1) {
-                var r = script.runOn(engine, io, gpa, ".", c.src, budgets, 0, out);
+                var r = script.runOn(engine, io, gpa, ".", c.src, budgets, 0, out, .{});
                 defer r.deinit();
                 if (r.stop) |s| {
                     try w.print("{s}: stopped {d}:{d}: {s}\n", .{ c.name, s.line, s.column, s.message });

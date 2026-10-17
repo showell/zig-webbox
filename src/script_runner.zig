@@ -1,19 +1,25 @@
-//! **THE SHALE RUNNER, FOR LINUX** (metal-vmm QUEUE 199): how a script is
-//! written and tried, against a copy of a site's data, before there is an
-//! endpoint to send it to.
+//! **SHALE ON LINUX** (metal-vmm QUEUE 199; as an agent's tool, QUEUE 229):
+//! a script run against a folder, a site's data or a code checkout, inside
+//! its budgets, so whatever it does is bounded: its steps, its reads, what
+//! it prints, what it changes.
 //!
-//!     SHALE_ROOT=/path/to/a/copy/of/data zig build script -- examples/topics.shale
+//!     shale [--root DIR] [--write] [--budget NAME=N]... (FILE | -e SOURCE) [NAME=VALUE]...
+//!     zig build script -- <the same>
 //!
-//! `SHALE_ROOT` is the data root (required); `SHALE_NOW`, the integer
-//! `now()` answers (default 0). The store's bases are set as a server sets
-//! them, the root and `<root>/../auth`, so its path limits are measured as
-//! the bare-metal host spells them. It prints what the script printed, the
-//! effects log, and how the run ended. Exit 0 finished, 1 stopped, 2 a
-//! runner's own error. Outside the script module: it may name the host.
+//! The root is `--root`, else `SHALE_ROOT`, else the working directory;
+//! `SHALE_NOW` is the integer `now()` answers (0 unset). **A DRY RUN UNLESS
+//! `--write`**: changes are checked and logged, an `edit`'s diff printed,
+//! and none made. The store's bases are set as a server sets them, the root
+//! and `<root>/../auth`, so its path limits are measured as the bare-metal
+//! host spells them. It prints what the script printed on stdout, then the
+//! effects and how the run ended on stderr. Exit 0 finished, 1 stopped, 2
+//! a command line or a file it could not take. Outside the script module:
+//! it may name the host.
 
 const std = @import("std");
 const webbox = @import("webbox");
 const script = webbox.script;
+const cli = script.cli;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -23,32 +29,32 @@ pub fn main(init: std.process.Init) !u8 {
     const err = &ew.interface;
     defer err.flush() catch {};
 
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) {
-        try err.writeAll("usage: SHALE_ROOT=<data folder> shale <script.shale>  (SHALE_NOW=<integer> sets now())\n");
-        return 2;
-    }
-    const root = init.environ_map.get("SHALE_ROOT") orelse {
-        try err.writeAll("shale: SHALE_ROOT is not set: the data folder a script's paths are relative to\n");
-        return 2;
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    var args_buf: [64]script.Arg = undefined;
+    var why_buf: [512]u8 = undefined;
+    const c = switch (cli.parse(argv[1..], init.environ_map.get("SHALE_ROOT"), &args_buf, &why_buf)) {
+        .command => |c| c,
+        .refused => |r| {
+            try err.print("shale: {s}\n{s}", .{ r.why, cli.usage });
+            return 2;
+        },
     };
     const now: i64 = if (init.environ_map.get("SHALE_NOW")) |t| script.builtins.parseInteger(t) orelse {
         try err.print("shale: SHALE_NOW={s} is not an integer\n", .{t});
         return 2;
     } else 0;
-    const source = std.Io.Dir.cwd().readFileAlloc(io, args[1], gpa, .limited(script.Budgets.default_source_bytes + 1)) catch |e| {
-        try err.print("shale: cannot read {s}: {s}\n", .{ args[1], @errorName(e) });
+    const source = if (c.source) |s| s else std.Io.Dir.cwd().readFileAlloc(io, c.file.?, init.arena.allocator(), .limited(c.budgets.source_bytes + 1)) catch |e| {
+        try err.print("shale: cannot read {s}: {s}\n", .{ c.file.?, @errorName(e) });
         return 2;
     };
-    defer gpa.free(source);
-
+    const root = std.mem.trimEnd(u8, c.root, "/");
     const auth = try std.fs.path.join(gpa, &.{ root, "..", "auth" });
     defer gpa.free(auth);
     webbox.store.setBases(root, auth);
 
-    const out = try gpa.alloc(u8, script.Budgets.default_output_bytes);
+    const out = try gpa.alloc(u8, c.budgets.output_bytes);
     defer gpa.free(out);
-    var result = script.run(io, gpa, root, source, .{}, now, out);
+    var result = script.runWith(io, gpa, if (root.len == 0) "/" else root, source, c.budgets, now, out, .{ .mode = c.mode, .args = c.args });
     defer result.deinit();
 
     var out_buf: [4096]u8 = undefined;
@@ -56,6 +62,11 @@ pub fn main(init: std.process.Init) !u8 {
     const w = &ow.interface;
     try w.writeAll(result.output);
     try w.flush();
-    try script.report(&result, args[1], err);
+    try script.report(&result, c.file orelse "-e", err);
+    // **WHAT IT COST**, beside what it was allowed: an agent sees how near a
+    // budget a script ran before the next run finds the edge.
+    try err.print("── used: {d} of {d} steps, {d} of {d} reads, {d} of {d} read bytes, {d} of {d} output bytes\n", .{ result.steps, c.budgets.steps, result.reads, c.budgets.reads, result.read_bytes, c.budgets.read_bytes, result.output.len, c.budgets.output_bytes });
+    if (c.mode == .dry_run and result.effects.len > 0)
+        try err.print("── a dry run: {d} change{s} logged, none made; --write makes them\n", .{ result.effects.len, if (result.effects.len == 1) "" else "s" });
     return if (result.finished()) 0 else 1;
 }

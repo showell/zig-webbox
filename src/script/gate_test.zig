@@ -11,7 +11,7 @@ const std = @import("std");
 const script = @import("script.zig");
 const Io = std.Io;
 
-pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: script.Budgets, now: i64, out: []u8) script.Result {
+pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const u8, budgets: script.Budgets, now: i64, out: []u8, options: script.Options) script.Result {
     var paths: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer paths.deinit();
     const a = paths.allocator();
@@ -38,9 +38,9 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     defer std.testing.allocator.free(walker_out);
     // The walker's memory is its own, so a test that measures the backing
     // allocator measures the VM's run alone.
-    var w = script.runOn(.walker, io, std.testing.allocator, if (has_root) copy else root, source, budgets, now, walker_out);
+    var w = script.runOn(.walker, io, std.testing.allocator, if (has_root) copy else root, source, budgets, now, walker_out, options);
     defer w.deinit();
-    const v = script.runOn(.vm, io, backing, root, source, budgets, now, out);
+    const v = script.runOn(.vm, io, backing, root, source, budgets, now, out, options);
 
     // **THE SAME RUN, CUT INTO SLICES** (QUEUE 211): a pause between any
     // two ops changes nothing, so the VM in slices of 1 to 29 steps (by the
@@ -51,8 +51,9 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     const cut_out = std.testing.allocator.alloc(u8, out.len) catch @panic("the gate's output");
     defer std.testing.allocator.free(cut_out);
     const slice = 1 + std.hash.Wyhash.hash(0, source) % 29;
-    const engine: script.Engine = if (!v.tried_change) .{ .vm_background = slice } else .{ .vm_sliced = slice };
-    var cut = script.runOn(engine, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out);
+    // A run already a background one, or a dry run, is cut as itself.
+    const engine: script.Engine = if (!v.tried_change and options.mode == .atomic) .{ .vm_background = slice } else .{ .vm_sliced = slice };
+    var cut = script.runOn(engine, io, std.testing.allocator, if (has_root) cut_copy else root, source, budgets, now, cut_out, options);
     defer cut.deinit();
     if (!std.mem.eql(u8, v.output, cut.output) or v.steps != cut.steps or v.work != cut.work or v.arena_bytes != cut.arena_bytes or !sameStop(v.stop, cut.stop) or !sameEffects(v.effects, cut.effects) or
         (has_root and !(sameTree(io, a, root, cut_copy) catch false)))
@@ -83,7 +84,10 @@ pub fn run(io: Io, backing: std.mem.Allocator, root: []const u8, source: []const
     const arena_shaped = yields and (isArenaShaped(v.stop) or isArenaShaped(w.stop));
     if (!arena_shaped) {
         if (!std.mem.eql(u8, v.output, w.output)) why = "the output";
-        if (!sameStop(v.stop, w.stop)) why = "the stop";
+        // A machine stop both make is at the same place, and may be at a
+        // different depth of the same recursion: its trail is the
+        // machinery's too (QUEUE 229, chunk 1).
+        if (!sameStop(v.stop, w.stop) and !(machine_shaped and samePlace(v.stop.?, w.stop.?))) why = "the stop";
     }
     if (!yields and !machine_shaped) {
         if (v.steps != w.steps) why = "the steps";
@@ -141,7 +145,25 @@ fn sameStop(x: ?script.Stop, y: ?script.Stop) bool {
     const a = x.?;
     const b = y.?;
     return a.line == b.line and a.column == b.column and a.class == b.class and a.budget == b.budget and
-        std.mem.eql(u8, a.function, b.function) and std.mem.eql(u8, a.message, b.message);
+        std.mem.eql(u8, a.function, b.function) and std.mem.eql(u8, a.message, b.message) and sameTrail(a.trail, b.trail);
+}
+
+/// The same stop but for its trail.
+fn samePlace(a: script.Stop, b: script.Stop) bool {
+    var x = a;
+    var y = b;
+    x.trail = &.{};
+    y.trail = &.{};
+    return sameStop(x, y);
+}
+
+/// Each call made at the same place in the same function, in order.
+fn sameTrail(x: []const script.diag.Call, y: []const script.diag.Call) bool {
+    if (x.len != y.len) return false;
+    for (x, y) |a, b| {
+        if (a.line != b.line or a.column != b.column or !std.mem.eql(u8, a.function, b.function)) return false;
+    }
+    return true;
 }
 
 /// `src` to `dst`, links as links (their targets unread).

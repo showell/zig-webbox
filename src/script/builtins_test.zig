@@ -778,6 +778,7 @@ test "builtins: walk's stats count as reads, a call considers at most call_entri
         switch (mode) {
             .background => try testing.expectEqualStrings("chat/a.md\nchat/deep\n", p.output()),
             .atomic => try testing.expectEqual(script.diag.Class.store, p.status().stop.?.class),
+            .dry_run => unreachable,
         }
     }
 }
@@ -789,4 +790,66 @@ test "builtins: an empty needle is found where the search starts, never a crash:
     try f.expectOutput("print(find(\"abc\", \"\"), contains(\"abc\", \"\"), find(\"\", \"\"), contains(\"\", \"\"))", "1\ttrue\t1\ttrue\n");
     try f.expectStop("split(\"abc\", \"\")", .argument);
     try f.expectStop("substitute(\"abc\", \"\", \"x\")", .argument);
+}
+
+// ── 229, chunk 3: lenient reads ──────────────────────────────────────────
+
+test "builtin: parse_int reads an integer from real data, or gives nil, where tonumber stops the run" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(parse_int(\"42\"), parse_int(\" -7\\r\\n\"), parse_int(\"log-x\"), parse_int(\"\"), parse_int(\"12a\"))", "42\t-7\tnil\tnil\tnil\n");
+    try f.expectOutput("print(parse_int(nil), parse_int(5), parse_int(\"99999999999999999999\"))", "nil\t5\tnil\n");
+    try f.expectStop("print(parse_int({}))", .type);
+}
+
+test "builtin: get gives a map's value or a list's item, and the default where there is none" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("local m = {a = 1} print(get(m, \"a\", 0), get(m, \"b\", 0), get({}, \"x\", \"none\"))", "1\t0\tnone\n");
+    try f.expectOutput("local l = {\"x\", \"y\"} print(get(l, 2, \"-\"), get(l, 3, \"-\"), get(l, 0, \"-\"), get(l, 1))", "y\t-\t-\tx\n");
+    try f.expectOutput("print(get({a = 1}, \"b\"))", "nil\n");
+    try f.expectStop("print(get({a = 1}, 1, 0))", .type);
+    try f.expectStop("print(get(5, \"a\", 0))", .type);
+}
+
+test "builtin: read_lines gives whole lines from an offset, where the next part starts, and whether the file is done" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/log.txt", .data = "one\ntwo\nthree\nfour" });
+    // At least n bytes, and on to the end of the line it stops in.
+    try f.expectOutput("local r = read_lines(\"log.txt\", 0, 5) print(join(r.lines, \",\"), r.next, r.done)", "one,two\t8\tfalse\n");
+    try f.expectOutput("local r = read_lines(\"log.txt\", 8, 100) print(join(r.lines, \",\"), r.next, r.done)", "three,four\t18\ttrue\n");
+    try f.expectOutput("local r = read_lines(\"log.txt\", 18, 100) print(#r.lines, r.next, r.done)", "0\t18\ttrue\n");
+    try f.expectOutput("local r = read_lines(\"log.txt\") print(#r.lines, r.done)", "4\ttrue\n");
+    try f.expectStop("local r = read_lines(\"log.txt\", -1, 5)", .argument);
+    try f.expectStop("local r = read_lines(\"log.txt\", 0, 0)", .argument);
+    try f.expectStop("local r = read_lines(\"none.txt\", 0, 5)", .store);
+}
+
+test "builtin: line_at gives the whole line holding an offset, without its newline, or nil past the end" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/log.txt", .data = "one\ntwo\nthree\nfour" });
+    try f.expectOutput("print(line_at(\"log.txt\", 0), line_at(\"log.txt\", 5), line_at(\"log.txt\", 7), line_at(\"log.txt\", 3), line_at(\"log.txt\", 17), line_at(\"log.txt\", 18))", "one\ttwo\ttwo\tone\tfour\tnil\n");
+    try f.expectStop("print(line_at(\"log.txt\", -1))", .argument);
+}
+
+test "builtin: a line longer than one call brings is an error that says so, for read_lines and line_at" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(f.threaded.io(), .{ .sub_path = "data/long.txt", .data = "a\n" ++ "x" ** 300 ++ "\nb\n" });
+    var r = f.run("local r = read_lines(\"long.txt\", 2, 10)", .{ .call_bytes = 100 });
+    defer r.deinit();
+    try testing.expectEqual(script.diag.Class.argument, r.stop.?.class);
+    var l = f.run("print(line_at(\"long.txt\", 150))", .{ .call_bytes = 100 });
+    defer l.deinit();
+    try testing.expectEqual(script.diag.Class.argument, l.stop.?.class);
+    var ok = f.run("print(line_at(\"long.txt\", 0), line_at(\"long.txt\", 303))", .{ .call_bytes = 100 });
+    defer ok.deinit();
+    try testing.expectEqualStrings("a\tb\n", ok.output);
 }

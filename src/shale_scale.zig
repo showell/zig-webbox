@@ -157,9 +157,9 @@ fn tryScript(io: std.Io, gpa: std.mem.Allocator, root: []const u8, s: Script, bu
             std.fmt.bufPrint(why_buf, "{s}: {s}", .{ @tagName(stop.class), stop.message }) catch "stopped";
         return .{ .fits = false, .why = why };
     }
-    // find_message stops itself at the read budget, and says so: a partial
-    // answer, which is not a fit.
-    if (std.mem.indexOf(u8, r.output, "stopped at the read budget") != null) return .{ .fits = false, .why = "reads to its budget, then says how far it got" };
+    // A script that stops itself at the read budget says so, and where the
+    // next run goes on (QUEUE 229): a partial answer, which is not a fit.
+    if (std.mem.indexOf(u8, r.output, "resume after ") != null or std.mem.indexOf(u8, r.output, "stopped at the read budget") != null) return .{ .fits = false, .why = "reads to its budget, then says what it found and where to resume" };
     return .{ .fits = true, .why = "" };
 }
 

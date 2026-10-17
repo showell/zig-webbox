@@ -45,6 +45,9 @@ pub const script = @import("script/script.zig");
 /// sequence number, the log and the reply behind an application's
 /// `POST /admin/script` (metal-vmm QUEUE 200).
 pub const script_route = @import("script_route.zig");
+/// **THE INSTALLED SUITE** (metal-vmm QUEUE 229, chunk 6): an application's
+/// scripts, run on a schedule as background runs, their last output kept.
+pub const shale_suite = @import("shale_suite.zig");
 /// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
 /// The host's log as plain text, filtered, for an agent to fetch and grep.
@@ -68,6 +71,7 @@ pub const free_space = @import("free_space.zig");
 test {
     _ = script;
     _ = script_route;
+    _ = shale_suite;
     _ = @import("script_route_test.zig");
     _ = site;
     _ = body;

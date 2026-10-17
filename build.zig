@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(runner);
     const run_script = b.addRunArtifact(runner);
     if (b.args) |a| run_script.addArgs(a);
-    b.step("script", "run a Shale script: SHALE_ROOT=<data folder> zig build script -- <file.shale>").dependOn(&run_script.step);
+    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--write] <file.shale> [name=value ...]").dependOn(&run_script.step);
 
     // **SHALE'S HOT PATHS, TIMED** (src/script_bench.zig): no tier runs it.
     const script_bench = b.addExecutable(.{ .name = "script-bench", .root_module = b.createModule(.{

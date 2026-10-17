@@ -586,6 +586,15 @@ fn ending(alloc: std.mem.Allocator, w: *std.ArrayList(u8), r: *const script.Resu
     if (r.stop) |s| {
         try w.print(alloc, "stopped at {d}:{d}{s}{s}{s}: {s}{s}{s}: ", .{ s.line, s.column, if (s.function.len > 0) " (in `" else "", s.function, if (s.function.len > 0) "`)" else "", @tagName(s.class), if (s.budget != null) " " else "", if (s.budget) |b| @tagName(b) else "" });
         try escaped(alloc, w, s.message);
+        // **THE TRAIL, ON THE LINE** (CC's own, after QUEUE 229): the calls
+        // that led there, innermost first, so the log names the script's
+        // line when a stop is in the prelude.
+        var k = s.trail.len;
+        while (k > 0) {
+            k -= 1;
+            const c = s.trail[k];
+            try w.print(alloc, "{s}{d}:{d}{s}{s}{s}", .{ if (k == s.trail.len - 1) "; called from " else ", ", c.line, c.column, if (c.function.len > 0) " (in `" else "", c.function, if (c.function.len > 0) "`)" else "" });
+        }
         try w.print(alloc, " ({d} steps)\n", .{r.steps});
     } else try w.print(alloc, "finished ({d} steps)\n", .{r.steps});
 }
@@ -608,4 +617,18 @@ pub fn writeReply(o: *const Outcome, w: *std.Io.Writer) std.Io.Writer.Error!void
             if (r.log_failed) |e| try w.print("── THE LOG WAS NOT WRITTEN ({s}) ──\n", .{@errorName(e)});
         },
     }
+}
+
+test "a log's ending names the calls that led to a stop, innermost first, on its one line" {
+    const a = std.testing.allocator;
+    var w: std.ArrayList(u8) = .empty;
+    defer w.deinit(a);
+    const trail = [_]script.diag.Call{ .{ .line = 9, .column = 1, .function = "" }, .{ .line = 4, .column = 7, .function = "outer" } };
+    var r: script.Result = .{ .arena = .{ .backing = a, .limit = 0 }, .stop = .{ .line = 18, .column = 14, .class = .budget, .budget = .reads, .message = "out", .function = "the prelude's walk_all", .trail = &trail }, .output = "", .effects = &.{}, .steps = 5 };
+    try ending(a, &w, &r);
+    try std.testing.expectEqualStrings("stopped at 18:14 (in `the prelude's walk_all`): budget reads: out; called from 4:7 (in `outer`), 9:1 (5 steps)\n", w.items);
+    w.clearRetainingCapacity();
+    r.stop.?.trail = &.{};
+    try ending(a, &w, &r);
+    try std.testing.expectEqualStrings("stopped at 18:14 (in `the prelude's walk_all`): budget reads: out (5 steps)\n", w.items);
 }

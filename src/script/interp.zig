@@ -61,6 +61,10 @@ pub const Budgets = struct {
     call_entries: u64 = 256,
 };
 
+/// **ONE VALUE GIVEN TO THE RUN BY NAME** (metal-vmm QUEUE 229, chunk 4):
+/// `shale script.shale name=value`, read with `arg(name, default)`.
+pub const Arg = struct { name: []const u8, value: []const u8 };
+
 /// One store change the script attempted, in order, root-relative.
 pub const Effect = struct {
     op: []const u8,
@@ -103,6 +107,12 @@ pub const Run = struct {
     /// **A BACKGROUND RUN ONLY READS** (`process.Mode`): a change is an
     /// `argument` error naming `atomic`.
     read_only: bool = false,
+    /// **A DRY RUN CHANGES NOTHING** (`process.Mode.dry_run`, QUEUE 229): a
+    /// change is checked and counted as if made, logged with the outcome
+    /// "dry run", and not made. What the Linux tool runs unless `--write`.
+    dry_run: bool = false,
+    /// The values the run was given by name (`arg`).
+    args: []const Arg = &.{},
     /// Whether the run called a builtin that changes the store, refused or
     /// not (the gate cuts a run that did not as a background run).
     tried_change: bool = false,
@@ -122,6 +132,13 @@ pub const Run = struct {
     stop: ?diag.Stop = null,
     /// The function the walk is in, by name; "" at the top level.
     function: []const u8 = "",
+    /// **THE CALLS THE RUN IS IN** (QUEUE 229, chunk 1), outermost first:
+    /// where each was made, a stop's trail. Pushed as a call starts and
+    /// taken off only as it returns, so a stop finds it whole; an
+    /// `attempt` that catches one cuts it back to its own depth. In the
+    /// machine's memory, which lives as long as the Result, and never given
+    /// back by `deinit`: a stop's `trail` is its items.
+    calls: std.ArrayList(diag.Call) = .empty,
     /// **THE LAST STRING A `..` CHAIN BUILT** (`concatChain`): its buffer,
     /// how much of it the string fills, and how big it is.
     tail_ptr: ?[*]u8 = null,
@@ -151,12 +168,12 @@ pub const Run = struct {
 
     pub fn fail(self: *Run, pos: ast.Pos, class: diag.Class, comptime fmt: []const u8, args: anytype) Error {
         const message = std.fmt.allocPrint(self.alloc, fmt, args) catch fmt;
-        self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message, .function = self.function };
+        self.stop = .{ .line = pos.line, .column = pos.column, .class = class, .message = message, .function = self.function, .trail = self.calls.items };
         return error.Stop;
     }
 
     pub fn budgetStop(self: *Run, pos: ast.Pos, b: diag.Budget) Error {
-        self.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = b, .function = self.function, .message = switch (b) {
+        self.stop = .{ .line = pos.line, .column = pos.column, .class = .budget, .budget = b, .function = self.function, .trail = self.calls.items, .message = switch (b) {
             .steps => std.fmt.allocPrint(self.alloc, "the step budget ({d} steps) ran out", .{self.budgets.steps}) catch "the step budget ran out",
             .arena => "the arena budget ran out",
             .call_depth => std.fmt.allocPrint(self.alloc, "calls nest deeper than the call-depth budget ({d})", .{self.budgets.call_depth}) catch "calls nest deeper than the call-depth budget",
@@ -731,6 +748,7 @@ pub const Run = struct {
         defer if (arg_exprs.len > small.len) self.machine.free(vals);
         for (arg_exprs, vals) |a, *v| v.* = try self.eval(a);
         const out = try self.attemptTable(pos);
+        const calls = self.calls.items.len;
         const got = self.invoke(pos, index, vals) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Stop => {
@@ -738,7 +756,9 @@ pub const Run = struct {
                 if (s.class == .budget) return error.Stop;
                 self.stop = null;
                 self.ret = .nil;
-                return self.attemptFailed(pos, out, s);
+                const failed = try self.attemptFailed(pos, out, s);
+                self.calls.shrinkRetainingCapacity(calls);
+                return failed;
             },
         };
         return self.attemptReturned(pos, out, got);
@@ -759,6 +779,22 @@ pub const Run = struct {
         out.map.put(a, "line", .{ .int = s.line }) catch return self.oom(pos);
         out.map.put(a, "column", .{ .int = s.column }) catch return self.oom(pos);
         out.map.put(a, "in_function", .{ .string = s.function }) catch return self.oom(pos);
+        // The calls, innermost first, as the report says them.
+        const trail = try self.newTable(pos);
+        trail.list.ensureTotalCapacity(a, s.trail.len) catch return self.oom(pos);
+        var k = s.trail.len;
+        while (k > 0) {
+            k -= 1;
+            const c = s.trail[k];
+            const site = try self.newTable(pos);
+            site.kind = .map;
+            site.map.put(a, "in_function", .{ .string = c.function }) catch return self.oom(pos);
+            site.map.put(a, "line", .{ .int = c.line }) catch return self.oom(pos);
+            site.map.put(a, "column", .{ .int = c.column }) catch return self.oom(pos);
+            trail.list.appendAssumeCapacity(.{ .table = site });
+        }
+        if (s.trail.len > 0) trail.kind = .list;
+        out.map.put(a, "trail", .{ .table = trail }) catch return self.oom(pos);
         return .{ .table = out };
     }
 
@@ -803,7 +839,7 @@ pub const Run = struct {
             const v = try self.eval(a);
             self.stack.items[new_base + i] = v;
         }
-        return self.enterFunction(f, new_base);
+        return self.enterFunction(pos, f, new_base);
     }
 
     /// Function `index` with its arguments already evaluated.
@@ -813,12 +849,14 @@ pub const Run = struct {
         const new_base = self.stack.items.len;
         self.stack.appendNTimes(self.machine, .nil, f.frame) catch return self.machineOom(pos);
         @memcpy(self.stack.items[new_base..][0..args.len], args);
-        return self.enterFunction(f, new_base);
+        return self.enterFunction(pos, f, new_base);
     }
 
-    /// The body of `f`, its frame at `new_base` with its arguments in it;
-    /// everything put back as it was however it ends.
-    fn enterFunction(self: *Run, f: *const ast.Function, new_base: usize) Error!Value {
+    /// The body of `f`, called at `pos`, its frame at `new_base` with its
+    /// arguments in it; everything put back as it was however it ends but
+    /// the call in `calls`, which only a return takes off.
+    fn enterFunction(self: *Run, pos: ast.Pos, f: *const ast.Function, new_base: usize) Error!Value {
+        self.calls.append(self.machine, .{ .line = pos.line, .column = pos.column, .function = self.function }) catch return self.machineOom(pos);
         const saved = self.base;
         const saved_function = self.function;
         self.base = new_base;
@@ -834,6 +872,7 @@ pub const Run = struct {
         _ = try self.block(f.body);
         const r = self.ret;
         self.ret = .nil;
+        self.calls.items.len -= 1;
         return r;
     }
 
