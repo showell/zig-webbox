@@ -166,7 +166,10 @@ pub const LaunchError = error{ OutOfMemory, Spawn, NoRecord };
 
 /// **A JOB LAUNCHED**: `reaper --reap <record> <log> <cwd> <program> --
 /// argv...` double-forked out of this process's tree, with `env`; then
-/// its record, once the reaper has written it (at most 5 seconds).
+/// its record, once the reaper says it is written: a byte on its fd 3, a
+/// pipe whose other end this holds. The pipe's end with no byte is a
+/// reaper gone before its record (`NoRecord`); a slow one is only slow, so
+/// there is no deadline.
 pub fn launch(a: std.mem.Allocator, io: std.Io, reaper: []const u8, record: []const u8, log: []const u8, cwd: []const u8, program: []const u8, argv: []const []const u8, env: []const []const u8) LaunchError!Record {
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(a, &.{ reaper, "--reap", record, log, cwd, program, "--" });
@@ -176,14 +179,25 @@ pub fn launch(a: std.mem.Allocator, io: std.Io, reaper: []const u8, record: []co
     const zexe = try a.dupeZ(u8, reaper);
     // An old record would be read as the new one's.
     std.Io.Dir.cwd().deleteFile(io, record) catch {};
+    var started: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&started, .{ .CLOEXEC = true })) != .SUCCESS) return error.Spawn;
+    defer _ = linux.close(started[0]);
     const first = linux.fork();
-    if (linux.errno(first) != .SUCCESS) return error.Spawn;
+    if (linux.errno(first) != .SUCCESS) {
+        _ = linux.close(started[1]);
+        return error.Spawn;
+    }
     if (first == 0) {
         // The first child: a session of its own, the reaper, and gone.
         _ = linux.setsid();
         const second = linux.fork();
         if (second == 0) {
-            _ = linux.close_range(3, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false });
+            // The started pipe is fd 3, kept across the exec (dup2's copy
+            // has no CLOEXEC; one already at 3 is cleared).
+            if (started[1] == reaper_started_fd) {
+                _ = linux.fcntl(reaper_started_fd, linux.F.SETFD, 0);
+            } else _ = linux.dup2(started[1], reaper_started_fd);
+            _ = linux.close_range(reaper_started_fd + 1, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false });
             const devnull: i32 = @intCast(linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0));
             _ = linux.dup2(devnull, 0);
             _ = linux.dup2(devnull, 1);
@@ -195,20 +209,24 @@ pub fn launch(a: std.mem.Allocator, io: std.Io, reaper: []const u8, record: []co
         }
         linux.exit_group(0);
     }
+    _ = linux.close(started[1]);
     var status: u32 = 0;
     while (true) {
         const rc = linux.waitpid(@intCast(first), &status, 0);
         if (linux.errno(rc) != .INTR) break;
     }
-    var waited: u64 = 0;
-    while (waited < 5000) : (waited += 10) {
-        if (std.Io.Dir.cwd().readFileAlloc(io, record, a, .limited(64 * 1024))) |text| {
-            if (parseRecord(text)) |r| return r;
-        } else |_| {}
-        sleepMs(10);
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const rc = linux.read(started[0], &byte, 1);
+        if (linux.errno(rc) != .INTR) break;
     }
-    return error.NoRecord;
+    // Written or not, the reaper has said all it will.
+    const text = std.Io.Dir.cwd().readFileAlloc(io, record, a, .limited(64 * 1024)) catch return error.NoRecord;
+    return parseRecord(text) orelse error.NoRecord;
 }
+
+/// The reaper's end of `launch`'s started pipe.
+const reaper_started_fd: i32 = 3;
 
 fn nowSeconds() i64 {
     var ts: linux.timespec = undefined;
@@ -232,7 +250,8 @@ fn writeRecord(record: [*:0]const u8, tmp: [*:0]const u8, r: Record) void {
 pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []const u8) u8 {
     if (args.len < 6 or !std.mem.eql(u8, args[4], "--")) return 2;
     const record = a.dupeZ(u8, args[0]) catch return 2;
-    const tmp = std.fmt.allocPrintSentinel(a, "{s}.tmp", .{args[0]}, 0) catch return 2;
+    // Its own: a reaper ending as another starts must not share one.
+    const tmp = std.fmt.allocPrintSentinel(a, "{s}.{d}.tmp", .{ args[0], linux.getpid() }, 0) catch return 2;
     const log = a.dupeZ(u8, args[1]) catch return 2;
     const cwd = a.dupeZ(u8, args[2]) catch return 2;
     const program = a.dupeZ(u8, args[3]) catch return 2;
@@ -240,6 +259,10 @@ pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []c
     const zargv = zList(a, argv) catch return 2;
     const zenv = zList(a, env) catch return 2;
     const shown = std.mem.join(a, " ", argv) catch return 2;
+    // Not the job's: it closes at the job's exec.
+    _ = linux.fcntl(reaper_started_fd, linux.F.SETFD, linux.FD_CLOEXEC);
+    var own_buf: [1024]u8 = undefined;
+    const reaper_start = startOf(&own_buf, linux.getpid()) orelse return 2;
     const log_fd = linux.open(log, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
     if (linux.errno(log_fd) != .SUCCESS) return 2;
     const pid = linux.fork();
@@ -257,10 +280,8 @@ pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []c
         linux.exit_group(127);
     }
     _ = linux.close(@intCast(log_fd));
-    var r: Record = .{ .pid = @intCast(pid), .pgid = @intCast(pid), .started = nowSeconds(), .argv = shown, .reaper = linux.getpid() };
+    var r: Record = .{ .pid = @intCast(pid), .pgid = @intCast(pid), .started = nowSeconds(), .argv = shown, .reaper = linux.getpid(), .reaper_start = reaper_start };
     var stat_buf: [1024]u8 = undefined;
-    var own_buf: [1024]u8 = undefined;
-    r.reaper_start = startOf(&own_buf, r.reaper) orelse return 2;
     // The child's start time, once it is the session leader (a moment).
     var tries: usize = 0;
     while (tries < 100) : (tries += 1) {
@@ -271,6 +292,8 @@ pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []c
         sleepMs(1);
     }
     writeRecord(record, tmp, r);
+    _ = linux.write(reaper_started_fd, "s", 1);
+    _ = linux.close(reaper_started_fd);
     var status: u32 = 0;
     while (true) {
         const rc = linux.waitpid(@intCast(pid), &status, 0);
@@ -292,6 +315,26 @@ test "jobs: a record reads back as it was written, and a broken one is none" {
     try std.testing.expect(r.done());
     try std.testing.expect(parseRecord("pid=x\n") == null);
     try std.testing.expect(parseRecord("") == null);
+}
+
+test "jobs: a reaper gone before its record is NoRecord at once, the pipe's end its word" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = arena.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const record = try std.fmt.allocPrint(a, "{s}/x.log.job", .{dir});
+    const log = try std.fmt.allocPrint(a, "{s}/x.log", .{dir});
+    var t0: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &t0);
+    // `true` as the reaper: it writes nothing and ends.
+    try std.testing.expectError(error.NoRecord, launch(a, io, "/bin/true", record, log, dir, "/bin/true", &.{"true"}, &.{}));
+    var t1: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &t1);
+    // No deadline was waited out (the old one was 5 seconds).
+    try std.testing.expect(t1.sec - t0.sec < 3);
 }
 
 test "jobs: a process's start time is its stat's 22nd field; none for a process not there" {

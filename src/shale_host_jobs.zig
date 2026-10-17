@@ -97,11 +97,18 @@ fn start(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         return run.fail(pos, .host, "`job_start`: `{s}` is not found{s}", .{ argv[0], if (std.mem.indexOfScalar(u8, argv[0], '/') == null) " along PATH" else "" });
     const log_os = try hl.osPath(h, run, pos, log_v, false);
     const record_os = std.fmt.allocPrint(a, "{s}.job", .{log_os}) catch return run.oom(pos);
+    // A job still running on this log: its record is its one handle, and
+    // the old job's end would be written over the new one's record.
+    if (std.Io.Dir.cwd().readFileAlloc(run.io, record_os, a, .limited(64 * 1024))) |text| {
+        try chargeRead(run, pos, text.len);
+        if (jobs.parseRecord(text)) |old| if (jobs.alive(old) or jobs.reaperAlive(old))
+            return run.fail(pos, .host, "`job_start`: a job still runs on {s} (pid {d}, its record {s}.job): `job_stop` or `job_wait` it, or give another log", .{ log_shown, old.pid, log_shown });
+    } else |_| {}
     run.host_runs += 1;
     const r = jobs.launch(a, run.io, reaper, record_os, log_os, cwd, program, argv, env.items) catch |e| switch (e) {
         error.OutOfMemory => return run.oom(pos),
         error.Spawn => return run.fail(pos, .host, "`job_start`: the reaper could not be forked", .{}),
-        error.NoRecord => return run.fail(pos, .host, "`job_start`: the reaper wrote no record at {s}.job in 5 seconds", .{log_shown}),
+        error.NoRecord => return run.fail(pos, .host, "`job_start`: the reaper ended without writing a record at {s}.job", .{log_shown}),
     };
     const joined = std.mem.join(a, " ", argv) catch return run.oom(pos);
     h.record("job {s}{s}{s} started (pid {d}), log {s}", .{ joined, if (want != null) " (want: " else "", if (want) |w| std.fmt.allocPrint(a, "{s})", .{w}) catch w else "", r.pid, log_shown });

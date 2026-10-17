@@ -65,7 +65,8 @@ has none of it):
   gives the names that changed last.
 - **Jobs**, programs that outlive the call:
   - `job_start(argv, {log, cwd, env})` starts one under a detached reaper.
-    `log` is required, and there are no `secrets`.
+    `log` is required, and there are no `secrets`. A log whose job (or
+    its reaper) still runs is refused: stop or wait for it, or use another.
   - Its record is `<log>.job`. `job_alive`, `job_stop` (TERM, 2 seconds,
     then KILL) and `job_wait(job, {timeout_ms, file, contains})` take the
     job or that path, so a later call carries on.

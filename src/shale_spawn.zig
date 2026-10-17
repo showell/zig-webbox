@@ -277,19 +277,7 @@ pub fn run(alloc: std.mem.Allocator, spec: Spec, sink: anytype) (Error || SinkEr
         const prc = linux.poll(&fds, @intCast(nfds), @intCast(@min(wait_ms, 60_000)));
         if (linux.errno(prc) == .INTR) continue;
 
-        if (out_at) |i| if (fds[i].revents != 0) {
-            while (true) {
-                const r = linux.read(out_pipe[0], &buf, buf.len);
-                const e = linux.errno(r);
-                if (e == .AGAIN) break;
-                if (e == .INTR) continue;
-                if (e != .SUCCESS or r == 0) {
-                    closeFd(&out_pipe[0]);
-                    break;
-                }
-                try sink.write(buf[0..r]);
-            }
-        };
+        if (out_at) |i| if (fds[i].revents != 0) try readAvailable(&out_pipe[0], &buf, sink);
         if (in_at) |i| if (fds[i].revents != 0) {
             const w = linux.write(in_pipe[1], stdin_left.ptr, @min(stdin_left.len, 64 * 1024));
             const e = linux.errno(w);
@@ -299,6 +287,10 @@ pub fn run(alloc: std.mem.Allocator, spec: Spec, sink: anytype) (Error || SinkEr
         if (pid_at) |i| if (fds[i].revents != 0) {
             if (linux.wait4(pid, &status, linux.W.NOHANG, null) == pid) {
                 exited = true;
+                // All it wrote is in the pipe now, though this poll may
+                // have seen the pipe before it: read it before any drain's
+                // end can come, which bounds only what outlives it.
+                if (out_pipe[0] >= 0) try readAvailable(&out_pipe[0], &buf, sink);
                 drain_until = monoMs() + spec.drain_ms;
                 closeFd(&in_pipe[1]);
             }
@@ -317,6 +309,22 @@ pub fn run(alloc: std.mem.Allocator, spec: Spec, sink: anytype) (Error || SinkEr
     if (why_ended) |w| return .{ .ended = w, .ms = ms, .signal = if (linux.W.IFSIGNALED(status)) @intFromEnum(linux.W.TERMSIG(status)) else null, .code = if (linux.W.IFEXITED(status)) linux.W.EXITSTATUS(status) else null };
     if (linux.W.IFEXITED(status)) return .{ .ended = .exit, .code = linux.W.EXITSTATUS(status), .ms = ms };
     return .{ .ended = .signal, .signal = @intFromEnum(linux.W.TERMSIG(status)), .ms = ms };
+}
+
+/// What the pipe holds now, to the sink: until it would block, or at its
+/// end, closed.
+fn readAvailable(fd: *i32, buf: []u8, sink: anytype) !void {
+    while (true) {
+        const r = linux.read(fd.*, buf.ptr, buf.len);
+        const e = linux.errno(r);
+        if (e == .AGAIN) return;
+        if (e == .INTR) continue;
+        if (e != .SUCCESS or r == 0) {
+            closeFd(fd);
+            return;
+        }
+        try sink.write(buf[0..r]);
+    }
 }
 
 // ── tests: the fixture program the build makes, never /bin/sh ────────

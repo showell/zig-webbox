@@ -77,6 +77,28 @@ test "jobs: a job gone while its reaper lives is still ending; gone with its rea
     try testing.expectEqualStrings("lost\tfalse\tfalse\n", try once(&t, "local w = job_wait(\"lost.log.job\", {timeout_ms = 5000}) print(w.ended, has_key(w, \"code\"), has_key(w, \"signal\"))"));
 }
 
+test "jobs: a job started on a log whose job or reaper still lives is refused, its record kept" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const a = t.arena.allocator();
+    const none = 0x7ffffff0;
+    var buf: [1024]u8 = undefined;
+    const me = std.os.linux.getpid();
+    const my_group: i32 = @intCast(std.os.linux.syscall1(.getpgid, 0));
+    const my_start = jobs.startOf(&buf, me).?;
+    // Its job lives (this test's own group stands in), its reaper gone.
+    const busy = try std.fmt.allocPrint(a, "pid={d}\npgid={d}\nstart={s}\nstarted=0\nargv=x\nreaper={d}\nreaper_start=1\n", .{ me, my_group, my_start, none });
+    try t.put("busy.log.job", busy);
+    try onceStop(&t, "job_start({\"shale-fixture\", \"exit\", \"0\"}, {log = \"busy.log\"})", .host, "a job still runs on busy.log");
+    try testing.expectEqualStrings(busy, try t.file("busy.log.job"));
+    // Its job gone, its reaper living: its end is still to be written.
+    const ending = try std.fmt.allocPrint(a, "pid={d}\npgid={d}\nstart=1\nstarted=0\nargv=x\nreaper={d}\nreaper_start={s}\n", .{ none, none, me, my_start });
+    try t.put("ending.log.job", ending);
+    try onceStop(&t, "job_start({\"shale-fixture\", \"exit\", \"0\"}, {log = \"ending.log\"})", .host, "a job still runs on ending.log");
+    try testing.expectEqualStrings(ending, try t.file("ending.log.job"));
+}
+
 test "jobs: the mistakes a job's call can make, each named" {
     var t: T = undefined;
     try init(&t);
