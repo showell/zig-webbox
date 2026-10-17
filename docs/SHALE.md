@@ -1030,6 +1030,30 @@ zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
 the next sequence number. The steps for the site are in
 zig-metal-unikernel's README, "Release notes: the script route".
 
+## The installed suite: scripts on a schedule
+
+**An application's own scripts, run every so often** (`src/shale_suite.zig`,
+metal-vmm QUEUE 229): it declares each as `{name, source =
+@embedFile(...), args, period_s}`, installs them once (`Suite.install`, with
+its long-lived allocator, the background budgets and the auth paths), and
+calls `suite.step(io, now)` from its `between`, which answers a `Wake`.
+
+- **Each runs as a background run**: it only reads, a slice at a time
+  between requests. A change is the background run's `argument` error.
+- **On a schedule**: every script at the first step, then every
+  `period_s` from when it was due (`wake.periodAfter`), never from when it
+  ran, so lateness does not accumulate. One runs at a time.
+- **A signed background run goes first**: while one is going, the suite
+  waits.
+- **What it keeps**: each name's last run, `{auth}/shale/suite/<name>.out`,
+  replaced whole: its first line `<unix seconds> <how it ended>`, then what
+  it printed, at most 64 KiB (the run's output budget, capped). A line in
+  `shale/log` as each ends. `readKept` reads one; `writeStatus` is a GET's
+  page of them.
+- **Not built: running one by name on request.** It would be a run behind
+  the admin's bearer key alone, with no signature: the auth path's call,
+  proposed, not made.
+
 ## For a host
 
 ### The Zig API
