@@ -8,7 +8,8 @@
 //!   in a folder it names a file of (Shale's `script/`), so membership is said
 //!   in one place;
 //! - its files import only the modules it may: `std`, `builtin` and `host_io`
-//!   for the portable half, and `webbox` too for the Linux half, which reaches
+//!   for the portable half (and a test's `*_test_options`, which only
+//!   webbox's tests provide), and `webbox` too for the Linux half, which reaches
 //!   the portable half as that module, never by path; the portable half never
 //!   reaches the Linux one;
 //! - no file embeds a file, except Shale source beside it (the prelude, which
@@ -147,6 +148,10 @@ fn problems(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
             }
             for (try refs(a, body, "@import")) |dep| {
                 if (!std.mem.endsWith(u8, dep, ".zig")) {
+                    // A test's options (`*_test_options`): only webbox's own
+                    // test build provides one, so a use outside a test fails
+                    // every application's build, loudly.
+                    if (std.mem.endsWith(u8, dep, "_test_options")) continue;
                     if (!contains(root.may, dep)) try out.append(a, try std.fmt.allocPrint(a, "{s} imports the module {s}, which {s}'s files may not", .{ name, dep, root.file }));
                     continue;
                 }
@@ -200,7 +205,7 @@ test "library: its check finds each kind of mistake, on planted trees" {
     try w(tmp.dir, "a.zig", "const std = @import(\"std\");\nconst p = @embedFile(\"prelude.shale\");\n");
     try w(tmp.dir, "sub/s.zig", "const t = @import(\"t.zig\");\n// const u = @import(\"../users.zig\");\n");
     try w(tmp.dir, "sub/t.zig", "const io = @import(\n    \"host_io\",\n);\n");
-    try w(tmp.dir, "l.zig", "const webbox = @import(\"webbox\");\n");
+    try w(tmp.dir, "l.zig", "const webbox = @import(\"webbox\");\nconst fixture = @import(\"l_test_options\").fixture;\n");
     try testing.expectEqual(@as(usize, 0), (try problems(io, a, tmp.dir)).len);
 
     const Case = struct { file: []const u8, body: []const u8, says: []const u8 };
