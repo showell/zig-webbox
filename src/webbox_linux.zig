@@ -32,6 +32,7 @@ pub const shale_jobs = @import("shale_jobs.zig");
 /// The host's job calls, over `shale_jobs`.
 pub const shale_host_jobs = @import("shale_host_jobs.zig");
 pub const shale_host_zig = @import("shale_host_zig.zig");
+pub const shale_zig_ast = @import("shale_zig_ast.zig");
 
 test {
     _ = linux_host;
@@ -48,6 +49,7 @@ test {
     _ = shale_jobs;
     _ = shale_host_jobs;
     _ = shale_host_zig;
+    _ = shale_zig_ast;
     _ = @import("shale_test_host.zig");
     _ = @import("shale_prelude_linux_test.zig");
     _ = @import("shale_prelude_git_test.zig");
@@ -55,4 +57,5 @@ test {
     _ = @import("shale_cli_test.zig");
     _ = @import("shale_zig_rename_test.zig");
     _ = @import("shale_doc_linux_test.zig");
+    _ = @import("shale_zig_decls_test.zig");
 }

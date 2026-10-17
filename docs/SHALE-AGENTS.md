@@ -84,6 +84,15 @@ has none of it):
   any. `zig_rename(p, from, to, {lines}?)` renames a Zig identifier as
   Zig's tokenizer sees it, giving `{renamed, left_in_comments}` (the
   cookbook's "A symbol renamed across a tree").
+  `zig_decls(p)` lists a Zig file's top-level declarations, from Zig's
+  own parser, in file order: `{kind, name, name_form, visibility, linkage,
+  first, last, start, stop[, comment_above]}`. A span runs from its doc
+  comment to the `}`, `;` or field's `,` that ends it (`read(p, start,
+  stop - start)` is it); `comment_above` is the plain `//` lines directly
+  over it. A file that does not parse stops, naming the line. **The
+  analysis is Zig's parser and its tokens, not types**: what it cannot
+  see (a method reached through a value), the compiler judges after
+  (`same_tests.shale`).
 
 **Git, in the git prelude** (`src/shale_prelude_git.shale`). Every call
 runs git under `run`, so it needs `--write`. A `repo` is a Shale path, `""`

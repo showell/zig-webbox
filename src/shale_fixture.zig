@@ -12,6 +12,8 @@
 //!     shale-fixture kill-self        ends by SIGKILL, its own
 //!     shale-fixture ignore-term MS   TERM ignored, then sleeps
 //!     shale-fixture spill N          N bytes of 'x' with no newline
+//!     shale-fixture chunks N SIZE    N bytes of 100-byte lines, written
+//!                                    SIZE at a time, 1 ms apart
 
 const std = @import("std");
 
@@ -58,6 +60,17 @@ pub fn main(init: std.process.Init) !u8 {
         try w.writeAll("ignoring\n");
         try w.flush();
         try io.sleep(.fromMilliseconds(try std.fmt.parseInt(i64, arg, 10)), .awake);
+    } else if (std.mem.eql(u8, verb, "chunks")) {
+        const n = try std.fmt.parseInt(usize, arg, 10);
+        const size = try std.fmt.parseInt(usize, argv[3], 10);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            try w.writeByte(if (i % 100 == 99) '\n' else 'x');
+            if ((i + 1) % size == 0) {
+                try w.flush();
+                try io.sleep(.fromMilliseconds(1), .awake);
+            }
+        }
     } else if (std.mem.eql(u8, verb, "spill")) {
         const n = try std.fmt.parseInt(usize, arg, 10);
         for (0..n) |_| try w.writeByte('x');

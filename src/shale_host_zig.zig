@@ -196,6 +196,58 @@ pub fn rename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .table = t };
 }
 
+/// **`host("zig_decls", path)`**: a Zig file's top-level declarations, from
+/// Zig's parser (shale_zig_ast.zig), as maps, in file order. Charged: the
+/// read, the `dupeZ`, a step a token and a step an Ast node. A parse error
+/// stops, naming its first line.
+pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    if (args.len != 1) return run.fail(pos, .argument, "`zig_decls` takes a path, given {d} arguments", .{args.len});
+    const za = @import("shale_zig_ast.zig");
+    const hub = script.builtins_store;
+    const rd = script.builtins_read;
+    const p = try hub.pathArg(run, pos, .host, args[0], false);
+    try hub.countRead(run, pos);
+    const size = try rd.fileSize(run, pos, .host, p);
+    const was = (try rd.readSized(run, pos, .host, p, size, 0, null)).string;
+    const a = run.alloc;
+    const src = a.dupeZ(u8, was) catch return run.oom(pos);
+    try script.builtins.chargeBytes(run, pos, src.len);
+    const got = switch (za.decls(a, src) catch return run.oom(pos)) {
+        .ok => |ok| ok,
+        .parse_error => |e| return run.fail(pos, .argument, "`zig_decls`: {s} does not parse as Zig: line {d} ({s})", .{ p.rel, e.line, e.tag }),
+    };
+    try run.charge(pos, got.tokens + got.nodes);
+    const list = try run.newTable(pos);
+    list.kind = .list;
+    for (got.decls) |d| {
+        const m = try run.newTable(pos);
+        m.kind = .map;
+        const put = struct {
+            fn f(r: *Run, ps: ast.Pos, t: *script.value.Table, k: []const u8, v: Value) Error!void {
+                t.map.put(r.alloc, k, v) catch return r.oom(ps);
+            }
+        }.f;
+        try put(run, pos, m, "kind", .{ .string = @tagName(d.kind) });
+        try put(run, pos, m, "name", .{ .string = d.name });
+        try put(run, pos, m, "name_form", .{ .string = @tagName(d.name_form) });
+        try put(run, pos, m, "visibility", .{ .string = @tagName(d.visibility) });
+        try put(run, pos, m, "linkage", .{ .string = @tagName(d.linkage) });
+        try put(run, pos, m, "first", .{ .int = @intCast(d.first) });
+        try put(run, pos, m, "last", .{ .int = @intCast(d.last) });
+        try put(run, pos, m, "start", .{ .int = @intCast(d.start) });
+        try put(run, pos, m, "stop", .{ .int = @intCast(d.stop) });
+        if (d.comment_above) |c| {
+            const cm = try run.newTable(pos);
+            cm.kind = .map;
+            try put(run, pos, cm, "first", .{ .int = @intCast(c.first) });
+            try put(run, pos, cm, "last", .{ .int = @intCast(c.last) });
+            try put(run, pos, m, "comment_above", .{ .table = cm });
+        }
+        list.list.append(a, .{ .table = m }) catch return run.oom(pos);
+    }
+    return .{ .table = list };
+}
+
 fn linesOpt(run: *Run, pos: ast.Pos, v: Value) Error!?Lines {
     const m = switch (v) {
         .nil => return null,

@@ -268,6 +268,7 @@ fn call(ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []cons
     if (std.mem.eql(u8, name, "run")) return runProgram(h, run, pos, args);
     if (std.mem.startsWith(u8, name, "job_")) return @import("shale_host_jobs.zig").call(h, run, pos, name, args);
     if (std.mem.eql(u8, name, "zig_rename")) return @import("shale_host_zig.zig").rename(run, pos, args);
+    if (std.mem.eql(u8, name, "zig_decls")) return @import("shale_host_zig.zig").decls(run, pos, args);
     return run.fail(pos, .host, "`{s}`: not on this host", .{name});
 }
 
@@ -505,8 +506,17 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     } else null;
     if (o.stdin != null and stdin == null) return run.fail(pos, .argument, "`run`'s stdin is a kept result: its `out` is not the program's output (lines left out, lines cut); run it with `whole = N` to pipe it", .{});
 
+    // **THE STREAM'S OWN MEMORY**: what grows as the output arrives (the
+    // keep, `whole`'s buffer, the scrub's carry, the spawn's reads) grows
+    // by how the pipe's reads fall, which is the scheduler's. In the run's
+    // arena that made the arena's size the scheduler's too, and the gate,
+    // which holds the engines' arenas equal, failed a 141 KB `git show` at
+    // random. So it is here, and only the results go to the arena.
+    var stream = std.heap.ArenaAllocator.init(h.alloc);
+    defer stream.deinit();
+    const sa = stream.allocator();
     // The output's ends: the log, the keep or `whole`.
-    var out: Out = .{ .alloc = a };
+    var out: Out = .{ .alloc = sa };
     var log_file: ?std.Io.File = null;
     var log_buf: [16 * 1024]u8 = undefined;
     var log_writer: std.Io.File.Writer = undefined;
@@ -546,14 +556,14 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
             const pattern: keep.Pattern = .{ .program = &compiled[i].?, .scratch = &scratches[i].? };
             if (i == 0) ko.re = pattern else ko.not_re = pattern;
         };
-        keeper = keep.Keep.init(a, ko) catch return run.oom(pos);
+        keeper = keep.Keep.init(sa, ko) catch return run.oom(pos);
         out.keeper = &keeper;
     }
-    var scrub: Scrub = .{ .alloc = a, .secrets = secrets.items, .next = &out };
+    var scrub: Scrub = .{ .alloc = sa, .secrets = secrets.items, .next = &out };
     var sink: Sink = .{ .host = h, .scrub = &scrub };
 
     run.host_runs += 1;
-    const outcome = h.spawn_fn(h.spawn_ctx, a, .{ .argv = argv, .cwd = cwd, .env = env.items, .stdin = stdin, .timeout_ms = o.timeout_ms.? }, &sink) catch |e| switch (e) {
+    const outcome = h.spawn_fn(h.spawn_ctx, sa, .{ .argv = argv, .cwd = cwd, .env = env.items, .stdin = stdin, .timeout_ms = o.timeout_ms.? }, &sink) catch |e| switch (e) {
         error.OutOfMemory => return run.oom(pos),
         error.NotFound => return run.fail(pos, .host, "`run`: `{s}` is not found{s}", .{ argv[0], if (std.mem.indexOfScalar(u8, argv[0], '/') == null) " along PATH" else "" }),
         error.NotRunnable => return run.fail(pos, .host, "`run`: `{s}` is there but cannot be run (its permissions, or not a program)", .{argv[0]}),
@@ -592,13 +602,13 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     if (o.whole) |n| {
         if (out.whole_over) return run.fail(pos, .argument, "`run`: the output passed `whole = {d}` bytes ({d}): a keep, `head` and `tail`, takes any size", .{ n, out.bytes });
         const lines = countLines(whole_buf.items);
-        r.map.put(a, "out", .{ .string = whole_buf.items }) catch return run.oom(pos);
+        r.map.put(a, "out", .{ .string = a.dupe(u8, whole_buf.items) catch return run.oom(pos) }) catch return run.oom(pos);
         r.map.put(a, "whole", .{ .boolean = true }) catch return run.oom(pos);
         for ([_][]const u8{ "total_lines", "matched_lines", "kept_lines" }) |k| r.map.put(a, k, .{ .int = @intCast(lines) }) catch return run.oom(pos);
     } else {
         const kept = keeper.finish() catch return run.oom(pos);
         try run.charge(pos, kept.work);
-        r.map.put(a, "out", .{ .string = kept.out }) catch return run.oom(pos);
+        r.map.put(a, "out", .{ .string = a.dupe(u8, kept.out) catch return run.oom(pos) }) catch return run.oom(pos);
         r.map.put(a, "total_lines", .{ .int = @intCast(kept.total) }) catch return run.oom(pos);
         r.map.put(a, "matched_lines", .{ .int = @intCast(kept.matched) }) catch return run.oom(pos);
         r.map.put(a, "kept_lines", .{ .int = @intCast(kept.kept) }) catch return run.oom(pos);
@@ -649,6 +659,30 @@ test "host: run keeps the head and tail of what a program prints, and says how i
         \\print(r.matched_lines, r.out)
         \\print(host("run", {"shale-fixture", "exit", "3"}, {timeout_ms = 10000, tail = 1}).code)
     , "3\tStep 1\nStep 10\nStep 12\n\n3\n");
+}
+
+test "host: what run keeps costs the run's arena the same however its output arrives (the gate holds the engines' arenas equal)" {
+    var t: T = undefined;
+    try t.init();
+    defer t.deinit();
+    // The same 200,000 bytes, 1,000 or 9,999 at a time: the same argv's
+    // length, the same output. Once each, outside the gate: its arenas
+    // are what is compared.
+    for ([_][]const u8{ "whole = 300000", "tail = 3", "head = 2, re = \"x\"" }) |keep_with| {
+        var arena: [2]usize = undefined;
+        for ([_][]const u8{ "1000", "9999" }, 0..) |size, k| {
+            const src = try std.fmt.allocPrint(t.arena.allocator(), "local r = host(\"run\", {{\"shale-fixture\", \"chunks\", \"200000\", \"{s}\"}}, {{timeout_ms = 20000, {s}}}) print(r.total_lines)", .{ size, keep_with });
+            var r = t.runOnce(src, .atomic);
+            defer r.deinit();
+            try testing.expect(r.stop == null);
+            try testing.expectEqualStrings("2000\n", r.output);
+            arena[k] = r.arena_bytes;
+        }
+        if (arena[0] != arena[1]) {
+            std.debug.print("{s}: {d} arena bytes in pieces of 1,000, {d} in pieces of 9,999\n", .{ keep_with, arena[0], arena[1] });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "host: run's options are the script's to say; what it is given wrong stops, saying what to give" {
