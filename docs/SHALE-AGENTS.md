@@ -355,6 +355,9 @@ failure, a missing binary included, into a refusal). It passes exactly:
   session, the kind, the tag, the text, and the command's first 160 bytes;
 - **a subagent's call.** Its hook input carries an `agent_id` (the hooks
   reference, "Common input fields"), and local cold agents are exempt.
+  Checked live on the box (2026-10-17, a logging hook): a subagent's Bash
+  call carried `agent_id` and `agent_type`; the top-level session's calls
+  carried neither.
 
 Anything else is refused, with one line naming both forms. The hook,
 for `~/.claude/settings.json`:
