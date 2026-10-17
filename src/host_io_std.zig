@@ -13,3 +13,7 @@ pub const shale_preludes = true;
 /// change's diff as a summary unless `--verbose`; metal prints every diff
 /// in full and compiles no summary.
 pub const shale_diff_summary = true;
+/// **A DRY RUN THAT SEES ITS OWN CHANGES** (metal-vmm QUEUE 234): the Linux
+/// CLI's dry run holds its changes in an overlay its reads see; metal has
+/// no dry run and compiles none of it.
+pub const shale_dry_run = true;

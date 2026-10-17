@@ -57,7 +57,7 @@ fn readFile(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 
 /// A file's size, for a read of part of it: one store call, the read's.
 pub fn fileSize(run: *Run, pos: ast.Pos, b: B, p: Path) Error!u64 {
-    const st = (store.statOrNull(run.io, run.alloc, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e)) orelse return storeFailed(run, pos, b, p.rel, error.FileNotFound);
+    const st = (hub.viewStatOrNull(run, p.full) catch |e| return storeFailed(run, pos, b, p.rel, e)) orelse return storeFailed(run, pos, b, p.rel, error.FileNotFound);
     if (st.kind != .file) return storeFailed(run, pos, b, p.rel, error.IsDir);
     return st.size;
 }
@@ -74,7 +74,7 @@ fn readPart(run: *Run, pos: ast.Pos, p: Path, offset: u64, n: ?u64) Error!Value 
 fn readOr(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const p = try pathArg(run, pos, .read_or, args[0], false);
     try countRead(run, pos);
-    const st = (store.statOrNull(run.io, run.alloc, p.full) catch |e| return storeFailed(run, pos, .read_or, p.rel, e)) orelse return args[1];
+    const st = (hub.viewStatOrNull(run, p.full) catch |e| return storeFailed(run, pos, .read_or, p.rel, e)) orelse return args[1];
     if (st.kind != .file) return storeFailed(run, pos, .read_or, p.rel, error.IsDir);
     return readSized(run, pos, .read_or, p, st.size, 0, null);
 }
@@ -87,7 +87,7 @@ pub fn readSized(run: *Run, pos: ast.Pos, b: B, p: Path, size: u64, offset: u64,
     if (want > run.budgets.call_bytes) return run.fail(pos, .argument, "`{s}` brings at most {d} bytes in one call, and this would be {d}: read it in parts, `read(p, offset, n)`", .{ @tagName(b), run.budgets.call_bytes, want });
     if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
     const buf = run.alloc.alloc(u8, @intCast(want)) catch return run.oom(pos);
-    const got = store.readAt(run.io, run.alloc, p.full, offset, buf) catch |e| return storeFailed(run, pos, b, p.rel, e);
+    const got = hub.viewReadAt(run, p.full, offset, buf) catch |e| return storeFailed(run, pos, b, p.rel, e);
     run.tally(got);
     run.read_bytes += got;
     try bi.chargeBytes(run, pos, got);
@@ -337,7 +337,7 @@ fn scan(run: *Run, pos: ast.Pos, b: B, p: Path, needle: []const u8, first_only: 
     while (at < size) {
         const want: usize = @intCast(@min(size - at, buf.len - kept));
         if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
-        const got = store.readAt(run.io, run.alloc, p.full, at, buf[kept..][0..want]) catch |e| return storeFailed(run, pos, b, p.rel, e);
+        const got = hub.viewReadAt(run, p.full, at, buf[kept..][0..want]) catch |e| return storeFailed(run, pos, b, p.rel, e);
         run.read_bytes += got;
         try bi.chargeBytes(run, pos, got);
         run.tally(got);

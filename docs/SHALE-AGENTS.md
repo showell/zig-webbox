@@ -13,7 +13,10 @@ there to stay safe is what an agent wants on Linux too:**
 - **Nothing changes unless asked.** `shale` runs dry unless told
   `--write`: every change is checked and logged, an `edit`'s diff is
   printed, and none is made. Read the diff, then run it again with
-  `--write`.
+  `--write`. The dry run sees its own changes: a `replace` and then an
+  `edit` of the same file previews the edit against the replaced text,
+  and a read after either gets what `--write` would. Listing (`ls`,
+  `walk`) a folder it changed stops, saying so: run `--write` on a copy.
 - **It reads only what it is rooted at** (`--root`, else the working
   directory) and its mounts (`runs:x`): no `..`, no absolute paths. It
   reaches past them only by running a program (`run`), which needs

@@ -256,5 +256,6 @@ test {
     _ = @import("agent_test.zig");
     _ = @import("host_test.zig");
     _ = @import("cli_test.zig");
+    _ = @import("overlay_test.zig");
     _ = cli;
 }

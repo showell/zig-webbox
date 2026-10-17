@@ -19,6 +19,7 @@ const B = ast.Builtin;
 const spec = bi.spec;
 const hub = @import("builtins_store.zig");
 const rd = @import("builtins_read.zig");
+const overlay = @import("overlay.zig");
 const fileSize = rd.fileSize;
 const readSized = rd.readSized;
 const Path = hub.Path;
@@ -349,7 +350,7 @@ fn changeAt(run: *Run, pos: ast.Pos, b: B, c: Change, p: Path, data: []const u8)
     // **ONLY WHAT ISN'T THERE IS MISSING** (209(a)): any other failure to
     // look is the store's own, named, logged, and why the run stopped.
     const looked: ?anyerror = switch (c) {
-        .remove, .remove_tree => if (store.statOrNull(io, a, p.full)) |st| (if (st == null) error.FileNotFound else null) else |e| e,
+        .remove, .remove_tree => if (hub.viewStatOrNull(run, p.full)) |st| (if (st == null) error.FileNotFound else null) else |e| e,
         else => null,
     };
     // **A DRY RUN**: checked and counted as made, logged, not made. What it
@@ -357,6 +358,10 @@ fn changeAt(run: *Run, pos: ast.Pos, b: B, c: Change, p: Path, data: []const u8)
     // disk full) it does not say.
     if (looked == null and run.dry_run) {
         run.effects.appendAssumeCapacity(.{ .op = @tagName(b), .path = p.rel, .outcome = "dry run" });
+        // **AND HELD**, so the reads after it see it (metal-vmm QUEUE 234).
+        if (comptime overlay.on) overlay.record(&run.overlay, a, switch (c) {
+            inline else => |t| @field(overlay.Change, @tagName(t)),
+        }, p.full, data) catch return run.oom(pos);
         return .nil;
     }
     const outcome: ?anyerror = if (looked) |e| e else switch (c) {
