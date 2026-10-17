@@ -1,5 +1,5 @@
 //! **REGULAR EXPRESSIONS, A LINEAR-TIME SUBSET** (metal-vmm QUEUE 230,
-//! chunk 2; Steve, 2026-10-18: "yes to regex"): the engine `re_find` and
+//! chunk 2; Steve, 2026-10-17: "yes to regex"): the engine `re_find` and
 //! `re_match` run (builtins_regex.zig). Literals, `.`, classes (`[a-z]`,
 //! `[^...]`, `\d \w \s` and their capitals), `*`, `+`, `?`, `^`, `$`,
 //! alternation (`|`, lowest precedence, the leftmost alternative first) and

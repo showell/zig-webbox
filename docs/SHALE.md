@@ -722,7 +722,7 @@ print(find(s, "cd"), sub(s, o + 1, o + 2))   -- a position is one more
 ### Regular expressions
 
 **A small subset, and linear** (metal-vmm QUEUES 230 and 232; Steve,
-2026-10-18).
+2026-10-17).
 A field taken out of a line is one call, where `between`, `split` and a
 helper took three:
 
@@ -1414,7 +1414,7 @@ holds every source of the module.
 - **No remove from a list or a map.** A list only grows, which is what
   lets `for x in` walk it in place.
 - **No floats, no closures.** Patterns only as the regular expressions'
-  linear subset, `re_find` and `re_match` (Steve, 2026-10-18: "yes to
+  linear subset, `re_find` and `re_match` (Steve, 2026-10-17: "yes to
   regex"; alternation, `\b` and `nocase` with the dogfood design): one
   group, no backreferences, no backtracking.
 - **Offsets in files are 0-based; positions in strings are 1-based.** The
