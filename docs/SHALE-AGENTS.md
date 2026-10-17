@@ -78,7 +78,9 @@ has none of it):
     raised), because Shale cannot see it.
 - **Files:** `create(p, text)` refuses a file already there.
   `edits_all({{p, edits}, ...})` checks every file's edits before it writes
-  any.
+  any. `zig_rename(p, from, to, {lines}?)` renames a Zig identifier as
+  Zig's tokenizer sees it, giving `{renamed, left_in_comments}` (the
+  cookbook's "A symbol renamed across a tree").
 
 **Git, in the git prelude** (`src/shale_prelude_git.shale`). Every call
 runs git under `run`, so it needs `--write`. A `repo` is a Shale path, `""`
@@ -223,40 +225,59 @@ With one group and no alternation, a message holding an escaped quote
 (`\"`) is cut at it, which Python's `(?:\\.|[^"\\])*` would not be; for
 this tree it holds.
 
-### A symbol renamed across a tree, its diff first
+### A symbol renamed across a tree, as Zig sees it
 
-```shale
-function rename_in(p, from, to) return edit(p, from, to, {all = true, word = true}) end
+```shale-linux
 local n = 0
 for p in glob("src/**/*.zig") do
-  if #grep(p, "pastDeadline") > 0 then n = n + rename_in(p, "pastDeadline", "deadlinePassed") end
+  if #grep(p, "pastDeadline") > 0 then
+    local r = zig_rename(p, "pastDeadline", "deadlinePassed")
+    n = n + r.renamed
+    if r.left_in_comments > 0 then print(p .. ": " .. r.left_in_comments .. " left in comments") end
+    -- What reaches it through a module is after a `.`: its own edit.
+    if #grep(p, "timeouts.pastDeadline") > 0 then edit(p, "timeouts.pastDeadline", "timeouts.deadlinePassed", {all = true}) end
+  end
 end
 print(n .. " renamed")
+-- (the CLI's summary of each diff; --verbose for the diffs)
 -- prints:
--- --- a/src/tcp.zig
--- +++ b/src/tcp.zig
--- @@ -5,1 +5,1 @@
--- -pub const pastDeadline = timeouts.pastDeadline;
--- +pub const deadlinePassed = timeouts.deadlinePassed;
--- --- a/src/tcp_timeouts.zig
--- +++ b/src/tcp_timeouts.zig
--- @@ -2,1 +2,1 @@
--- -pub fn pastDeadline(now: u64) bool {
--- +pub fn deadlinePassed(now: u64) bool {
--- 3 renamed
+-- edit src/tcp.zig: 1 hunk, -1 +1 lines
+-- edit src/tcp.zig: 1 hunk, -1 +1 lines
+-- edit src/tcp_timeouts.zig: 1 hunk, -1 +1 lines
+-- 2 renamed
 ```
 
 ```sh
 grep -rlw pastDeadline src | xargs sed -i 's/\bpastDeadline\b/deadlinePassed/g' && git diff
 ```
 
-**Uses** `glob`, `grep` to pass by the files without the name, and `edit`
-with `word`: the name is a literal, so no pattern. Shale shows the diff
-**before** anything is written, and writes only with
-`--write`; `sed -i` writes first, and the diff is git's to show after.
-`word = true` is `\b`'s whole-word rule. A file `edit` would change in a
-way its `old` does not pin down (`old` twice, without `all`) is refused, and
-says so, before anything is changed.
+**Uses** `zig_rename` (metal-vmm QUEUE 234, 3): Zig's own tokenizer, so
+it renames identifier tokens and nothing else: not a field or an enum
+literal after `.` (the essay's `.watch`), not `@"pastDeadline"`, not a
+string, a test's name or a comment (it counts the comments' mentions in
+`left_in_comments`, for you to decide), and not part of a longer name.
+`sed`'s `\b`, and `edit`'s `word`, take every one of those. **The
+analysis is tokens, not types:** a name reached through a module
+(`timeouts.pastDeadline`) is after a `.` and is left, so the qualified
+uses get their own `edit`, and the compiler judges after
+(`same_tests.shale`). `opts.lines = {first, last}` limits it to a range.
+
+**Moving a block to another file, then its uses** (the linux_host split):
+move the declarations, then rename what the old file still says to the
+qualified name:
+
+```shale-linux
+local r = zig_rename("src/linux_host.zig", "kept_write_deadline_ms", "linux_writes.kept_write_deadline_ms")
+-- stops: argument
+```
+
+A `to` with a `.` where the name is still **declared** (after `const`,
+`var` or `fn`, before a `:`, in a capture, an enum's member) stops the run,
+naming the line, with nothing written: `pub const
+linux_writes.kept_write_deadline_ms` was the essay's worst miss. So the
+stop says the block was not moved yet, as it does here. (A `shale-linux`
+block runs with the Linux prelude, in `src/shale_doc_linux_test.zig`.) A dry run shows the diffs first,
+and its reads see the rename (234, 2).
 
 ### Two edits to one file, each asserted, one write
 

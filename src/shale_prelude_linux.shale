@@ -174,6 +174,16 @@ function newest(p, n)
   return got
 end
 
+-- **A RENAME THAT KNOWS ZIG** (metal-vmm QUEUE 234, 3): each identifier
+-- token `from` in a Zig file becomes `to`, never one after `.`, nor
+-- `@"from"`, nor in a string or a comment; `opts.lines = {first, last}`
+-- limits it. A qualified `to` where `from` is declared stops the run.
+-- `{renamed, left_in_comments}`.
+function zig_rename(path, from, to, opts?)
+  -- `host` takes three arguments past its name: `from` and `to` go as one.
+  return host("zig_rename", path, {from = from, to = to}, opts)
+end
+
 -- A new file: refused if one is there already.
 function create(p, text)
   if exists(p) then fail("`create`: " .. p .. " is there already: `edit` or `replace` it") end

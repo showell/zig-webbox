@@ -21,9 +21,12 @@ pub const T = struct {
     path_env: []const u8,
     /// The preludes after the core's each run is given.
     preludes: []const script.parse.Prelude = &.{},
+    /// How an edit's diff prints (the CLI's is `summary`).
+    diffs: script.interp.Diffs = .full,
 
     pub fn init(t: *T) !void {
         t.preludes = &.{};
+        t.diffs = .full;
         t.tmp = testing.tmpDir(.{});
         t.threaded = std.Io.Threaded.init(testing.allocator, .{});
         t.arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -47,7 +50,7 @@ pub const T = struct {
 
     pub fn run(t: *T, src: []const u8, mode: script.process.Mode) script.Result {
         const o = t.host.options();
-        return script.runWith(t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes });
+        return script.runWith(t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes, .diffs = t.diffs });
     }
 
     /// One run of the VM, outside the gate: for a script whose effects

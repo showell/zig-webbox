@@ -124,7 +124,7 @@ fn editsArg(run: *Run, pos: ast.Pos, args: []const Value) Error![]Edit {
 /// now: `was[o0..o1]` became `now[c0..c1]`; outside every span the two are
 /// the same bytes. In order and apart, so the diff is the file as it was
 /// against the file as the last edit left it, however the edits met.
-const Span = struct { o0: usize, o1: usize, c0: usize, c1: usize };
+pub const Span = struct { o0: usize, o1: usize, c0: usize, c1: usize };
 
 /// `now[i..i + len]` replaced by `n` bytes: the spans it meets (or touches)
 /// become one, which spans the old text they and the bytes between them
@@ -218,9 +218,18 @@ fn editFile(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         now = next.items;
         replaced_n += at.items.len;
     }
-    try writeDiff(run, pos, p.rel, was, now, spans.items);
-    _ = try changeAt(run, pos, b, .replace, p, now);
+    try rewrite(run, pos, p, was, now, spans.items);
     return .{ .int = @intCast(replaced_n) };
+}
+
+/// **A FILE REWRITTEN BY SPANS** (metal-vmm QUEUE 234, 3): `was` became
+/// `now`, `spans` saying where. Its diff (by the run's `diffs` setting),
+/// then the change, logged as an `edit`: a dry run's, its overlay's and
+/// its budgets' as every change is. `edit`'s, and the Linux host's
+/// `zig_rename`'s.
+pub fn rewrite(run: *Run, pos: ast.Pos, p: Path, was: []const u8, now: []const u8, spans: []const Span) Error!void {
+    try writeDiff(run, pos, p.rel, was, now, spans);
+    _ = try changeAt(run, pos, .edit, .replace, p, now);
 }
 
 /// Whether this host prints a diff as one line (`Diffs.summary`): metal's
