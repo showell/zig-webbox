@@ -273,7 +273,8 @@ of its own, run under a 4-second Bash timeout.
   pattern is a regex; `_lines` and `_in` keep meaning "of a file"; the subject
   first, the options map last.
 - **No streaming past the call-bytes cap:** a builtin is bounded, never cut.
-  The CLI raises `call_bytes` instead (64 MiB).
+  The CLI is to raise `call_bytes` instead (proposed: 64 MiB, "The CLI's
+  defaults"; the code's default is `interp.Budgets.call_bytes`).
 
 ## Edits that work (core: metal-vmm QUEUE 232)
 
@@ -305,8 +306,9 @@ asserted, one write, every literal multi-line.
   edits first, writes nothing unless all hold, then file by file, each atomic;
   the set is not (said so).
 - **`create(p, text)`** (Linux prelude): refused if the file exists.
-- `replace` keeps its behaviour on metal. The CLI's output default is 64 KiB,
-  which covers an edit's diff.
+- `replace` keeps its behaviour on metal. The CLI's proposed output default
+  ("The CLI's defaults"; the code's is `interp.Budgets.default_output_bytes`)
+  covers an edit's diff.
 
 ## The dry run, honest
 
@@ -394,7 +396,9 @@ on this host`, `budget runs: a dry run runs no program; --write runs it`,
 `refused: \`run\` of \`sed\`: Shale edits text itself; {want = ...} to run it
 anyway`.
 
-## The CLI's defaults
+## The CLI's defaults (proposed)
+
+None of this is built; the code's defaults are `interp.Budgets`.
 
 `now()` is the wall clock, in seconds (`SHALE_NOW` pins it for tests).
 Output 64 KiB. `call_bytes` 64 MiB. Steps 5M. 64 programs a run under
