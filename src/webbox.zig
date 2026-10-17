@@ -78,6 +78,7 @@ test {
     _ = script_route;
     _ = shale_suite;
     _ = @import("script_route_test.zig");
+    _ = @import("library_test.zig");
     _ = site;
     _ = body;
     _ = http;
