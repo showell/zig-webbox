@@ -1225,7 +1225,7 @@ it three things through `Options`, and metal hands none
   `shale_preludes`, and metal's host_io doesn't.
 - **A dry run runs no program:** `run` and `job_start` stop it as `budget
   runs`, which `attempt` can't catch. A run runs at most 64 programs.
-- **The gate** (`tools/shale_gate.zig`, not installed) is the PreToolUse
+- **The gate** (`tools/shale_gate.zig`, installed on the box) is the PreToolUse
   hook that holds an agent to Shale (SHALE-AGENTS.md, "The gate").
 
 What each function takes and gives is in SHALE-AGENTS.md; the tests are

@@ -343,12 +343,13 @@ follows the name in the match.
 
 Shale reads like Lua, and an agent's Lua habits are most of its first
 stops (the box's first afternoon under the gate: essay
-`notes/shale-from-the-inside.md`). Each is a clear stop, never a wrong
-answer, except the `grep` one:
+`notes/shale-from-the-inside.md`). Most are a clear stop; the first
+two can give a quiet wrong answer, an empty list:
 
 - **Patterns are regular expressions, not Lua's.** The escape is `\`
-  (`"\\."` in a string), and `%` is a plain character. One capture group at
-  most, and no `(?:`. A match is `{at, text, group}`.
+  (`"\\."` in a string), and `%` is a plain character, so Lua's `%d+` or
+  `[%w_]` matches nothing it should and finds nothing, quietly. One capture
+  group at most, and no `(?:`. A match is `{at, text, group}`.
 - **`grep(p, text)` is plain text**, and finding nothing is an empty list,
   not an error. So `grep(p, "edit%(")` quietly finds nothing. A pattern over
   a file is `re_lines(read(p), pattern)`.
@@ -360,10 +361,14 @@ answer, except the `grep` one:
   adds, and `create` refuses one already there.
 - **Functions are not values**: no closures and no anonymous functions.
   Declare `function name(...)` at the top level.
-- **`run`'s keep is a size**: `whole = <bytes>` or `tail = <lines>`, and
-  `timeout_ms` is required.
-- **A path is the root's.** Another place is a mount, `name:path` (the box
-  mounts `zig`, `repos` and `mine` in `~/.config/shale/mounts`).
+- **Loops are `for x in l do`** over a list's items (no `ipairs`, no
+  `pairs`, no `range`), or `while`. Not-equal is `~=`.
+- **`run`'s keep is a size**: `whole = <bytes>`, `tail = <lines>` or
+  `head = <lines>`, and `timeout_ms` is required. `must(r)` takes `run`'s
+  answer; the git prelude's calls stop by themselves (`git_commit` gives
+  the new head, `git_push` nothing), so no `must` around them.
+- **A path is the root's.** Another place is a mount, `name:path`; the
+  box's are in `~/.config/shale/mounts`. An absolute path is refused.
 
 ## The gate: `shale-gate` (installed on the box, 2026-10-17, in `~/.claude/settings.json`)
 
