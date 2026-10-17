@@ -19,6 +19,8 @@ pub const linux_fetch = @import("linux_fetch.zig");
 pub const shale_keep = @import("shale_keep.zig");
 /// One program run under `run`'s rules: the raw spawn and its poll loop.
 pub const shale_spawn = @import("shale_spawn.zig");
+/// Shale's Linux host: `run`, `real`, mounts, behind the core's seam.
+pub const shale_host_linux = @import("shale_host_linux.zig");
 
 test {
     _ = linux_host;
@@ -28,4 +30,5 @@ test {
     _ = linux_fetch;
     _ = shale_keep;
     _ = shale_spawn;
+    _ = shale_host_linux;
 }

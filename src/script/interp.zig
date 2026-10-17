@@ -133,6 +133,9 @@ pub const Run = struct {
     /// The host's door and hook, where it has them (`Host`, `PathHook`).
     host: ?Host = null,
     path_hook: ?PathHook = null,
+    /// The programs this run's host has run for it: the host's cap is
+    /// counted here, in the run, so each engine of the gate counts its own.
+    host_runs: u32 = 0,
     /// Whether the run called a builtin that changes the store, refused or
     /// not (the gate cuts a run that did not as a background run).
     tried_change: bool = false,
@@ -211,6 +214,7 @@ pub const Run = struct {
             .depth => "calls and the expressions inside them nest deeper than the depth budget",
             .machine => std.fmt.allocPrint(self.alloc, "the machine's memory (the code, the frames, the operands) is past its budget ({d} bytes)", .{self.budgets.machine_bytes}) catch "the machine's memory is past its budget",
             .kept => std.fmt.allocPrint(self.alloc, "what the run keeps at a `yield` is past the kept budget ({d} bytes)", .{self.budgets.kept_bytes}) catch "what the run keeps at a `yield` is past the kept budget",
+            .runs => "a dry run runs no program; --write runs it",
         } };
         return error.Stop;
     }
