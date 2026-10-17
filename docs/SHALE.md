@@ -290,7 +290,11 @@ From the loosest to the tightest:
 
 - **Truth:** only `nil` and `false` are false.
 - **Comparison:** `==` across types is false; `<` across types is an
-  error; `==` on a list or a map is an error. Strings compare byte by byte.
+  error; `==` on a list or a map is an error, **but for the written `nil`**:
+  `m == nil` and `nil ~= m` are as for any value (QUEUE 231), so a result
+  that is a map or nil (`re_find`) is told by `if m == nil`. A local that
+  holds nil is still a value: `m == x` with a map stops whatever `x` is.
+  Strings compare byte by byte.
 - **A chain of `..` is joined once.** `a .. b .. c` evaluates every part
   left to right, then makes one string. When the first part is the string
   the previous chain made, and its buffer has room, the rest is written
@@ -690,7 +694,7 @@ helper took three:
 
 ```shale
 local m = re_find("src/tcp.zig:412: DEPARTS (bounded) the window", "DEPARTS \\((\\w+)\\)")
-if m then print(m.at, m.text, m.group) end
+if m ~= nil then print(m.at, m.text, m.group) end
 print(re_match("  pub fn deadline(", "^\\s*pub fn"), re_match("x", "\\d"))
 local r = re_find("see tcp.zig:40 and gone.zig:1", "(\\w+\\.zig):\\d+")
 print(r.group, parse_int(sub(r.text, #r.group + 2)))
@@ -702,7 +706,7 @@ print(r.group, parse_int(sub(r.text, #r.group + 2)))
 
 | builtin | gives |
 |---|---|
-| `re_find(s, pattern)` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none. Test it with `if m then`: `==` on a map is refused, `m == nil` with it |
+| `re_find(s, pattern)` | the leftmost match: `at` (1-based, as `find`) and `text`, and `group`, the capture group's text, when the pattern has one ("" where the match did not go through it); nil when there is none: `if m == nil` (or `if m then`) |
 | `re_match(s, pattern)` | whether `s` holds a match, anywhere, as `grep` says of a line; `^` and `$` pin it to the whole |
 
 | in a pattern | is |

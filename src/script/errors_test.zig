@@ -72,6 +72,10 @@ const cases = [_]Case{
     .{ .src = "local x = \"a\" .. {}", .line = 1, .column = 15, .class = .type, .message = "`..` takes strings and integers, not an empty table" },
     .{ .src = "local x = 1 < \"a\"", .line = 1, .column = 13, .class = .type, .message = "`<` compares an integer with a string" },
     .{ .src = "local x = {} == {}", .line = 1, .column = 14, .class = .type, .message = "`==` on a list or a map is not in this language" },
+    // Only the literal `nil` meets a map or a list (QUEUE 231): a value
+    // that is nil when the line runs is still a value compared with it.
+    .{ .src = "local m = {} local x = 1 local b = m == x", .line = 1, .column = 38, .class = .type, .message = "`==` on a list or a map is not in this language" },
+    .{ .src = "local m = {} local x = nil local b = x ~= m", .line = 1, .column = 40, .class = .type, .message = "`==` on a list or a map is not in this language" },
     .{ .src = "local x = -\"a\"", .line = 1, .column = 11, .class = .type, .message = "`-` takes an integer, not a string" },
     .{ .src = "local x = #5", .line = 1, .column = 11, .class = .type, .message = "`#` takes a string or a list, not an integer" },
     .{ .src = "local l = {1} local x = l.a", .line = 1, .column = 26, .class = .type, .message = "a list's keys are integers: this one is a list, indexed by a string" },

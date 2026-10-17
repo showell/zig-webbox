@@ -79,7 +79,10 @@ pub const Builtin = enum {
     print,
 };
 
-pub const BinOp = enum { add, sub, mul, idiv, mod, concat, eq, ne, lt, le, gt, ge, @"and", @"or" };
+/// `eq_nil` and `ne_nil` are `==` and `~=` with the literal `nil` on a
+/// side (metal-vmm QUEUE 231): the one comparison a map or a list may be
+/// in, so `if m == nil` reads as written.
+pub const BinOp = enum { add, sub, mul, idiv, mod, concat, eq, ne, eq_nil, ne_nil, lt, le, gt, ge, @"and", @"or" };
 pub const UnOp = enum { neg, not, len };
 
 pub const Expr = struct {

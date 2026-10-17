@@ -530,7 +530,15 @@ pub const Parser = struct {
             const pos = self.here();
             try self.advance();
             const right = try self.binary(if (lv.right) lv.prec else lv.prec + 1);
-            left = try self.new(ast.Expr, .{ .pos = pos, .kind = .{ .binary = .{ .op = lv.op, .left = left, .right = right } } });
+            // **A MAP OR A LIST AGAINST THE WRITTEN `nil`** (QUEUE 231): its
+            // own comparison, which any value may be in; `==` stays refused
+            // for a map against any other value, a nil one included.
+            const op: ast.BinOp = if (left.kind == .nil or right.kind == .nil) switch (lv.op) {
+                .eq => .eq_nil,
+                .ne => .ne_nil,
+                else => lv.op,
+            } else lv.op;
+            left = try self.new(ast.Expr, .{ .pos = pos, .kind = .{ .binary = .{ .op = op, .left = left, .right = right } } });
         }
         return left;
     }

@@ -272,6 +272,7 @@ const Machine = struct {
                     m.push(switch (bop) {
                         .add, .sub, .mul, .idiv, .mod => try r.arith(op.pos, bop, lv, rv),
                         .eq, .ne => .{ .boolean = (try r.equal(op.pos, lv, rv)) == (bop == .eq) },
+                        .eq_nil, .ne_nil => .{ .boolean = interp.Run.bothNil(lv, rv) == (bop == .eq_nil) },
                         .lt, .le, .gt, .ge => try r.compare(op.pos, bop, lv, rv),
                         .concat, .@"and", .@"or" => unreachable,
                     });

@@ -61,7 +61,7 @@ local total = 0
 for p in glob("src/tcp*.zig") do
   for m in grep(p, "DEPARTS (") do
     local r = re_find(m.text, "DEPARTS \\((\\w+)\\)")
-    if r then
+    if r ~= nil then
       by[r.group] = get(by, r.group, 0) + 1
       total = total + 1
     end
@@ -118,7 +118,7 @@ not.
 for p in glob("src/**/*.zig") do
   for m in grep(p, "props.always(") do
     local r = re_find(m.text, "props\\.always\\([^\"]*\"([^\"]*)\"")
-    if r then print(p .. ":" .. m.line, r.group) end
+    if r ~= nil then print(p .. ":" .. m.line, r.group) end
   end
 end
 -- prints:
@@ -181,7 +181,7 @@ says so, before anything is changed.
 for m in grep("docs/notes.md", ".zig:") do
   for w in words(m.text) do
     local r = re_find(w, "(\\w+\\.zig):\\d+")
-    if r then
+    if r ~= nil then
       local name = r.group
       local n = parse_int(sub(r.text, #name + 2))
       local found = glob("**/" .. name)

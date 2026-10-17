@@ -548,9 +548,15 @@ pub const Run = struct {
             .add, .sub, .mul, .idiv, .mod => self.arith(pos, op, l, r),
             .concat => unreachable, // `concatChain`
             .eq, .ne => .{ .boolean = (try self.equal(pos, l, r)) == (op == .eq) },
+            .eq_nil, .ne_nil => .{ .boolean = bothNil(l, r) == (op == .eq_nil) },
             .lt, .le, .gt, .ge => self.compare(pos, op, l, r),
             .@"and", .@"or" => unreachable,
         };
+    }
+
+    /// `==` with the literal `nil` on a side: whether the other is nil too.
+    pub fn bothNil(l: Value, r: Value) bool {
+        return l == .nil and r == .nil;
     }
 
     fn toNumberHint(v: Value) []const u8 {
@@ -912,8 +918,8 @@ pub fn opText(op: ast.BinOp) []const u8 {
         .idiv => "//",
         .mod => "%",
         .concat => "..",
-        .eq => "==",
-        .ne => "~=",
+        .eq, .eq_nil => "==",
+        .ne, .ne_nil => "~=",
         .lt => "<",
         .le => "<=",
         .gt => ">",
