@@ -16,6 +16,13 @@
 --   declaration or field (a word match: `const name`, `fn name`, `name:`,
 --   so said in the report). In another kind of file, the word.
 --
+--   WRITING ONE THAT IS NOT A CITATION (Steve, 2026-10-18: "mark the
+--   style"): an example, or a part a reader fills in, is in `<angle>`
+--   brackets (`<name>.txt`, `seg<NN>.png`, `<root>/next-id.txt`); another
+--   project's file starts at its root, so marked (`<seabios>/src/hw/rtc.h`);
+--   a file a plan names before it exists is plain text, not backticked.
+--   A word with `<` or `>` is passed by.
+--
 --   `file:N` is read as `file`; the line is not checked (Steve: "lines
 --   later"). Counted, and those with a name beside them whose line does
 --   not hold the name are counted too.

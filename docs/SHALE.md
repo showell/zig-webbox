@@ -696,7 +696,7 @@ the bytes compared there a step for 16 (see "What a builtin costs").
 | `tostring(v)` | a scalar's text, as `print` writes it |
 | `tonumber(s)` | an optional `-` and decimal digits; anything else is an `argument` error |
 | `parse_int(s)` | the integer `s` says, the blanks around it let be (spaces, tabs, `\r`, `\n`), or nil for anything else: a word, a torn line, a number past 64 bits. nil gives nil and an integer itself, so a field that is missing (`get`) reads as no number. For data the script did not write |
-| `path(a, b, ...)` | the parts (one to four) joined with `/`, each "" left out, so "" is the root: `path("", "top.txt")` is `top.txt` |
+| `path(a, b, ...)` | the parts (one to four) joined with `/`, each "" left out, so "" is the root: `path("", "<name>.txt")` is `<name>.txt` |
 | `basename(p)` | what follows the last `/`, or all of `p` |
 | `strip_suffix(s, t)` | `s` without `t` at its end, or `s` as it is |
 
