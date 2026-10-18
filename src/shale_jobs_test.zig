@@ -99,6 +99,28 @@ test "jobs: a job started on a log whose job or reaper still lives is refused, i
     try testing.expectEqualStrings(ending, try t.file("ending.log.job"));
 }
 
+test "jobs: a log whose job's end is written takes a new job, though its reaper is still exiting" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const a = t.arena.allocator();
+    const none = 0x7ffffff0;
+    var buf: [1024]u8 = undefined;
+    const me = std.os.linux.getpid();
+    const my_start = jobs.startOf(&buf, me).?;
+    // Its end written, its reaper (this test's process stands in) between
+    // that last write and its exit.
+    try t.put("done.log.job", try std.fmt.allocPrint(a, "pid={d}\npgid={d}\nstart=1\nstarted=0\nargv=x\nreaper={d}\nreaper_start={s}\nexit=0\n", .{ none, none, me, my_start }));
+    try testing.expectEqualStrings("exited\t0\n", try once(&t, "local j = job_start({\"shale-fixture\", \"exit\", \"0\"}, {log = \"done.log\"}) local w = job_wait(j, {timeout_ms = 10000}) print(w.ended, w.code)"));
+    // As a script does it: wait, then start again on the same log at once.
+    try testing.expectEqualStrings("exited\nexited\nexited\n", try once(&t,
+        \\for i = 1, 3 do
+        \\  local j = job_start({"shale-fixture", "exit", "0"}, {log = "again.log"})
+        \\  print(job_wait(j, {timeout_ms = 10000}).ended)
+        \\end
+    ));
+}
+
 test "jobs: the mistakes a job's call can make, each named" {
     var t: T = undefined;
     try init(&t);

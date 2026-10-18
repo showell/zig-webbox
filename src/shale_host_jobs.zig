@@ -96,10 +96,13 @@ fn start(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const log_os = try hl.osPath(h, run, pos, log_v, false);
     const record_os = std.fmt.allocPrint(a, "{s}.job", .{log_os}) catch return run.oom(pos);
     // A job still running on this log: its record is its one handle, and
-    // the old job's end would be written over the new one's record.
+    // the old job's end would be written over the new one's record. Its
+    // end written, its reaper has nothing left to write (that was its
+    // last), so one still exiting holds nothing; its group still living
+    // (a child it left) may still write the log.
     if (std.Io.Dir.cwd().readFileAlloc(run.io, record_os, a, .limited(64 * 1024))) |text| {
         try chargeRead(run, pos, text.len);
-        if (jobs.parseRecord(text)) |old| if (jobs.alive(old) or jobs.reaperAlive(old))
+        if (jobs.parseRecord(text)) |old| if (jobs.alive(old) or (!old.done() and jobs.reaperAlive(old)))
             return run.fail(pos, .host, "`job_start`: a job still runs on {s} (pid {d}, its record {s}.job): `job_stop` or `job_wait` it, or give another log", .{ log_shown, old.pid, log_shown });
     } else |_| {}
     run.host_runs += 1;
