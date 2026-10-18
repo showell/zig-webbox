@@ -419,6 +419,16 @@ pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: W
     const tmp = if (dir) |d| try std.fs.path.join(alloc, &.{ d, tmp_name }) else tmp_name;
     if (opts.private) {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @enumFromInt(0o600) } });
+    } else if (comptime @import("builtin").os.tag == .linux) {
+        // **ON LINUX THE NEW FILE HAS THE OLD ONE'S MODE**: a replace is the
+        // same file written anew, so an executable script stays one.
+        // Metal's FAT holds no modes (its io has none to name).
+        if (Io.Dir.cwd().statFile(io, p, .{})) |st| {
+            try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = st.permissions } });
+        } else |e| {
+            if (e != error.FileNotFound) return e;
+            try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
+        }
     } else {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
     }
@@ -840,6 +850,27 @@ test "a private write, replace or create leaves the file 0600, even over one tha
     try write(io, a, f.p("data/seeded"), "new", .{ .private = true });
     try testing.expectEqual(@as(u32, 0o600), try Mode.of(io, f.p("data/seeded")));
     try testing.expectEqualStrings("new", try read(io, a, f.p("data/seeded"), .unlimited));
+}
+
+test "a replace keeps the file's mode on Linux: an executable script stays one (Shale's `edit` of ops/check_zig lost its x bit)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = f.arena.allocator();
+    var threaded = std.Io.Threaded.init(a, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try write(io, a, f.p("data/run.sh"), "old", .{});
+    const z = try a.dupeZ(u8, f.p("data/run.sh"));
+    try testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z, 0o755)));
+    try replace(io, a, f.p("data/run.sh"), "new", .{});
+    const st = try Io.Dir.cwd().statFile(io, f.p("data/run.sh"), .{});
+    try testing.expectEqual(@as(u32, 0o755), @intFromEnum(st.permissions) & 0o777);
+    try testing.expectEqualStrings("new", try read(io, a, f.p("data/run.sh"), .unlimited));
+    // A private replace still makes it 0600, whatever it was.
+    try replace(io, a, f.p("data/run.sh"), "x", .{ .private = true });
+    try testing.expectEqual(@as(u32, 0o600), @intFromEnum((try Io.Dir.cwd().statFile(io, f.p("data/run.sh"), .{})).permissions) & 0o777);
 }
 
 test "a replace onto a folder fails, and leaves no temporary file beside it (the real rename's refusal)" {
