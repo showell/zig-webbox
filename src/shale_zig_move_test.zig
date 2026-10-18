@@ -163,6 +163,20 @@ test "zig_move: a comment on a declaration's last line goes with it, and `after`
     try testing.expectEqualStrings("const x = 1; // x's\n\nconst b = 2;\n\nconst y = 2;\n", n.to_now);
 }
 
+test "zig_move: a CRLF file's separators are CRLF, there and back (found by the repo-wide property)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "const a = 1;\r\n\r\nconst b = 2;\r\n\r\nconst c = 3;\r\n";
+    const m = try moveFor(a, src, "", &.{"b"}, .doc, null);
+    try testing.expectEqualStrings("const a = 1;\r\n\r\nconst c = 3;\r\n", m.from_now);
+    try testing.expectEqualStrings("const b = 2;\r\n", m.to_now);
+    const n = try moveFor(a, "const b = 2;\n", "const x = 1;\r\n\r\nconst y = 2;\r\n", &.{"b"}, .doc, "x");
+    try testing.expectEqualStrings("const x = 1;\r\n\r\nconst b = 2;\r\n\r\nconst y = 2;\r\n", n.to_now);
+    const o = try moveFor(a, "const b = 2;\n", "const x = 1;\r\n", &.{"b"}, .doc, null);
+    try testing.expectEqualStrings("const x = 1;\r\n\r\nconst b = 2;\r\n", o.to_now);
+}
+
 test "zig_move: with the change budget room for one of its two writes, it writes neither" {
     var t: T = undefined;
     try init(&t);
@@ -280,30 +294,30 @@ const replay =
     \\  end
     \\  return rows
     \\end
+    \\-- Every row of a replay's report, so one more or one fewer fails.
+    \\function every(rows)
+    \\  print("moved", rows.moved)
+    \\  for k in {"needs_pub", "needs_import", "needs_from_from", "uses_left"} do print(k .. ":" .. rows[k]) end
+    \\end
     \\
 ;
 
-test "zig_move replays 589837e (linux_writes.zig): Hold, Sent and WriteWatch need pub; kept_write_deadline_ms's uses are left at 483 and 1427; std and Io are imports" {
+test "zig_move replays 589837e (linux_writes.zig): every row: the three the hand made pub and WriteWatch.run; std, net and Io imports; sleepMs from's own; the uses left" {
     var t: T = undefined;
     try init(&t);
     defer t.deinit();
     try t.expectOutput(replay ++
-        \\local r = replay("589837e", "linux_writes.zig")
-        \\print(r.moved)
-        \\for want in {"Hold:527", "Sent:593", "WriteWatch:703"} do print(contains(r.needs_pub, " " .. want .. " ")) end
-        \\for want in {"kept_write_deadline_ms:483", "kept_write_deadline_ms:1427"} do print(contains(r.uses_left, " " .. want .. " ")) end
-        \\for name in {"std", "Io"} do print(contains(r.needs_import, " " .. name .. ":"), contains(r.needs_from_from, " " .. name .. ":")) end
-    , "edit new.zig: 1 hunk, -1 +250 lines\nedit lh.zig: 1 hunk, -241 +1 lines\n22\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\tfalse\ntrue\tfalse\n");
+        \\every(replay("589837e", "linux_writes.zig"))
+    , "edit new.zig: 1 hunk, -1 +250 lines\nedit lh.zig: 1 hunk, -241 +1 lines\nmoved\t22\nneeds_pub: Hold:527 Sent:593 WriteWatch:703 WriteWatch.run:484 \nneeds_import: std:519 net:595 Io:596 \nneeds_from_from: sleepMs:683 \nuses_left: Sent:305 Hold:308 Hold:325 Sent:325 WriteWatch:483 write_deadline_for_test_ms:483 kept_write_deadline_ms:483 WriteWatch:484 writes_ended_by_deadline:1427 kept_write_deadline_ms:1427 write_deadline_for_test_ms:2294 write_deadline_for_test_ms:2295 turn_write_deadline_for_test_ms:2942 turn_write_deadline_for_test_ms:2943 \n");
 }
 
-test "zig_move replays 35317cf (linux_reads.zig): Progress.Ended, a member, needs pub; sleepMs is from's own" {
+test "zig_move replays 35317cf (linux_reads.zig): every row: the fifteen the hand made pub and Progress.Ended; std, net, Io and body_rule imports; sleepMs from's own; the uses left" {
     var t: T = undefined;
     try init(&t);
     defer t.deinit();
     try t.expectOutput(replay ++
-        \\local r = replay("35317cf", "linux_reads.zig")
-        \\print(r.moved, contains(r.needs_pub, " Progress.Ended:1716 "), contains(r.needs_from_from, " sleepMs:"))
-    , "edit new.zig: 1 hunk, -1 +334 lines\nedit lh.zig: 4 hunks, -330 +4 lines\n28\ttrue\ttrue\n");
+        \\every(replay("35317cf", "linux_reads.zig"))
+    , "edit new.zig: 1 hunk, -1 +334 lines\nedit lh.zig: 4 hunks, -330 +4 lines\nmoved\t28\nneeds_pub: Got:531 Progress:548 readWhole:568 Raced:623 verdict:771 watch:797 neverRead:819 slots:830 nextAsk:838 takeSlot:856 readDone:887 giveBackSlot:893 small_held:901 unchargeSmall:913 Whole:922 Progress.Ended:1716 \nneeds_import: std:549 net:551 Io:552 body_rule:568 \nneeds_from_from: sleepMs:803 \nuses_left: Progress:222 neverRead:239 takeSlot:242 nextAsk:242 readWhole:250 fail_after_read_for_test:251 readDone:254 Progress:340 Raced:343 Raced:344 watch:347 Progress:402 giveBackSlot:404 unchargeSmall:411 unchargeSmall:463 deadline_for_test_ms:1438 deadline_for_test_ms:1439 deadline_for_test_ms:1530 deadline_for_test_ms:1531 Progress:1560 Whole:1568 small_held:1620 small_held:1623 stall_for_test_ms:1627 stall_for_test_ms:1628 deadline_for_test_ms:1648 deadline_for_test_ms:1649 small_held:1661 slots:1668 slots:1680 slots:1691 nextAsk:1701 Progress:1706 takeSlot:1707 nextAsk:1707 giveBackSlot:1711 slot_wait_for_test_ms:1712 slot_wait_for_test_ms:1713 Progress:1714 takeSlot:1715 Progress:1716 stall_for_test_ms:1720 stall_for_test_ms:1721 slots:1726 small_budget_for_test:1730 small_budget_for_test:1731 small_held:1739 slot_wait_for_test_ms:1761 slot_wait_for_test_ms:1762 slots:1774 slots:1786 deadline_for_test_ms:1805 deadline_for_test_ms:1806 Got:1826 Progress:1827 Got:1829 verdict:1829 Got:1830 verdict:1830 Got:1831 verdict:1831 Got:1834 verdict:1834 Got:1835 verdict:1835 Got:1836 verdict:1836 Got:1837 verdict:1837 fail_after_read_for_test:1841 fail_after_read_for_test:1842 small_held:1847 slots:1853 stall_for_test_ms:1862 stall_for_test_ms:1863 tick_for_test_ms:1864 tick_for_test_ms:1865 slots:1889 small_held:1906 Progress:1947 small_held:1962 unchargeSmall:1964 Whole:1965 tick_for_test_ms:1979 tick_for_test_ms:1980 tick_for_test_ms:2480 tick_for_test_ms:2481 \n");
 }
 
 test "zig_move: an import named through another (`Bus = streams.Bus`) brings that one too, and its own in turn" {
@@ -352,7 +366,7 @@ fn eachSource(a: std.mem.Allocator, io: std.Io) ![]const struct { path: []const 
     return @ptrCast(out.items);
 }
 
-test "zig_move's mover over the repo's own src/**/*.zig: two declarations moved to an empty file and back give the file it began with" {
+test "zig_move's mover over the repo's own src/**/*.zig: two declarations moved to an empty file and back give the file it began with, at each boundary" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -372,29 +386,61 @@ test "zig_move's mover over the repo's own src/**/*.zig: two declarations moved 
             if (!(once(ds, ds[i - 1]) and once(ds, ds[i]) and once(ds, ds[i + 1]))) continue;
             break;
         } else continue;
-        const wants = [_]zm.Want{ .{ .name = ds[i].name, .kind = ds[i].kind }, .{ .name = ds[i + 1].name, .kind = ds[i + 1].kind } };
-        const there = switch (try zm.move(a, f.src, "", &wants, .doc, null)) {
-            .done => |d| d,
-            .refused => |why| {
-                std.debug.print("src/{s}: {s}\n", .{ f.path, why });
-                return error.TestUnexpectedResult;
-            },
-        };
-        const back = switch (try zm.move(a, try a.dupeZ(u8, there.to_now), try a.dupeZ(u8, there.from_now), &wants, .doc, ds[i - 1].name)) {
-            .done => |d| d,
-            .refused => |why| {
-                std.debug.print("src/{s}, back: {s}\n", .{ f.path, why });
-                return error.TestUnexpectedResult;
-            },
-        };
-        if (!std.mem.eql(u8, back.to_now, f.src)) {
-            std.debug.print("src/{s}: `{s}` and `{s}` there and back is not the file\n", .{ f.path, ds[i].name, ds[i + 1].name });
-            return error.TestUnexpectedResult;
-        }
-        try testing.expectEqualStrings("", back.from_now);
+        // The file as it is, and with each boundary the box found
+        // (metal-vmm QUEUE 235's review): a trailing comment on both
+        // moved declarations' last lines, an indented comment between
+        // them, and every line ended by CRLF.
+        for (std.enums.values(Boundary)) |b| try thereAndBack(a, f.path, try withBoundary(a, f.src, ds, i, b), i, b);
         tried += 1;
     }
     try testing.expect(tried > 30);
+}
+
+const Boundary = enum { blank, trailing, indented, crlf };
+
+/// `src` with boundary `b` at the declarations `ds[i]` and `ds[i + 1]`.
+fn withBoundary(a: std.mem.Allocator, src: [:0]const u8, ds: []const za.Decl, i: usize, b: Boundary) ![:0]const u8 {
+    const x = ds[i];
+    const y = ds[i + 1];
+    return switch (b) {
+        .blank => src,
+        .trailing => try std.mem.concatWithSentinel(a, u8, &.{ src[0..x.stop], " // x's", src[x.stop..y.stop], " // y's", src[y.stop..] }, 0),
+        .indented => try std.mem.concatWithSentinel(a, u8, &.{ src[0 .. x.stop + 2], "    // between\n", src[y.start..] }, 0),
+        .crlf => crlf: {
+            const n = std.mem.replacementSize(u8, src, "\n", "\r\n");
+            const out = try a.allocSentinel(u8, n, 0);
+            _ = std.mem.replace(u8, src, "\n", "\r\n", out);
+            break :crlf out;
+        },
+    };
+}
+
+/// `ds[i]` and `ds[i + 1]` of `src` (read again, for the boundary may have
+/// moved them) to an empty file, and back after `ds[i - 1]`: the file it
+/// began with.
+fn thereAndBack(a: std.mem.Allocator, path: []const u8, src: [:0]const u8, i: usize, b: Boundary) !void {
+    const ds = (try za.decls(a, src)).ok.decls;
+    const mode: zm.CommentMode = if (b == .indented) .doc_and_plain else .doc;
+    const wants = [_]zm.Want{ .{ .name = ds[i].name, .kind = ds[i].kind }, .{ .name = ds[i + 1].name, .kind = ds[i + 1].kind } };
+    const there = switch (try zm.move(a, src, "", &wants, mode, null)) {
+        .done => |d| d,
+        .refused => |why| {
+            std.debug.print("src/{s} ({t}): {s}\n", .{ path, b, why });
+            return error.TestUnexpectedResult;
+        },
+    };
+    const back = switch (try zm.move(a, try a.dupeZ(u8, there.to_now), try a.dupeZ(u8, there.from_now), &wants, mode, ds[i - 1].name)) {
+        .done => |d| d,
+        .refused => |why| {
+            std.debug.print("src/{s} ({t}), back: {s}\n", .{ path, b, why });
+            return error.TestUnexpectedResult;
+        },
+    };
+    if (!std.mem.eql(u8, back.to_now, src)) {
+        std.debug.print("src/{s} ({t}): `{s}` and `{s}` there and back is not the file\n", .{ path, b, ds[i].name, ds[i + 1].name });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqualStrings("", back.from_now);
 }
 
 fn blankApart(src: []const u8, x: za.Decl, y: za.Decl) bool {

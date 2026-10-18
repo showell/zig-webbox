@@ -75,6 +75,14 @@ fn refuse(a: std.mem.Allocator, comptime f: []const u8, args: anytype) error{Out
 /// line stays where it was between two others, and none at the end of the
 /// file) and put in `to` in `from`'s order, one blank line between each
 /// and before the first: at the end, or after the declaration `after`.
+/// How `file`'s lines end: CRLF when its first does, else LF; a file with
+/// no line yet ends them as `other` does.
+fn newline(file: []const u8, other: []const u8) []const u8 {
+    const in = if (std.mem.indexOfScalar(u8, file, '\n') != null) file else other;
+    const at = std.mem.indexOfScalar(u8, in, '\n') orelse return "\n";
+    return if (at > 0 and in[at - 1] == '\r') "\r\n" else "\n";
+}
+
 pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: []const Want, mode: CommentMode, after: ?[]const u8) error{OutOfMemory}!Outcome {
     const fd = switch (try za.decls(a, from)) {
         .ok => |ok| ok,
@@ -129,7 +137,7 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
     if (cuts.items.len > 0 and cuts.items[cuts.items.len - 1].e == from.len) {
         const c = &cuts.items[cuts.items.len - 1];
         while (c.s > 0 and ws(from[c.s - 1])) c.s -= 1;
-        if (c.s > 0) tail_repl = "\n";
+        if (c.s > 0) tail_repl = newline(from, from);
     }
     var out: std.ArrayList(u8) = .empty;
     var spans: std.ArrayList(Span) = .empty;
@@ -143,8 +151,10 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
     }
     try out.appendSlice(a, from[copied..]);
 
-    // **WHERE THEY GO.**
-    const block = try std.mem.join(a, "\n\n", texts.items);
+    // **WHERE THEY GO**, between lines ended as `to`'s are.
+    const nl = newline(to, from);
+    const gap = try std.mem.concat(a, u8, &.{ nl, nl });
+    const block = try std.mem.join(a, gap, texts.items);
     var to_now: []const u8 = undefined;
     var to_span: Span = undefined;
     if (after) |name| {
@@ -156,11 +166,11 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
         };
         if (n == 0) return refuse(a, "`after`: `{s}` is not a top-level declaration of `to`; nothing written", .{name});
         if (n > 1) return refuse(a, "`after`: `{s}` names {d} declarations of `to`; nothing written", .{ name, n });
-        to_now = try std.mem.concat(a, u8, &.{ to[0..at], "\n\n", block, to[at..] });
-        to_span = .{ .o0 = at, .o1 = at, .c0 = at, .c1 = at + 2 + block.len };
+        to_now = try std.mem.concat(a, u8, &.{ to[0..at], gap, block, to[at..] });
+        to_span = .{ .o0 = at, .o1 = at, .c0 = at, .c1 = at + gap.len + block.len };
     } else {
         const t = std.mem.trimEnd(u8, to, " \t\r\n");
-        to_now = if (t.len == 0) try std.mem.concat(a, u8, &.{ block, "\n" }) else try std.mem.concat(a, u8, &.{ t, "\n\n", block, "\n" });
+        to_now = if (t.len == 0) try std.mem.concat(a, u8, &.{ block, nl }) else try std.mem.concat(a, u8, &.{ t, gap, block, nl });
         to_span = .{ .o0 = t.len, .o1 = to.len, .c0 = t.len, .c1 = to_now.len };
     }
 
