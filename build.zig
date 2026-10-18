@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     // cheapest first. A sibling that is not there fails the step by name.
     // Not in `test`: it needs the siblings, and minutes. Run before a webbox
     // change is pushed to master.
-    const consumers = b.step("consumers", "This tree's own docs checked (by shale's doc check), then each consumer's own checks against this tree: shale's tests, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
+    const consumers = b.step("consumers", "This tree's own docs checked (by shale's doc check), then each consumer's own checks against this tree: shale's tests, metal-vmm's queue tool, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
     const here = b.build_root.path orelse ".";
     var prev: ?*std.Build.Step = null;
     for ([_]struct { repo: []const u8, cmd: []const u8 }{
@@ -69,6 +69,8 @@ pub fn build(b: *std.Build) void {
         // tools/doc_check.shale, metal-vmm QUEUE 237): the cheapest first.
         .{ .repo = "shale", .cmd = "zig build doc-check -- only=zig-webbox" },
         .{ .repo = "shale", .cmd = "zig build test" },
+        // metal-vmm's queue tool, by shale's `shale` on this tree.
+        .{ .repo = "metal-vmm", .cmd = "(cd ../shale && zig build) && ../shale/zig-out/bin/shale --budget output_bytes=8388608 .shale/queue_test.shale > /dev/null" },
         .{ .repo = "observatory", .cmd = "zig build test" },
         .{ .repo = "dog-park", .cmd = "zig build test" },
         .{ .repo = "zig-metal-unikernel", .cmd = "zig build gopher" },

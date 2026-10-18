@@ -72,8 +72,8 @@ this repo's (`git log -- src/script`).
 each root reaches it names, the modules each half may import, no page
 embedded, every named module in its test block, `Io` from `host_io`).
 **`consumers`** runs shale's doc check on this repo's docs, then, against
-this checkout and one at a time, shale's `zig build test`, the
-Observatory's and dog-park's `zig build test`, zig-metal-unikernel's `zig
+this checkout and one at a time, shale's `zig build test`, metal-vmm's
+queue tool (by shale's `shale`), the Observatory's and dog-park's `zig build test`, zig-metal-unikernel's `zig
 build gopher` and angry-gopher's `ops/check_zig`; it needs those checkouts
 beside this one, and fails naming one that is missing. Run it before a change
 here goes to master: each of them caught a webbox change that `test` passed.

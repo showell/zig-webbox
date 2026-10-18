@@ -121,7 +121,7 @@ pub fn Site(comptime App: type) type {
 
         /// **BETWEEN REQUESTS** (metal-vmm QUEUE 211): the application's
         /// work a host does between handlers, under the turn, one slice at a
-        /// time (a background script's, `script_route.sliceBackground`);
+        /// time (a background script's, Shale's `script_route.sliceBackground`);
         /// when it next needs a turn (`Wake`). A site with none is idle.
         pub fn between(io: Io, now: Now) Wake {
             return betweenOf(App, io, now);
