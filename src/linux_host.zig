@@ -324,7 +324,8 @@ pub fn Server(comptime S: type) type {
             defer conn.letGo();
             // A write shut at its deadline ends the connection, counted
             // (`linux_writes.writes_shut`), not logged as a connection's error.
-            while (serveOne(io, alloc, hub, stream, &server, &sr.interface, &sw, &said, &conn, &hold, &sent) catch |e| {
+            const w: Wire = .{ .stream = stream, .server = &server, .socket_r = &sr.interface, .sw = &sw, .said = &said, .conn = &conn, .hold = &hold, .sent = &sent };
+            while (serveOne(io, alloc, hub, w) catch |e| {
                 if (sent.shut) return;
                 return e;
             }) {}
@@ -332,9 +333,9 @@ pub fn Server(comptime S: type) type {
 
         /// One request on the connection, answered: whether the connection
         /// serves another.
-        fn serveOne(io: std.Io, alloc: std.mem.Allocator, hub: *bus.Hub, stream: net.Stream, server: *std.http.Server, socket_r: *std.Io.Reader, sw: *linux_durable.Writer, said: *HeadWatch, conn: *Connection, hold: *linux_writes.Hold, sent: *linux_writes.Sent) !bool {
+        fn serveOne(io: std.Io, alloc: std.mem.Allocator, hub: *bus.Hub, w: Wire) !bool {
             // The socket again, wherever the last request's body was read from.
-            server.reader.in = socket_r;
+            w.server.reader.in = w.socket_r;
             var arena = std.heap.ArenaAllocator.init(alloc);
             defer arena.deinit();
 
@@ -344,9 +345,9 @@ pub fn Server(comptime S: type) type {
             // The read races `linux_reads.watch`, as a body's does. **A HEAD AFTER THE
             // FIRST HAS THE IDLE TIMEOUT** (213): from the last answer, the
             // whole of the next head.
-            const first = conn.served == 0;
-            var head_progress: linux_reads.Progress = .{ .stream = stream, .io = io };
-            var head_read: HeadRead = .{ .server = server };
+            const first = w.conn.served == 0;
+            var head_progress: linux_reads.Progress = .{ .stream = w.stream, .io = io };
+            var head_read: HeadRead = .{ .server = w.server };
             {
                 var buffer: [2]linux_reads.Raced = undefined;
                 var race: Io.Select(linux_reads.Raced) = .init(io, &buffer);
@@ -361,14 +362,14 @@ pub fn Server(comptime S: type) type {
             if (head_progress.ended_by.load(.acquire) == .deadline) {
                 // An idle connection, not a byte of a next head: closed, as
                 // a kept-open connection is, with no answer.
-                if (!first and socket_r.bufferedLen() == 0) {
+                if (!first and w.socket_r.bufferedLen() == 0) {
                     _ = idle_closed.fetchAdd(1, .acq_rel);
                     return false;
                 }
                 edge.count(.head_too_slow);
-                sw.interface.writeAll("HTTP/1.1 408 Request Timeout\r\n" ++
+                w.sw.interface.writeAll("HTTP/1.1 408 Request Timeout\r\n" ++
                     "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
-                sw.interface.flush() catch {};
+                w.sw.interface.flush() catch {};
                 return false;
             }
             var req = head_read.got.? catch |e| switch (e) {
@@ -381,9 +382,9 @@ pub fn Server(comptime S: type) type {
                 // the count is the part we rely on.
                 error.HttpHeadersOversize => {
                     edge.count(.header_too_large);
-                    sw.interface.writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
+                    w.sw.interface.writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
                         "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
-                    sw.interface.flush() catch {};
+                    w.sw.interface.flush() catch {};
                     return false;
                 },
                 // **A HEAD THAT IS NOT HTTP IS A 400, COUNTED** (edge.zig's
@@ -391,9 +392,9 @@ pub fn Server(comptime S: type) type {
                 // and no counter. Best-effort, as the 431.
                 error.HttpHeadersInvalid => {
                     edge.count(.head_malformed);
-                    sw.interface.writeAll("HTTP/1.1 400 Bad Request\r\n" ++
+                    w.sw.interface.writeAll("HTTP/1.1 400 Bad Request\r\n" ++
                         "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
-                    sw.interface.flush() catch {};
+                    w.sw.interface.flush() catch {};
                     return false;
                 },
                 else => return e,
@@ -407,7 +408,7 @@ pub fn Server(comptime S: type) type {
             // **THE READ'S STATE LIVES AS LONG AS THE CONNECTION** (170's
             // cold review): a slot's reader is named by a pointer to it, and
             // the slot is given back only when the request is done.
-            var progress: linux_reads.Progress = .{ .stream = stream, .io = io };
+            var progress: linux_reads.Progress = .{ .stream = w.stream, .io = io };
             var slot: ?usize = null;
             defer if (slot) |i| linux_reads.giveBackSlot(io, i);
             var held_body: ?[]u8 = null;
@@ -433,12 +434,12 @@ pub fn Server(comptime S: type) type {
             // **WHETHER THIS ANSWER KEEPS THE CONNECTION** is decided before
             // the handler runs, so its head says it: not past the
             // connection's most requests, nor past the kept-open most.
-            conn.served += 1;
-            if (!req.head.keep_alive or conn.served >= requests_most_for_test orelse requests_most or !conn.keepOpen()) req.head.keep_alive = false;
-            said.begin();
+            w.conn.served += 1;
+            if (!req.head.keep_alive or w.conn.served >= requests_most_for_test orelse requests_most or !w.conn.keepOpen()) req.head.keep_alive = false;
+            w.said.begin();
             var b = bus.Bus.of(hub);
             var peer_buf: [64]u8 = undefined;
-            b.peer = peerText(&peer_buf, stream.socket.address);
+            b.peer = peerText(&peer_buf, w.stream.socket.address);
             b.at_unix_ms = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_ms));
             takeTurn(io);
             // **THE TURN NEVER WAITS ON THE NETWORK** (the box's cold review
@@ -447,21 +448,21 @@ pub fn Server(comptime S: type) type {
             // held in memory while the handler has the turn, and goes out
             // after, on this connection's own task. Past `linux_writes.held_most` it is
             // written in the turn, each write under the turn's deadline.
-            hold.begin();
-            sent.in_turn = true;
+            w.hold.begin();
+            w.sent.in_turn = true;
             // The body read before the turn, handed to the handler's read
             // as it is (170.5: an upload in memory once, not twice).
             http.held_body = held_body;
             const routed = S.route(&req, io, arena.allocator(), &b);
             http.held_body = null;
-            sent.in_turn = false;
+            w.sent.in_turn = false;
             turn.unlock(io);
             // The request may have started work between requests (a
             // background run): the thread that does it is woken to look.
             ringBetween(io);
             // Out now, outside the turn: until it has gone, this connection
             // reads no next head, so answers never pile up unread.
-            hold.release() catch {
+            w.hold.release() catch {
                 if (try routed) |k| bus.drop(hub, k);
                 return false;
             };
@@ -481,16 +482,16 @@ pub fn Server(comptime S: type) type {
             const kept = (try routed) orelse {
                 // Served again only when the answer said so, its request
                 // read to its end and the client asked for no close.
-                return req.head.keep_alive and said.whole and !said.close and server.reader.state == .ready;
+                return req.head.keep_alive and w.said.whole and !w.said.close and w.server.reader.state == .ready;
             };
             {
-                const held_stream = linux_streams.holdStream(io, stream);
+                const held_stream = linux_streams.holdStream(io, w.stream);
                 defer linux_streams.letGoStream(io, held_stream);
                 // **ITS WRITES WATCHED** (198.6): a write under way and
                 // unmoved past the deadline has its socket shut, so it fails
                 // and the stream ends. A stream with no watcher is not
                 // served without one.
-                var watched: linux_writes.WriteWatch = .{ .stream = stream, .ms = linux_writes.write_deadline_for_test_ms orelse linux_writes.kept_write_deadline_ms };
+                var watched: linux_writes.WriteWatch = .{ .stream = w.stream, .ms = linux_writes.write_deadline_for_test_ms orelse linux_writes.kept_write_deadline_ms };
                 const watcher = std.Thread.spawn(.{}, linux_writes.WriteWatch.run, .{ &watched, io }) catch {
                     std.debug.print("{s}: a kept stream's writes could not be watched; the stream ends\n", .{host_name});
                     bus.drop(hub, kept);
@@ -500,7 +501,7 @@ pub fn Server(comptime S: type) type {
                     watched.end(io);
                     watcher.join();
                 }
-                bus.serveKeptCounted(hub, kept, &sw.interface, &watched.writes);
+                bus.serveKeptCounted(hub, kept, &w.sw.interface, &watched.writes);
             }
             // A kept stream is the connection's last answer.
             return false;
@@ -567,6 +568,20 @@ const Connection = struct {
         if (self.holds_place) _ = kept_open.fetchSub(1, .acq_rel);
         self.holds_place = false;
     }
+};
+
+/// A connection's socket, its server, the writers each answer goes
+/// through and its account: made once by `handleConn`, lent to each
+/// request it serves.
+const Wire = struct {
+    stream: net.Stream,
+    server: *std.http.Server,
+    socket_r: *std.Io.Reader,
+    sw: *linux_durable.Writer,
+    said: *HeadWatch,
+    conn: *Connection,
+    hold: *linux_writes.Hold,
+    sent: *linux_writes.Sent,
 };
 
 /// **WHAT AN ANSWER'S HEAD SAYS OF ITS CONNECTION** (metal-vmm QUEUE 213):
