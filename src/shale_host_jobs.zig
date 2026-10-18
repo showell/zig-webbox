@@ -168,16 +168,21 @@ fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const limit = timeout_ms orelse return run.fail(pos, .argument, "`job_wait` needs `timeout_ms`, under the Bash call's own timeout", .{});
     if (file != null and contains == null) return run.fail(pos, .argument, "`job_wait`: `file` without `contains`: what to wait for in it", .{});
     if (contains) |c| if (c.len == 0) return run.fail(pos, .argument, "`job_wait`'s `contains` is \"\": every file holds it", .{});
-    const a = run.alloc;
     const began = monoMs();
+    // **WHAT THE LOG GAINED, NOT ALL OF IT**: each look reads from where
+    // the last stopped (less `#contains - 1`, so a line the last read cut
+    // is whole), a piece at a time into one buffer of the host's, and is
+    // charged for what it reads. Read whole every second, a log of a few
+    // MB spent the step budget in a minute, and its reads piled up in the
+    // run's arena until one failed, which was taken for "not there yet".
+    var scratch = std.heap.ArenaAllocator.init(h.alloc);
+    defer scratch.deinit();
+    var scan: Scan = .{};
     while (true) {
         const j = try find(h, run, pos, args[0], "job_wait");
         if (contains) |c| {
             const os = try hl.osPath(h, run, pos, file orelse j.log, false);
-            if (std.Io.Dir.cwd().readFileAlloc(run.io, os, a, .limited(64 * 1024 * 1024))) |text| {
-                try chargeRead(run, pos, text.len);
-                if (std.mem.indexOf(u8, text, c) != null) return result(run, pos, "found", null, null);
-            } else |_| {}
+            if (try scan.look(scratch.allocator(), run, pos, os, c)) return result(run, pos, "found", null, null);
         }
         if (j.record.done()) return result(run, pos, "exited", j.record.exit, j.record.signal);
         const gone = !jobs.alive(j.record);
@@ -192,6 +197,36 @@ fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         sleepMs(@min(if (gone) @as(u64, 10) else 1000, limit - spent));
     }
 }
+
+/// A log searched as it grows: what was read already is not read again.
+const Scan = struct {
+    /// How far the log was searched.
+    done: u64 = 0,
+    buf: []u8 = &.{},
+
+    const piece = 1024 * 1024;
+
+    /// Whether `c` is in what the log at `os` holds now. A log not there yet
+    /// is not a failure; any other is said, never taken for "not yet".
+    fn look(s: *Scan, sa: std.mem.Allocator, run: *Run, pos: ast.Pos, os: []const u8, c: []const u8) Error!bool {
+        const store = webbox.store;
+        const st = (store.statOrNull(run.io, sa, os) catch |e| return run.fail(pos, .store, "`job_wait`: {s} cannot be read: {s}", .{ os, @errorName(e) })) orelse return false;
+        // A log begun again (shorter than what was searched) is searched again.
+        if (st.size < s.done) s.done = 0;
+        if (s.buf.len == 0) s.buf = sa.alloc(u8, piece + c.len) catch return run.oom(pos);
+        var at = s.done -| (c.len - 1);
+        while (at < st.size) {
+            const n = store.readAt(run.io, sa, os, at, s.buf[0..@min(s.buf.len, st.size - at)]) catch |e|
+                return run.fail(pos, .store, "`job_wait`: {s} cannot be read: {s}", .{ os, @errorName(e) });
+            try chargeRead(run, pos, n);
+            if (std.mem.indexOf(u8, s.buf[0..n], c) != null) return true;
+            if (n < c.len or at + n >= st.size) break;
+            at += n - (c.len - 1);
+        }
+        s.done = st.size;
+        return false;
+    }
+};
 
 fn result(run: *Run, pos: ast.Pos, ended: []const u8, code: ?u8, signal: ?u32) Error!Value {
     const t = try run.newTable(pos);

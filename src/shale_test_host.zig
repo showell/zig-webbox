@@ -23,10 +23,13 @@ pub const T = struct {
     preludes: []const script.parse.Prelude = &.{},
     /// How an edit's diff prints (the CLI's is `summary`).
     diffs: script.interp.Diffs = .full,
+    /// The budgets each run is given (the defaults unless a test sets them).
+    budgets: script.Budgets = .{},
 
     pub fn init(t: *T) !void {
         t.preludes = &.{};
         t.diffs = .full;
+        t.budgets = .{};
         t.tmp = testing.tmpDir(.{});
         t.threaded = std.Io.Threaded.init(testing.allocator, .{});
         t.arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -50,14 +53,14 @@ pub const T = struct {
 
     pub fn run(t: *T, src: []const u8, mode: script.process.Mode) script.Result {
         const o = t.host.options();
-        return script.runWith(t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes, .diffs = t.diffs });
+        return script.runWith(t.threaded.io(), testing.allocator, t.root, src, t.budgets, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes, .diffs = t.diffs });
     }
 
     /// One run of the VM, outside the gate: for a script whose effects
     /// on the world cannot happen three times alike (a commit, a push).
     pub fn runOnce(t: *T, src: []const u8, mode: script.process.Mode) script.Result {
         const o = t.host.options();
-        return script.runOn(.vm, t.threaded.io(), testing.allocator, t.root, src, .{}, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes });
+        return script.runOn(.vm, t.threaded.io(), testing.allocator, t.root, src, t.budgets, 0, &out_buf, .{ .mode = mode, .host = o.host, .path_hook = o.path_hook, .preludes = t.preludes });
     }
 
     pub fn expectOutput(t: *T, src: []const u8, want: []const u8) !void {

@@ -75,7 +75,9 @@ has none of it):
   - `job_wait` gives `{ended = "exited" | "found" | "timeout" | "lost"[,
     code | signal]}`. `exited` always has a `code` or a `signal`; `lost` is
     a job gone with its reaper and no end written (the reaper was itself
-    ended).
+    ended). `contains` reads only what the file gained since the last
+    look, so a long wait on a large log costs the log once; a file that
+    cannot be read stops the run, named.
   - **Keep `timeout_ms` under the Bash call's own timeout** (120 s unless
     raised), because Shale cannot see it.
 - **Files:** `create(p, text)` refuses a file already there.
