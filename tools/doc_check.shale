@@ -2,7 +2,8 @@
 -- QUEUE 237; SHALE-WANTS.md `doc-check`): the first of the checks five
 -- cold agents ran over every doc by hand, for paths and names only. In
 -- each repo's tracked `*.md` but the history (FEEDBACK*, QUEUE-ARCHIVE*,
--- `docs/designs/`, and the essays in `notes/`), outside fenced blocks:
+-- `docs/designs/`, `docs/reviews/`, and the essays in `notes/`), outside
+-- fenced blocks:
 --
 --   a PATH is a backticked or linked word with a `/` or a known
 --   extension. It is looked for from the doc's repo (a link from the
@@ -29,14 +30,21 @@
 const REPOS = {"metal-vmm", "zig-webbox", "angry-gopher", "zig-metal-unikernel", "dog-park", "observatory", "zig-coverage-sdk", "essay-repl-server"}
 const EXTS = {".zig", ".shale", ".md", ".sh", ".py", ".json", ".zon", ".js", ".html", ".css", ".txt", ".conf", ".toml"}
 const SHOW = parse_int(arg("show", "20"))
+-- A host's data, never a repo's: a path under one of these is passed by.
+-- A bare data file's name (`polls.txt`) is still a finding.
+const DATA_ROOTS = {"data/", "auth/", "chat_root/", "claude-steve/"}
 
--- Whether a tracked path is history, not checked.
+-- Whether a tracked path is history, or a test's fixture (a doc under a
+-- `tests/` folder is data a test reads), not checked.
 function history(p)
   local base = p
   local slash = split(p, "/")
   base = slash[#slash]
   if starts_with(base, "FEEDBACK") or starts_with(base, "QUEUE-ARCHIVE") then return true end
-  return starts_with(p, "docs/designs/") or contains(p, "/docs/designs/") or starts_with(p, "notes/") or contains(p, "/notes/")
+  for h in {"docs/designs/", "docs/reviews/", "notes/", "tests/"} do
+    if starts_with(p, h) or contains(p, "/" .. h) then return true end
+  end
+  return false
 end
 
 function has_ext(w)
@@ -77,6 +85,10 @@ function as_path(w)
   if has_ext(w) and not contains(w, "/") and (starts_with(w, "_") or (starts_with(w, ".") and not contains(sub(w, 2), "."))) then return {skip = "an extension or a suffix"} end
   -- Zig code that reads as a file (`std.json`) and Zig's own library;
   if starts_with(w, "std.") or starts_with(w, "std/") or starts_with(w, "lib/std/") then return {skip = "Zig's std"} end
+  -- a host's data, under one of DATA_ROOTS;
+  for d in DATA_ROOTS do
+    if starts_with(w, d) and #w > #d then return {skip = "a host's data"} end
+  end
   -- a traversal shown as an example (`1/../2`, `data/../x`);
   local inner = w
   while starts_with(inner, "../") do inner = sub(inner, 4) end
@@ -220,16 +232,25 @@ function resolve(at, repo, docdir, c, kind, text, bases)
   end
   if #where == 1 then return {found = found} end
   if #where > 1 then return {ambiguous = join(where, ", ")} end
-  -- Not here; what the repo's `.gitignore` covers is asked after, all at
-  -- once (`ignored`).
+  -- An untracked `*.conf` is a host's config (`zig-metal-unikernel.conf`).
+  if ends_with(p, ".conf") then return {skip = "a host's config"} end
+  -- Not here; what the repo's `.gitignore` covers, or a sibling's the line
+  -- names, is asked after, all at once (`ignored`).
   local asks = {p}
   local from_doc = joined(docdir, p)
   if from_doc ~= nil and from_doc ~= p then push(asks, from_doc) end
-  return {gone = true, asks = asks}
+  local of = {}
+  of[repo] = asks
+  for r in named(text) do
+    if r ~= repo then of[r] = {p} end
+  end
+  return {gone = true, asks = of}
 end
 
 -- Which of `paths` the repo's `.gitignore` covers: a build's output (or a
 -- host's file), there once something is built. One `git` for them all.
+-- `asks` of a pending finding: `{repo = paths}`, its own repo's and the
+-- siblings' its line names.
 function ignored(at, repo, paths)
   local set = {}
   if #paths == 0 then return set end
@@ -327,7 +348,9 @@ function check_doc(at, repo, doc, r)
             r.paths = r.paths + 1
             local got = resolve(at, repo, docdir, c, span.kind, text, r.bases)
             if c.line > 0 then r.lines = r.lines + 1 end
-            if has_key(got, "gone") then
+            if has_key(got, "skip") then
+              r.skipped[got.skip] = get(r.skipped, got.skip, 0) + 1
+            elseif has_key(got, "gone") then
               push(r.pending, {said = where .. ": `" .. c.path .. "`", asks = got.asks})
             elseif has_key(got, "ambiguous") then
               push(r.ambiguous, where .. ": `" .. c.path .. "` is in " .. got.ambiguous .. ": say which")
@@ -407,19 +430,33 @@ function check_all(at, repos)
           check_doc(at, repo, p, r)
         end
       end
-      local asks = {}
-      for g in r.pending do
-        for a in g.asks do push(asks, a) end
-      end
-      local ig = ignored(at, repo, unique(asks))
-      for g in r.pending do
-        local hit = false
-        for a in g.asks do
-          if has_key(ig, a) then hit = true end
-        end
-        if hit then r.ignored = r.ignored + 1 else push(r.gone, g.said) end
-      end
       all[repo] = r
+    end
+  end
+  -- Every repo's `.gitignore` asked once, for every doc's paths it is asked about.
+  local asks = {}
+  for repo in keys(all) do
+    for g in all[repo].pending do
+      for t in keys(g.asks) do
+        if not has_key(asks, t) then asks[t] = {} end
+        for a in g.asks[t] do push(asks[t], a) end
+      end
+    end
+  end
+  local ig = {}
+  for t in keys(asks) do
+    if is_dir(at .. t) then ig[t] = ignored(at, t, unique(asks[t])) else ig[t] = {} end
+  end
+  for repo in keys(all) do
+    local r = all[repo]
+    for g in r.pending do
+      local hit = false
+      for t in keys(g.asks) do
+        for a in g.asks[t] do
+          if has_key(ig[t], a) then hit = true end
+        end
+      end
+      if hit then r.ignored = r.ignored + 1 else push(r.gone, g.said) end
     end
   end
   return all
@@ -436,7 +473,7 @@ function report(all, repos)
       local r = all[repo]
       total = total + findings(r)
       print(repo .. ": " .. r.docs .. " docs, " .. r.paths .. " paths (" .. r.lines .. " with `:N`), " .. r.names .. " names (" .. r.by_word .. " by a word match, " .. r.unchecked .. " in a file two have); gone " .. #r.gone .. ", ambiguous " .. #r.ambiguous .. ", names gone " .. #r.gone_names .. "; `:N` beside a name " .. r.line_named .. ", its line without the name " .. r.line_wrong)
-      local passed = {"  passed by: " .. r.ignored .. " git ignores (a build's output)"}
+      local passed = {"  passed by: " .. r.ignored .. " git ignores (a build's output, here or in a sibling the line names)"}
       local ks = keys(r.skipped)
       sort(ks)
       for k in ks do push(passed, r.skipped[k] .. " " .. k) end
@@ -493,10 +530,15 @@ function self_test()
       "Not paths: `zig build test`, `a/b`, `src/**/*.zig`, `~/.config/x`, `https://x.y/z.md`, `repos:dog-park`.\n" ..
       "Whose: `src/both.zig`, on a line naming no repo.\n" ..
       "Passed by: `.zig`, `_test.zig`, `std.json`, `1/../2`, `data/`, `./auth`; built: `zig-out/bin/x.elf`; a sibling itself: `../zig-webbox`, `angry-gopher/`.\n" ..
-      "```\nsrc/in_a_fence.zig\n```\n",
+      "```\nsrc/in_a_fence.zig\n```\n" ..
+      "A host's: `data/chat/x.md`, `claude-steve/random1.md`, `zig-metal-unikernel.conf`; but a data file alone, `random1.md`.\n" ..
+      "zig-webbox builds `probe/out.elf`.\n" ..
+      "Built by whom: `probe/out.elf`.\n",
     ["docs/here.md"] = "Back to [the readme](../README.md); `../zig-webbox/src/w.zig` by path.\n",
     ["FEEDBACK.md"] = "`src/history_only.zig` is gone and that is fine.\n",
     ["notes/essay.md"] = "`src/essay_only.zig` too.\n",
+    ["docs/reviews/old.md"] = "`src/review_only.zig`, reviewed once.\n",
+    ["tests/fixture/QUEUE.md"] = "`src/fixture_only.zig`, a test's data.\n",
     ["src/a.zig"] = "const std = @import(\"std\");\n\npub const alpha = 1;\n\nconst Inner = struct {\n    depth: u8,\n};\n\nfn beta() void {}\n\n// ghost bogus\n\n\n",
     ["src/bad.zig"] = "const = ;\n",
     ["src/both.zig"] = "",
@@ -506,26 +548,29 @@ function self_test()
     ["src/w.zig"] = "pub const w = 1;\n",
     ["src/both.zig"] = "",
     ["docs/x.md"] = "Our `src/both.zig`, and metal-vmm's `src/a.zig`.\n",
+    [".gitignore"] = "probe/*.elf\n",
   })
   fixture_repo("angry-gopher", {["src/both.zig"] = ""})
   local all = check_all(FIX .. "/", {"metal-vmm", "zig-webbox", "angry-gopher"})
   local m = all["metal-vmm"]
   local gone = join(m.gone, "\n")
-  expect(#m.gone == 1 and contains(gone, "README.md:2: `src/gone.zig`"), "a path that is gone is a finding (and only that one)")
+  expect(#m.gone == 3 and contains(gone, "README.md:2: `src/gone.zig`"), "a path that is gone is a finding")
+  expect(contains(gone, "README.md:11: `random1.md`"), "a data file's name with no data root is a finding")
+  expect(contains(gone, "README.md:13: `probe/out.elf`"), "a path a sibling ignores, on a line naming no sibling, is a finding")
   expect(not contains(gone, "w.zig"), "a sibling-named path is found there, by the line's naming and by `../`")
   expect(#m.ambiguous == 0, "a path in this repo is this repo's, though siblings have it")
   local z = all["zig-webbox"]
   expect(#z.gone == 0 and #z.ambiguous == 0, "a sibling's path the line names is found")
   expect(not contains(gone, "here.md") and not contains(gone, "README.md`"), "a link to a doc resolves from the doc's folder")
-  expect(not contains(gone, "history_only") and not contains(gone, "essay_only"), "a history file and an essay are passed by")
+  expect(not contains(gone, "history_only") and not contains(gone, "essay_only") and not contains(gone, "review_only"), "a history file, a review and an essay are passed by")
   expect(not contains(gone, "in_a_fence"), "a fenced block is passed by")
   local gn = join(m.gone_names, "\n")
   expect(#m.gone_names == 4 and contains(gn, "`nothing_here` is not in src/a.zig"), "a name that is gone is a finding")
   expect(contains(gn, "`Inner.bogus` is not in") and contains(gn, "`ghost` is not in"), "a made-up member of a real declaration, and a name only a comment says, are gone")
   expect(contains(gn, "src/bad.zig does not parse as Zig"), "a file that does not parse is a finding, not a stop")
   expect(m.names == 9 and m.by_word == 2, "names by the parser; a member (`Inner.depth`) and a nested one alone by declaration or field")
-  expect(m.ignored == 1, "a path the repo's .gitignore covers is a build's, passed by")
-  expect(get(m.skipped, "an extension or a suffix", 0) == 2 and get(m.skipped, "Zig's std", 0) == 1 and get(m.skipped, "a traversal example", 0) == 1 and get(m.skipped, "a folder named alone", 0) == 2, "each rule passes its own by, and counts it")
+  expect(m.ignored == 2, "a path the repo's .gitignore covers, or a named sibling's, is a build's, passed by")
+  expect(get(m.skipped, "an extension or a suffix", 0) == 2 and get(m.skipped, "Zig's std", 0) == 1 and get(m.skipped, "a traversal example", 0) == 1 and get(m.skipped, "a folder named alone", 0) == 2 and get(m.skipped, "a host's data", 0) == 2 and get(m.skipped, "a host's config", 0) == 1, "each rule passes its own by, and counts it")
   expect(m.lines == 2 and m.line_named == 2 and m.line_wrong == 1, "`file:N` counted, and its line checked beside a name")
   remove(FIX .. "/metal-vmm/src/both.zig")
   local again = check_all(FIX .. "/", {"metal-vmm", "zig-webbox", "angry-gopher"})

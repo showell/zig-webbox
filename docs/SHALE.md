@@ -168,7 +168,7 @@ remove("chat/1_2/sessions/hello.md")
 ```
 
 Three things a first script needs to know, each said again below:
-- **Paths are from the data root,** `""` is the root itself, and no path
+- **Paths are from the data root,** `""` (or `"."`) is the root itself, and no path
   leaves it ("The store").
 - **A function sees only its own parameters and locals, and the `const`s
   above it,** never the script's `local`s: give it what it needs as
@@ -959,7 +959,7 @@ print(line_at("chat/channels/general/sessions/plans.md", at))
 - A script's path is joined to the root.
 - Every part must be a name FAT holds, so `.`, `..`, empty parts and a
   leading `/` are refused before the store is asked.
-- `""` is the root, for `ls`, `stat`, `exists` and `walk` only. Every
+- `""` is the root (and so is `"."`), for `ls`, `stat`, `exists` and `walk` only. Every
   change needs a path of at least one part.
 - The store's own limits (a name's length, a path's, its depth) still
   apply on top.

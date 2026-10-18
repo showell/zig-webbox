@@ -37,13 +37,15 @@ pub const specs = [_]bi.Spec{
 
 /// **A SCRIPT'S PATH, CONFINED TO THE ROOT** (docs/SHALE.md, "The store"): every part
 /// a name FAT holds (so `.`, `..` and empty parts are refused, and a
-/// leading `/`), joined to the root. `""` is the root, for the calls that
-/// only look (`allow_root`); every change needs at least one part.
+/// leading `/`), joined to the root. `""` is the root, and so is `"."`, for
+/// the calls that only look (`allow_root`); every change needs at least
+/// one part.
 pub const Path = struct { full: []const u8, rel: []const u8 };
 
 pub fn pathArg(run: *Run, pos: ast.Pos, b: B, v: Value, allow_root: bool) Error!Path {
-    const rel = try bi.stringArg(run, pos, b, v, "its path");
-    try run.charge(pos, rel.len);
+    const given = try bi.stringArg(run, pos, b, v, "its path");
+    const rel = if (std.mem.eql(u8, given, ".")) "" else given;
+    try run.charge(pos, given.len);
     // **THE HOST'S HOOK, WHEN IT HAS ONE** (metal-vmm QUEUE 233): a path it
     // resolves (a mount's, on Linux) is its; any other, the root's rules.
     if (run.path_hook) |h| if (try h.resolve(h.ctx, run, pos, rel)) |full| return .{ .full = full, .rel = rel };

@@ -978,3 +978,13 @@ test "builtins: a diff's hunk ends at the line an edit's text ends, when old and
     defer j.deinit();
     try testing.expectEqualStrings("--- a/n.txt\n+++ b/n.txt\n@@ -3,2 +3,1 @@\n-line 03\n-line 04\n+xline 04\n", j.output);
 }
+
+test "builtins: \".\" is the root, as \"\" is, wherever a path is taken; a `.` inside a path is still refused" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.expectOutput("print(join(ls(\".\"), \",\") == join(ls(\"\"), \",\"))", "true\n");
+    var r = script.runWith(f.threaded.io(), testing.allocator, f.root, "ls(\"./x\")", .{}, 0, &out_buf, .{});
+    defer r.deinit();
+    try testing.expect(r.stop != null);
+}
