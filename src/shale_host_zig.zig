@@ -113,7 +113,15 @@ fn word(c: u8) bool {
 /// charged (the file `dupeZ`'d for the tokenizer, a step a token), and
 /// written through core's `rewrite` when it renames anything.
 /// `{renamed, left_in_comments}`.
+/// **IT CHANGES THE STORE**, as the core's change builtins do: a background
+/// run refuses it before it reads a thing, and the gate knows it tried.
+fn changes(run: *Run, pos: ast.Pos, name: []const u8) Error!void {
+    run.tried_change = true;
+    if (run.read_only) return run.fail(pos, .argument, "`{s}` changes the store, and a background run only reads: send it as an `atomic` run", .{name});
+}
+
 pub fn rename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    try changes(run, pos, "zig_rename");
     if (args.len != 3) return run.fail(pos, .argument, "`zig_rename` takes a path, `{{from, to}}` and options, given {d}", .{args.len});
     const hub = script.builtins_store;
     const rd = script.builtins_read;
@@ -239,6 +247,7 @@ fn nameLines(run: *Run, pos: ast.Pos, items: anytype) Error!Value {
 /// the copies, a step a token and a node of both files.
 pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const zm = @import("shale_zig_move.zig");
+    try changes(run, pos, "zig_move");
     if (args.len != 3) return run.fail(pos, .argument, "`zig_move` takes `from`, `to` and `{{names, opts}}`, given {d}", .{args.len});
     const hub = script.builtins_store;
     const a = run.alloc;
@@ -309,8 +318,21 @@ pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
             return out;
         }
     }.of;
-    try script.builtins_change.rewrite(run, pos, q, to_src, done.to_now, try spans(run, pos, done.to_spans));
-    try script.builtins_change.rewrite(run, pos, p, from_src, done.from_now, try spans(run, pos, done.from_spans));
+    // **BOTH WRITES OR NEITHER, AS FAR AS THE BUDGETS SAY**: room for the
+    // two changes first, so a budget never stops a move between them.
+    if (run.changes + 2 > run.budgets.changes) return run.budgetStop(pos, .changes);
+    if (done.to_now.len + done.from_now.len > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
+    const to_spans = try spans(run, pos, done.to_spans);
+    const from_spans = try spans(run, pos, done.from_spans);
+    try script.builtins_change.rewrite(run, pos, q, to_src, done.to_now, to_spans);
+    // What can still stop it there (the store, the output's budget) is said
+    // with what was written: `to` holds the copies, `from` still has them.
+    script.builtins_change.rewrite(run, pos, p, from_src, done.from_now, from_spans) catch |e| {
+        if (e == error.Stop) if (run.stop) |*s| {
+            s.message = std.fmt.allocPrint(a, "{s}; `zig_move` wrote {s} first, so it holds the moved declarations, which {s} still has: take {s} back (`git checkout --`) before moving again", .{ s.message, q.rel, p.rel, q.rel }) catch s.message;
+        };
+        return e;
+    };
     const t = try run.newTable(pos);
     t.kind = .map;
     try put(run, pos, t, "moved", .{ .int = @intCast(done.moved) });

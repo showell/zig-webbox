@@ -351,6 +351,11 @@ pub fn mayChange(run: *Run, pos: ast.Pos, p: Path) Error!void {
 
 /// A change to `p` with `data`, logged under `b`'s name.
 fn changeAt(run: *Run, pos: ast.Pos, b: B, c: Change, p: Path, data: []const u8) Error!Value {
+    // **NO CHANGE IN A BACKGROUND RUN, BY ANY DOOR**: `call` refuses the
+    // change builtins first, by name; this holds a host's writes
+    // (`rewrite`) to the same rule.
+    run.tried_change = true;
+    if (run.read_only) return run.fail(pos, .argument, "`{s}` changes the store, and a background run only reads: send it as an `atomic` run", .{@tagName(b)});
     try mayChange(run, pos, p);
     if (run.changes >= run.budgets.changes) return run.budgetStop(pos, .changes);
     if (data.len > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
