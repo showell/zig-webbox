@@ -181,3 +181,31 @@ fn onlyComments(a: std.mem.Allocator, path: []const u8, gap: []const u8) !void {
         return error.TestUnexpectedResult;
     }
 }
+
+test "zig_decls: each declaration's `uses`, the top-level names it uses (the seam finder's graph): not its own, not a field's or a member's, not a comment's or a string's" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("g.zig",
+        \\const std = @import("std");
+        \\const a = 1;
+        \\// b uses a and c; "a" in a string and this comment are not uses
+        \\const b = a + c() + std.math.maxInt(u8);
+        \\fn c() u8 {
+        \\    return a;
+        \\}
+        \\const S = struct {
+        \\    a: u8,
+        \\    fn f(s: S) u8 {
+        \\        _ = "c";
+        \\        return s.a + b;
+        \\    }
+        \\};
+        \\test "t" {
+        \\    _ = S;
+        \\}
+        \\
+    );
+    try t.expectOutput("for d in zig_decls(\"g.zig\") do print(d.name, join(d.uses, \",\")) end",
+        "std\t\na\t\nb\ta,c,std\nc\ta\nS\tb\nt\tS\n");
+}

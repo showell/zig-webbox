@@ -212,9 +212,45 @@ pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const 
         .parse_error => |e| return run.fail(pos, .argument, "`zig_decls`: {s} does not parse as Zig: line {d} ({s})", .{ p.rel, e.line, e.tag }),
     };
     try run.charge(pos, got.tokens + got.nodes);
+    // **WHAT EACH ONE USES** (the seam finder's graph): the top-level names
+    // a declaration's span uses, by the one reading of identifiers (so never
+    // a field's, a member's after `.`, a comment's or a string's), not its
+    // own, distinct and sorted. A test's name and a root field are not names
+    // a declaration can use.
+    const toks = switch (za.tokens(sa, src) catch return run.oom(pos)) {
+        .ok => |ok| ok,
+        .invalid => |n| return run.fail(pos, .argument, "`zig_decls`: {s} does not tokenize as Zig at line {d}", .{ p.rel, n }),
+    };
+    const ids = za.identifiers(sa, toks) catch return run.oom(pos);
+    try run.charge(pos, ids.len);
+    var top: std.StringHashMapUnmanaged(void) = .empty;
+    for (got.decls) |d| if (d.name_form == .identifier and d.kind != .@"test" and d.kind != .field) {
+        top.put(sa, d.name, {}) catch return run.oom(pos);
+    };
     const list = try run.newTable(pos);
     list.kind = .list;
+    var k: usize = 0;
     for (got.decls) |d| {
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var names: std.ArrayList([]const u8) = .empty;
+        while (k < ids.len and ids[k].start < d.start) k += 1;
+        var j = k;
+        while (j < ids.len and ids[j].start < d.stop) : (j += 1) {
+            const id = ids[j];
+            if (id.role != .use) continue;
+            const name = src[id.start..id.end];
+            if (std.mem.eql(u8, name, d.name) or !top.contains(name) or seen.contains(name)) continue;
+            seen.put(sa, name, {}) catch return run.oom(pos);
+            names.append(sa, name) catch return run.oom(pos);
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.lt);
+        const uses = try run.newTable(pos);
+        uses.kind = .list;
+        for (names.items) |n| uses.list.append(a, .{ .string = try keep(run, pos, n) }) catch return run.oom(pos);
         const m = try run.newTable(pos);
         m.kind = .map;
         try put(run, pos, m, "kind", .{ .string = @tagName(d.kind) });
@@ -233,6 +269,7 @@ pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const 
             try put(run, pos, cm, "last", .{ .int = @intCast(c.last) });
             try put(run, pos, m, "comment_above", .{ .table = cm });
         }
+        try put(run, pos, m, "uses", .{ .table = uses });
         list.list.append(a, .{ .table = m }) catch return run.oom(pos);
     }
     return .{ .table = list };

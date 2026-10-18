@@ -87,10 +87,12 @@ has none of it):
   cookbook's "A symbol renamed across a tree").
   `zig_decls(p)` lists a Zig file's top-level declarations, from Zig's
   own parser, in file order: `{kind, name, name_form, visibility, linkage,
-  first, last, start, stop[, comment_above]}`. A span runs from its doc
-  comment to the `}`, `;` or field's `,` that ends it (`read(p, start,
+  first, last, start, stop, uses[, comment_above]}`. A span runs from its
+  doc comment to the `}`, `;` or field's `,` that ends it (`read(p, start,
   stop - start)` is it); `comment_above` is the plain `//` lines directly
-  over it. A file that does not parse stops, naming the line. **The
+  over it; `uses` is the top-level names its span uses (not its own, not a
+  field's or a comment's), sorted: the file's reference graph, for finding
+  where it divides. A file that does not parse stops, naming the line. **The
   analysis is Zig's parser and its tokens, not types**: what it cannot
   see (a method reached through a value), the compiler judges after
   (`same_tests.shale`).
