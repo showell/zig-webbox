@@ -227,7 +227,7 @@ pub fn Server(comptime S: type) type {
         /// rule (body.zig), or the refusal to answer instead. An upload is
         /// read once its uploader is known (a stranger's never) and holds a
         /// slot; a small one is charged to the small budget as it arrives.
-        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, owned: *?[]u8, req: *std.http.Server.Request, progress: *linux_reads.Progress, slot: *?usize, held: *?[]u8, charged: *u64) !?Refusal {
+        fn bodyBeforeTurn(io: Io, arena: std.mem.Allocator, gpa: std.mem.Allocator, req: *std.http.Server.Request, body: *Body) !?Refusal {
             const cap = S.bodyLimit(try http.target(req, arena));
             const planned = body_rule.plan(&req.head, cap);
             if (planned != .refused) body_rule.meetExpectation(&req.head);
@@ -247,7 +247,7 @@ pub fn Server(comptime S: type) type {
                     try linux_reads.neverRead(req, arena);
                     return null;
                 };
-                slot.* = switch (linux_reads.takeSlot(io, body_rule.keyOf(who), progress, linux_reads.nextAsk(io))) {
+                body.slot = switch (linux_reads.takeSlot(io, body_rule.keyOf(who), &body.progress, linux_reads.nextAsk(io))) {
                     .slot => |i| i,
                     .busy => return .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" },
                     .replaced => return .{ .kind = .upload_replaced, .msg = "a newer upload took this one's place\n" },
@@ -255,20 +255,20 @@ pub fn Server(comptime S: type) type {
             }
             const began = Io.Clock.now(.awake, io);
             const length = req.head.content_length orelse 0;
-            const got = try linux_reads.readWhole(io, arena, gpa, owned, req, read, upload, progress, charged);
+            const got = try linux_reads.readWhole(io, arena, gpa, &body.mem, req, read, upload, &body.progress, &body.charged);
             if (linux_reads.fail_after_read_for_test) return error.TestFailedAfterRead;
             // Read: nothing left to take over (a newer upload now waits for
             // this one's slot, which comes back when its request is done).
-            if (slot.*) |i| linux_reads.readDone(io, i);
+            if (body.slot) |i| linux_reads.readDone(io, i);
             if (upload) {
                 // **THE LOG SAYS AN UPLOAD'S SIZE AND ITS TIME** (169),
                 // whole or not, so a slow link is read, not inferred.
                 const ms = @divTrunc(Io.Clock.now(.awake, io).nanoseconds - began.nanoseconds, std.time.ns_per_ms);
-                if (!@import("builtin").is_test) std.debug.print("{s}: an upload of {d} bytes: {t}, {d} received, after {d} ms\n", .{ host_name, length, got, progress.received.load(.acquire), ms });
+                if (!@import("builtin").is_test) std.debug.print("{s}: an upload of {d} bytes: {t}, {d} received, after {d} ms\n", .{ host_name, length, got, body.progress.received.load(.acquire), ms });
             }
             return switch (got) {
                 .whole => |b| blk: {
-                    held.* = b;
+                    body.held = b;
                     break :blk null;
                 },
                 .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
@@ -408,19 +408,11 @@ pub fn Server(comptime S: type) type {
             // **THE READ'S STATE LIVES AS LONG AS THE CONNECTION** (170's
             // cold review): a slot's reader is named by a pointer to it, and
             // the slot is given back only when the request is done.
-            var progress: linux_reads.Progress = .{ .stream = w.stream, .io = io };
-            var slot: ?usize = null;
-            defer if (slot) |i| linux_reads.giveBackSlot(io, i);
-            var held_body: ?[]u8 = null;
-            // The body's memory (177.2), freed when the connection is done,
-            // as the arena is: after the route and any stream it kept.
-            var body_mem: ?[]u8 = null;
-            defer if (body_mem) |m| alloc.free(m);
-            var charged: u64 = 0;
-            defer linux_reads.unchargeSmall(io, charged);
+            var body: Body = .{ .progress = .{ .stream = w.stream, .io = io } };
+            defer body.deinit(io, alloc);
             // **AN ERROR BEFORE THE TURN IS ANSWERED** (170.6): a 500, as
             // one in the turn is, never a close with no answer.
-            const refusal = bodyBeforeTurn(io, arena.allocator(), alloc, &body_mem, &req, &progress, &slot, &held_body, &charged) catch |e| {
+            const refusal = bodyBeforeTurn(io, arena.allocator(), alloc, &req, &body) catch |e| {
                 if (!@import("builtin").is_test) std.debug.print("{s}: before the turn: {s}\n", .{ host_name, @errorName(e) });
                 req.head.keep_alive = false;
                 req.head.expect = null;
@@ -452,7 +444,7 @@ pub fn Server(comptime S: type) type {
             w.sent.in_turn = true;
             // The body read before the turn, handed to the handler's read
             // as it is (170.5: an upload in memory once, not twice).
-            http.held_body = held_body;
+            http.held_body = body.held;
             const routed = S.route(&req, io, arena.allocator(), &b);
             http.held_body = null;
             w.sent.in_turn = false;
@@ -469,8 +461,8 @@ pub fn Server(comptime S: type) type {
             // The body's charge back now, before a kept stream holds the
             // connection (metal-vmm QUEUE 176.3: ~64 open streams of 1 MiB
             // posts pinned the whole budget).
-            linux_reads.unchargeSmall(io, charged);
-            charged = 0;
+            linux_reads.unchargeSmall(io, body.charged);
+            body.charged = 0;
             // A stream the handler kept is route's answer, served here, on
             // this connection's own task, until its client goes away; on an
             // error route has dropped it (metal-vmm QUEUE 157(a)).
@@ -567,6 +559,23 @@ const Connection = struct {
     fn letGo(self: *Connection) void {
         if (self.holds_place) _ = kept_open.fetchSub(1, .acq_rel);
         self.holds_place = false;
+    }
+};
+
+/// **A REQUEST'S BODY, READ BEFORE THE TURN**: the upload slot it holds, the body held for the
+/// handler, the body's memory (177.2) and its charge to the small budget.
+/// `deinit` gives all of it back, after the route and any stream it kept.
+const Body = struct {
+    progress: linux_reads.Progress,
+    slot: ?usize = null,
+    held: ?[]u8 = null,
+    mem: ?[]u8 = null,
+    charged: u64 = 0,
+
+    fn deinit(b: *Body, io: Io, gpa: std.mem.Allocator) void {
+        linux_reads.unchargeSmall(io, b.charged);
+        if (b.mem) |m| gpa.free(m);
+        if (b.slot) |i| linux_reads.giveBackSlot(io, i);
     }
 };
 
