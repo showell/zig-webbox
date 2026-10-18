@@ -122,12 +122,26 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
     const Cut = struct { s: usize, e: usize };
     var cuts: std.ArrayList(Cut) = .empty;
     var texts: std.ArrayList([]const u8) = .empty;
+    // **WHAT EACH MOVED ONE SAT NEXT TO**: one on the line under the last
+    // moved one (no blank line, nothing between) stays under it in `to`,
+    // as a group of constants under one doc comment does.
+    const Join = enum { under, apart };
+    var joins: std.ArrayList(Join) = .empty;
+    var last_picked: ?usize = null;
+    var last_stop: usize = 0;
     for (fd.decls, 0..) |d, i| if (picked[i]) {
         var s = d.start;
         if (mode == .doc_and_plain) if (d.comment_above) |c| {
             s = starts[c.first - 1];
         };
+        if (last_picked) |lp| {
+            const between = from[last_stop..s];
+            const under = lp + 1 == i and std.mem.count(u8, between, "\n") == 1 and std.mem.trim(u8, between, " \t\r\n").len == 0;
+            try joins.append(a, if (under) .under else .apart);
+        }
+        last_picked = i;
         const stop = endWithComment(from, d.stop);
+        last_stop = stop;
         var e = stop;
         while (e < from.len and ws(from[e])) e += 1;
         try texts.append(a, from[s..stop]);
@@ -162,7 +176,12 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
     const nl = newline(to, from);
     const gap = try std.mem.concat(a, u8, &.{ nl, nl });
     for (texts.items) |*t| t.* = try endedBy(a, t.*, nl);
-    const block = try std.mem.join(a, gap, texts.items);
+    var joined: std.ArrayList(u8) = .empty;
+    for (texts.items, 0..) |t, k| {
+        if (k > 0) try joined.appendSlice(a, if (joins.items[k - 1] == .under) nl else gap);
+        try joined.appendSlice(a, t);
+    }
+    const block = joined.items;
     var to_now: []const u8 = undefined;
     var to_span: Span = undefined;
     if (after) |name| {

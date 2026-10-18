@@ -155,13 +155,25 @@ test "zig_move: moved lines end as `to`'s do, a CRLF block into an LF file and b
     try testing.expectEqualStrings(crlf, back.to_now);
 }
 
+test "zig_move: declarations on lines next to each other stay next to each other; a blank line between stays one (metal-vmm main.zig's addresses, under one doc)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try moveFor(a, "/// The addresses.\nconst a = 1;\nconst b = 2;\n\nconst c = 3;\nconst keep = 4;\n", "", &.{ "a", "b", "c" }, .doc, null);
+    try testing.expectEqualStrings("/// The addresses.\nconst a = 1;\nconst b = 2;\n\nconst c = 3;\n", m.to_now);
+    // Not next to each other in `from` (one between, left): apart in `to`.
+    const n = try moveFor(a, "const a = 1;\nconst x = 2;\nconst b = 3;\n", "", &.{ "a", "b" }, .doc, null);
+    try testing.expectEqualStrings("const a = 1;\n\nconst b = 3;\n", n.to_now);
+}
+
 test "zig_move: an indented comment between two moved declarations joins their cuts (it sliced backwards)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const m = try moveFor(a, "const a = 1;\n  // b\nconst b = 2;\n", "", &.{ "a", "b" }, .doc_and_plain, null);
     try testing.expectEqualStrings("", m.from_now);
-    try testing.expectEqualStrings("const a = 1;\n\n  // b\nconst b = 2;\n", m.to_now);
+    // b and its comment sat right under a: they stay so.
+    try testing.expectEqualStrings("const a = 1;\n  // b\nconst b = 2;\n", m.to_now);
 }
 
 test "zig_move: a comment on a declaration's last line goes with it, and `after` puts a block after the comment" {
@@ -320,7 +332,7 @@ test "zig_move replays 589837e (linux_writes.zig): every row: the three the hand
     defer t.deinit();
     try t.expectOutput(replay ++
         \\every(replay("589837e", "linux_writes.zig"))
-    , "edit new.zig: 1 hunk, -1 +250 lines\nedit lh.zig: 1 hunk, -241 +1 lines\nmoved\t22\nneeds_pub: Hold:527 Sent:593 WriteWatch:703 WriteWatch.run:484 \nneeds_import: std:519 net:595 Io:596 \nneeds_from_from: sleepMs:683 \nuses_left: Sent:305 Hold:308 Hold:325 Sent:325 WriteWatch:483 write_deadline_for_test_ms:483 kept_write_deadline_ms:483 WriteWatch:484 writes_ended_by_deadline:1427 kept_write_deadline_ms:1427 write_deadline_for_test_ms:2294 write_deadline_for_test_ms:2295 turn_write_deadline_for_test_ms:2942 turn_write_deadline_for_test_ms:2943 \n");
+    , "edit new.zig: 1 hunk, -1 +240 lines\nedit lh.zig: 1 hunk, -241 +1 lines\nmoved\t22\nneeds_pub: Hold:527 Sent:593 WriteWatch:703 WriteWatch.run:484 \nneeds_import: std:519 net:595 Io:596 \nneeds_from_from: sleepMs:683 \nuses_left: Sent:305 Hold:308 Hold:325 Sent:325 WriteWatch:483 write_deadline_for_test_ms:483 kept_write_deadline_ms:483 WriteWatch:484 writes_ended_by_deadline:1427 kept_write_deadline_ms:1427 write_deadline_for_test_ms:2294 write_deadline_for_test_ms:2295 turn_write_deadline_for_test_ms:2942 turn_write_deadline_for_test_ms:2943 \n");
 }
 
 test "zig_move replays 35317cf (linux_reads.zig): every row: the fifteen the hand made pub and Progress.Ended; std, net, Io and body_rule imports; sleepMs from's own; the uses left" {
@@ -329,7 +341,7 @@ test "zig_move replays 35317cf (linux_reads.zig): every row: the fifteen the han
     defer t.deinit();
     try t.expectOutput(replay ++
         \\every(replay("35317cf", "linux_reads.zig"))
-    , "edit new.zig: 1 hunk, -1 +334 lines\nedit lh.zig: 4 hunks, -330 +4 lines\nmoved\t28\nneeds_pub: Got:531 Progress:548 readWhole:568 Raced:623 verdict:771 watch:797 neverRead:819 slots:830 nextAsk:838 takeSlot:856 readDone:887 giveBackSlot:893 small_held:901 unchargeSmall:913 Whole:922 Progress.Ended:1716 \nneeds_import: std:549 net:551 Io:552 body_rule:568 \nneeds_from_from: sleepMs:803 \nuses_left: Progress:222 neverRead:239 takeSlot:242 nextAsk:242 readWhole:250 fail_after_read_for_test:251 readDone:254 Progress:340 Raced:343 Raced:344 watch:347 Progress:402 giveBackSlot:404 unchargeSmall:411 unchargeSmall:463 deadline_for_test_ms:1438 deadline_for_test_ms:1439 deadline_for_test_ms:1530 deadline_for_test_ms:1531 Progress:1560 Whole:1568 small_held:1620 small_held:1623 stall_for_test_ms:1627 stall_for_test_ms:1628 deadline_for_test_ms:1648 deadline_for_test_ms:1649 small_held:1661 slots:1668 slots:1680 slots:1691 nextAsk:1701 Progress:1706 takeSlot:1707 nextAsk:1707 giveBackSlot:1711 slot_wait_for_test_ms:1712 slot_wait_for_test_ms:1713 Progress:1714 takeSlot:1715 Progress:1716 stall_for_test_ms:1720 stall_for_test_ms:1721 slots:1726 small_budget_for_test:1730 small_budget_for_test:1731 small_held:1739 slot_wait_for_test_ms:1761 slot_wait_for_test_ms:1762 slots:1774 slots:1786 deadline_for_test_ms:1805 deadline_for_test_ms:1806 Got:1826 Progress:1827 Got:1829 verdict:1829 Got:1830 verdict:1830 Got:1831 verdict:1831 Got:1834 verdict:1834 Got:1835 verdict:1835 Got:1836 verdict:1836 Got:1837 verdict:1837 fail_after_read_for_test:1841 fail_after_read_for_test:1842 small_held:1847 slots:1853 stall_for_test_ms:1862 stall_for_test_ms:1863 tick_for_test_ms:1864 tick_for_test_ms:1865 slots:1889 small_held:1906 Progress:1947 small_held:1962 unchargeSmall:1964 Whole:1965 tick_for_test_ms:1979 tick_for_test_ms:1980 tick_for_test_ms:2480 tick_for_test_ms:2481 \n");
+    , "edit new.zig: 1 hunk, -1 +326 lines\nedit lh.zig: 4 hunks, -330 +4 lines\nmoved\t28\nneeds_pub: Got:531 Progress:548 readWhole:568 Raced:623 verdict:771 watch:797 neverRead:819 slots:830 nextAsk:838 takeSlot:856 readDone:887 giveBackSlot:893 small_held:901 unchargeSmall:913 Whole:922 Progress.Ended:1716 \nneeds_import: std:549 net:551 Io:552 body_rule:568 \nneeds_from_from: sleepMs:803 \nuses_left: Progress:222 neverRead:239 takeSlot:242 nextAsk:242 readWhole:250 fail_after_read_for_test:251 readDone:254 Progress:340 Raced:343 Raced:344 watch:347 Progress:402 giveBackSlot:404 unchargeSmall:411 unchargeSmall:463 deadline_for_test_ms:1438 deadline_for_test_ms:1439 deadline_for_test_ms:1530 deadline_for_test_ms:1531 Progress:1560 Whole:1568 small_held:1620 small_held:1623 stall_for_test_ms:1627 stall_for_test_ms:1628 deadline_for_test_ms:1648 deadline_for_test_ms:1649 small_held:1661 slots:1668 slots:1680 slots:1691 nextAsk:1701 Progress:1706 takeSlot:1707 nextAsk:1707 giveBackSlot:1711 slot_wait_for_test_ms:1712 slot_wait_for_test_ms:1713 Progress:1714 takeSlot:1715 Progress:1716 stall_for_test_ms:1720 stall_for_test_ms:1721 slots:1726 small_budget_for_test:1730 small_budget_for_test:1731 small_held:1739 slot_wait_for_test_ms:1761 slot_wait_for_test_ms:1762 slots:1774 slots:1786 deadline_for_test_ms:1805 deadline_for_test_ms:1806 Got:1826 Progress:1827 Got:1829 verdict:1829 Got:1830 verdict:1830 Got:1831 verdict:1831 Got:1834 verdict:1834 Got:1835 verdict:1835 Got:1836 verdict:1836 Got:1837 verdict:1837 fail_after_read_for_test:1841 fail_after_read_for_test:1842 small_held:1847 slots:1853 stall_for_test_ms:1862 stall_for_test_ms:1863 tick_for_test_ms:1864 tick_for_test_ms:1865 slots:1889 small_held:1906 Progress:1947 small_held:1962 unchargeSmall:1964 Whole:1965 tick_for_test_ms:1979 tick_for_test_ms:1980 tick_for_test_ms:2480 tick_for_test_ms:2481 \n");
 }
 
 test "zig_move: an import named through another (`Bus = streams.Bus`) brings that one too, and its own in turn" {
