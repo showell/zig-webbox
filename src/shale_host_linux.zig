@@ -482,8 +482,20 @@ pub const Scrub = struct {
                 best = kv;
             };
             if (best) |kv| {
+                // **OVERLAPS TOLD AS ONE**: a secret that starts inside this
+                // one and runs past its end (`abc`, `bcdef` in `abcdef`)
+                // widens what is told, so none of it is left raw; one that
+                // may still go on in the next read is waited for.
+                var end = i + kv[1].len;
+                var j = i + 1;
+                while (j < end) : (j += 1) for (s.secrets) |o| {
+                    const at = buf[j..];
+                    if (std.mem.startsWith(u8, at, o[1])) {
+                        end = @max(end, j + o[1].len);
+                    } else if (!last and at.len < o[1].len and std.mem.startsWith(u8, o[1], at)) break :scan;
+                };
                 try out.print(s.alloc, "<secret {s}>", .{kv[0]});
-                i += kv[1].len;
+                i = end;
                 continue :scan;
             }
             try out.append(s.alloc, buf[i]);
@@ -945,6 +957,26 @@ test "host: the scrubber: a secret that begins another is never told for it, who
         defer got.deinit(testing.allocator);
         out.whole = &got;
         var scrub: Scrub = .{ .alloc = testing.allocator, .secrets = &.{ .{ "SHORT", "abc" }, .{ "LONG", "abcdef" } }, .next = &out };
+        defer scrub.carry.deinit(testing.allocator);
+        for (c.pieces) |piece| try scrub.write(piece);
+        try scrub.finish();
+        try testing.expectEqualStrings(c.want, got.items);
+    }
+}
+
+test "host: the scrubber: secrets that overlap are told as one, none of either left raw, whole or split" {
+    const Case = struct { pieces: []const []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .pieces = &.{"x abcdef y"}, .want = "x <secret A> y" },
+        .{ .pieces = &.{ "x abcd", "ef y" }, .want = "x <secret A> y" },
+        .{ .pieces = &.{"x abcdX y"}, .want = "x <secret A>dX y" },
+        .{ .pieces = &.{"x bcdef y"}, .want = "x <secret B> y" },
+    }) |c| {
+        var out: Out = .{ .alloc = testing.allocator, .whole = undefined, .whole_most = 1 << 20 };
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(testing.allocator);
+        out.whole = &got;
+        var scrub: Scrub = .{ .alloc = testing.allocator, .secrets = &.{ .{ "A", "abc" }, .{ "B", "bcdef" } }, .next = &out };
         defer scrub.carry.deinit(testing.allocator);
         for (c.pieces) |piece| try scrub.write(piece);
         try scrub.finish();
