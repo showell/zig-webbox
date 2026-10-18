@@ -234,14 +234,19 @@ fn nowSeconds() i64 {
     return @intCast(ts.sec);
 }
 
-fn writeRecord(record: [*:0]const u8, tmp: [*:0]const u8, r: Record) void {
+/// Whether the record is there now, whole: written to `tmp`, then renamed.
+fn writeRecord(record: [*:0]const u8, tmp: [*:0]const u8, r: Record) bool {
     var buf: [8192]u8 = undefined;
     const text = formatRecord(&buf, r);
     const fd = linux.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
-    if (linux.errno(fd) != .SUCCESS) return;
-    _ = linux.write(@intCast(fd), text.ptr, text.len);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    const w = linux.write(@intCast(fd), text.ptr, text.len);
     _ = linux.close(@intCast(fd));
-    _ = linux.rename(tmp, record);
+    if (linux.errno(w) != .SUCCESS or w != text.len or linux.errno(linux.rename(tmp, record)) != .SUCCESS) {
+        _ = linux.unlink(tmp);
+        return false;
+    }
+    return true;
 }
 
 /// **THE REAPER** (`shale --reap <record> <log> <cwd> <program> -- argv...`,
@@ -291,7 +296,17 @@ pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []c
         }
         sleepMs(1);
     }
-    writeRecord(record, tmp, r);
+    // **NO JOB THAT NO RECORD NAMES**: its record is its one handle, so a
+    // job whose first record cannot be written is ended, and `launch`
+    // finds no record and says so.
+    if (!writeRecord(record, tmp, r)) {
+        // Its group, and itself in case it has yet to make one.
+        _ = linux.kill(-r.pgid, .KILL);
+        _ = linux.kill(@intCast(pid), .KILL);
+        var st: u32 = 0;
+        _ = linux.waitpid(@intCast(pid), &st, 0);
+        return 2;
+    }
     _ = linux.write(reaper_started_fd, "s", 1);
     _ = linux.close(reaper_started_fd);
     var status: u32 = 0;
@@ -301,8 +316,7 @@ pub fn reapMain(a: std.mem.Allocator, args: []const []const u8, env: []const []c
     }
     if (linux.W.IFEXITED(status)) r.exit = linux.W.EXITSTATUS(status) else r.signal = @intFromEnum(linux.W.TERMSIG(status));
     r.ended = nowSeconds();
-    writeRecord(record, tmp, r);
-    return 0;
+    return if (writeRecord(record, tmp, r)) 0 else 2;
 }
 
 test "jobs: a record reads back as it was written, and a broken one is none" {

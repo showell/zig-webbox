@@ -104,7 +104,13 @@ fn start(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         try chargeRead(run, pos, text.len);
         if (jobs.parseRecord(text)) |old| if (jobs.alive(old) or (!old.done() and jobs.reaperAlive(old)))
             return run.fail(pos, .host, "`job_start`: a job still runs on {s} (pid {d}, its record {s}.job): `job_stop` or `job_wait` it, or give another log", .{ log_shown, old.pid, log_shown });
-    } else |_| {}
+    } else |e| switch (e) {
+        // No record: no job has had this log.
+        error.FileNotFound => {},
+        // Any other failure is not "no job": a job may run there still,
+        // and the reaper would start the program before failing to write.
+        else => return run.fail(pos, .store, "`job_start`: {s}.job cannot be read: {s}", .{ log_shown, @errorName(e) }),
+    }
     run.host_runs += 1;
     const r = jobs.launch(a, run.io, reaper, record_os, log_os, cwd, program, argv, env.items) catch |e| switch (e) {
         error.OutOfMemory => return run.oom(pos),

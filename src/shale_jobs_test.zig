@@ -136,6 +136,48 @@ test "jobs: waiting for a line reads only what the log gained since it last look
     try testing.expectEqualStrings("exited\n", try once(&t, "local j = job_start({\"shale-fixture\", \"chunks\", \"4000000\", \"1000\"}, {log = \"slow.log\"}) print(job_wait(j, {timeout_ms = 60000, contains = \"never printed\"}).ended)"));
 }
 
+test "jobs: a log whose record cannot be read is refused by name, never taken for no job" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.tmp.dir.createDirPath(t.threaded.io(), "odd.log.job");
+    try onceStop(&t, "job_start({\"shale-fixture\", \"exit\", \"0\"}, {log = \"odd.log\"})", .store, "odd.log.job cannot be read");
+}
+
+test "jobs: a reaper that cannot write the job's first record ends the job, so nothing runs that no record names" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    const a = t.arena.allocator();
+    const io = t.threaded.io();
+    // The record's path a folder: its rename fails. (`job_start` refuses
+    // this before the reaper; `launch` is the reaper's own guard.)
+    try t.tmp.dir.createDirPath(io, "rec.log.job");
+    const record = try std.fmt.allocPrint(a, "{s}/rec.log.job", .{t.root});
+    const log = try std.fmt.allocPrint(a, "{s}/rec.log", .{t.root});
+    const program = (try jobs.find(a, "shale-fixture", t.host.env, t.root)).?;
+    try testing.expectError(error.NoRecord, jobs.launch(a, io, t.host.reaper.?, record, log, t.root, program, &.{ "shale-fixture", "pid-sleep", "20000" }, t.host.env));
+    // If it ran long enough to say its pid, it is gone within a second.
+    var said: ?i32 = null;
+    for (0..50) |_| {
+        const text = t.tmp.dir.readFileAlloc(io, "rec.log", a, .limited(4096)) catch "";
+        if (std.mem.startsWith(u8, text, "pid ")) {
+            said = try std.fmt.parseInt(i32, std.mem.trimEnd(u8, text[4..], "\n"), 10);
+            break;
+        }
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    const pid = said orelse return;
+    var buf: [1024]u8 = undefined;
+    for (0..100) |_| {
+        if (jobs.startOf(&buf, pid) == null) return;
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    _ = std.os.linux.kill(pid, .KILL);
+    std.debug.print("the job (pid {d}) runs on, and no record names it\n", .{pid});
+    return error.TestUnexpectedResult;
+}
+
 test "jobs: the mistakes a job's call can make, each named" {
     var t: T = undefined;
     try init(&t);
