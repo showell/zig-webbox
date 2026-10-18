@@ -206,6 +206,18 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
             };
         }
     }
+    // **AN IMPORT NAMED THROUGH ANOTHER** (`const Bus = streams.Bus;`)
+    // needs that one too, and so on to an `@import` (angry-gopher router.zig's
+    // search tests named `Bus` and `Hub` and never `streams`).
+    var k: usize = 0;
+    while (k < needs_import.items.len) : (k += 1) {
+        const need = needs_import.items[k];
+        if (!chain(need.target)) continue;
+        const head = need.target[0..std.mem.indexOfScalar(u8, need.target, '.').?];
+        const target = imports.get(head) orelse continue;
+        if ((try seen.getOrPut(a, try key(a, "i", head, 0))).found_existing) continue;
+        try needs_import.append(a, .{ .name = head, .target = target, .line = need.line });
+    }
     var needs_pub: std.ArrayList(NameLine) = .empty;
     for (fd.decls, 0..) |d, i| if (picked[i] and d.visibility == .file) {
         for (uses_left.items) |u| if (std.mem.eql(u8, u.name, d.name)) {

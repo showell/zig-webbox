@@ -263,6 +263,15 @@ test "zig_move replays 35317cf (linux_reads.zig): Progress.Ended, a member, need
     , "edit new.zig: 1 hunk, -1 +334 lines\nedit lh.zig: 4 hunks, -330 +4 lines\n28\ttrue\ttrue\n");
 }
 
+test "zig_move: an import named through another (`Bus = streams.Bus`) brings that one too, and its own in turn" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    // angry-gopher router.zig's shape, which its search tests needed.
+    try t.put("c.zig", "const std = @import(\"std\");\nconst streams = std.mem;\nconst Bus = streams.Allocator;\n\nfn f(b: Bus) void {\n    _ = b;\n}\n");
+    try t.expectOutput(report ++ "report(zig_move(\"c.zig\", \"d.zig\", {\"f\"}))", "edit d.zig: 1 hunk, -1 +4 lines\nedit c.zig: 1 hunk, -5 +1 lines\nmoved\t1\nneeds_import\tBus\t5\tstreams.Allocator\nneeds_import\tstreams\t5\tstd.mem\nneeds_import\tstd\t5\t@import(\"std\")\n");
+}
+
 test "zig_move: a step a token and a node of both files, more for a file four times the size" {
     var t: T = undefined;
     try init(&t);
