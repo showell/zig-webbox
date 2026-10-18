@@ -92,7 +92,12 @@ has none of it):
   stop - start)` is it); `comment_above` is the plain `//` lines directly
   over it; `uses` is the top-level names its span uses (not its own, not a
   field's or a comment's), sorted: the file's reference graph, for finding
-  where it divides. A file that does not parse stops, naming the line. **The
+  where it divides. `zig_decls(p, {container = "Table"})` lists that
+  container's own members the same way, `uses` counting its members'
+  names too (never its own), and adds `reaches`: the members a member
+  touches through a `.` (`self.slots`, `self.grow()`), **by name, not by
+  type** (a `.slots` of another value is counted). A file that does not
+  parse stops, naming the line. **The
   analysis is Zig's parser and its tokens, not types**: what it cannot
   see (a method reached through a value), the compiler judges after
   (`same_tests.shale`).
@@ -106,7 +111,13 @@ has none of it):
   through a value (`hold.begin()`), a name through an `@This()` alias.
   The moved lines, and the blank lines it puts between them, end as
   `to`'s lines do (CRLF or LF; an empty `to` as `from`'s), so neither
-  file mixes the two.
+  file mixes the two. Declarations on lines next to each other stay so. A
+  section's banner (a `// ──` line, heading what is under it to the next
+  banner) goes with its section when every declaration under it moves.
+  `zig_tokens(p, {tag}?)` lists a Zig file's tokens, `{tag, text, line}`
+  (std.zig.Token.Tag's names), by the tokenizer the other three read with:
+  a plain comment is no token, a string one. `{tag = "identifier"}` keeps
+  the names alone.
   `zig_imports(p)` lists a Zig file's `@import`s and `@embedFile`s, from
   Zig's parser (a split call is one, a comment's or a string's none):
   `{kind, target, name, line, file}`, `file` being `"found"` or

@@ -117,6 +117,31 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
         if (picked[found]) return refuse(a, "`{s}` is named twice; nothing written", .{w.name});
         picked[found] = true;
     }
+    // **A SECTION'S BANNER GOES WITH ITS SECTION**: a `// ──` line heads
+    // the declarations under it, to the next banner or the file's end; when
+    // every one of them moves, the first one's cut starts at the banner.
+    const banner_of = try a.alloc(?usize, fd.decls.len);
+    @memset(banner_of, null);
+    {
+        var banners: std.ArrayList(usize) = .empty;
+        var at: usize = 0;
+        while (at < from.len) {
+            if (std.mem.startsWith(u8, from[at..], "// ──")) try banners.append(a, at);
+            at = if (std.mem.indexOfScalarPos(u8, from, at, '\n')) |nl_at| nl_at + 1 else from.len;
+        }
+        for (banners.items, 0..) |b, bi| {
+            const next = if (bi + 1 < banners.items.len) banners.items[bi + 1] else from.len;
+            var first: ?usize = null;
+            var all = true;
+            for (fd.decls, 0..) |d, i| if (d.start > b and d.start < next) {
+                if (first == null) first = i;
+                if (!picked[i]) all = false;
+            };
+            if (first) |f| if (all) {
+                banner_of[f] = b;
+            };
+        }
+    }
     // **THE CUTS**, in file order, adjacent ones joined.
     const starts = try za.lineStarts(a, from);
     const Cut = struct { s: usize, e: usize };
@@ -134,6 +159,7 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
         if (mode == .doc_and_plain) if (d.comment_above) |c| {
             s = starts[c.first - 1];
         };
+        if (banner_of[i]) |b| s = b;
         if (last_picked) |lp| {
             const between = from[last_stop..s];
             const under = lp + 1 == i and std.mem.count(u8, between, "\n") == 1 and std.mem.trim(u8, between, " \t\r\n").len == 0;

@@ -43,8 +43,11 @@ pub const Decl = struct {
 
 /// The declarations and what reading them took, or the line of the
 /// parser's first error (and its tag): no partial list.
+/// Declarations read, and what reading them took (the charge).
+pub const Read = struct { decls: []const Decl, tokens: usize, nodes: usize };
+
 pub const Decls = union(enum) {
-    ok: struct { decls: []const Decl, tokens: usize, nodes: usize },
+    ok: Read,
     parse_error: struct { line: usize, tag: []const u8 },
 };
 
@@ -57,76 +60,111 @@ pub fn decls(a: std.mem.Allocator, src: [:0]const u8) error{OutOfMemory}!Decls {
     }
     const starts = try lineStarts(a, src);
     var out: std.ArrayList(Decl) = .empty;
-    for (tree.rootDecls()) |n| {
-        var d: Decl = .{ .kind = .@"const", .name = "", .name_form = .identifier, .visibility = .file, .linkage = .none, .first = 0, .last = 0, .start = 0, .stop = 0, .comment_above = null };
-        switch (tree.nodeTag(n)) {
-            .fn_decl, .fn_proto, .fn_proto_multi, .fn_proto_one, .fn_proto_simple => {
-                var buf: [1]Ast.Node.Index = undefined;
-                const fp = tree.fullFnProto(&buf, n).?;
-                d.kind = .@"fn";
-                if (fp.name_token) |t| {
-                    d.name = tree.tokenSlice(t);
-                    d.name_line = lineOf(starts, tree.tokenStart(t));
-                } else d.name_form = .none;
-                if (fp.visib_token != null) d.visibility = .@"pub";
-                if (fp.extern_export_inline_token) |t| d.linkage = linkageOf(tree.tokenTag(t));
-            },
-            .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
-                const vd = tree.fullVarDecl(n).?;
-                d.kind = if (tree.tokenTag(vd.ast.mut_token) == .keyword_const) .@"const" else .@"var";
-                d.name = tree.tokenSlice(vd.ast.mut_token + 1);
-                d.name_line = lineOf(starts, tree.tokenStart(vd.ast.mut_token + 1));
-                if (vd.visib_token != null) d.visibility = .@"pub";
-                if (vd.extern_export_token) |t| d.linkage = linkageOf(tree.tokenTag(t));
-                if (vd.ast.init_node.unwrap()) |init| {
-                    const last_init = tree.lastToken(init);
-                    d.value = src[tree.tokenStart(tree.firstToken(init)) .. tree.tokenStart(last_init) + tree.tokenSlice(last_init).len];
-                    d.private_members = try privateMembers(a, &tree, init);
-                }
-            },
-            .test_decl => {
-                d.kind = .@"test";
-                if (tree.nodeData(n).opt_token_and_node[0].unwrap()) |t| {
-                    const s = tree.tokenSlice(t);
-                    if (tree.tokenTag(t) == .string_literal) {
-                        d.name_form = .string;
-                        d.name = s[1 .. s.len - 1];
-                    } else d.name = s;
-                } else d.name_form = .none;
-            },
-            .@"comptime" => {
-                d.kind = .@"comptime";
-                d.name_form = .none;
-            },
-            .container_field_init, .container_field_align, .container_field => {
-                const cf = tree.fullContainerField(n).?;
-                d.kind = .field;
-                d.visibility = .@"pub";
-                d.name = tree.tokenSlice(cf.ast.main_token);
-            },
-            // The parser gives a file's root nothing else in 0.16.
-            else => unreachable,
-        }
-        // The span: back over its doc comment, on to its `;` or `,`.
-        var first = tree.firstToken(n);
-        while (first > 0 and tree.tokenTag(first - 1) == .doc_comment) first -= 1;
-        var last = tree.lastToken(n);
-        if (last + 1 < tree.tokens.len) switch (tree.tokenTag(last + 1)) {
-            .semicolon => last += 1,
-            .comma => if (d.kind == .field) {
-                last += 1;
-            },
-            else => {},
-        };
-        if (d.name_line == 0) d.name_line = lineOf(starts, tree.tokenStart(tree.firstToken(n)));
-        d.start = tree.tokenStart(first);
-        d.stop = tree.tokenStart(last) + tree.tokenSlice(last).len;
-        d.first = lineOf(starts, d.start);
-        d.last = lineOf(starts, d.stop - 1);
-        d.comment_above = commentAbove(src, starts, d.first);
-        try out.append(a, d);
-    }
+    for (tree.rootDecls()) |n| try out.append(a, try declOf(a, &tree, src, starts, n));
     return .{ .ok = .{ .decls = out.items, .tokens = tree.tokens.len, .nodes = tree.nodes.len } };
+}
+
+/// The members of a container, or why there are none to give.
+pub const Members = union(enum) {
+    ok: Read,
+    parse_error: struct { line: usize, tag: []const u8 },
+    /// No top-level `const name = struct/union/enum/opaque {...}` by that name.
+    no_container: void,
+};
+
+/// **A CONTAINER'S OWN DECLARATIONS AND FIELDS** (the top-level `const
+/// name = struct {...}`, or a union's, an enum's, an opaque's), in its
+/// order: what `zig_decls(p, {in = name})` gives, read as the top level is.
+pub fn members(a: std.mem.Allocator, src: [:0]const u8, name: []const u8) error{OutOfMemory}!Members {
+    const tree = try Ast.parse(a, src, .zig);
+    if (tree.errors.len != 0) {
+        const e = tree.errors[0];
+        return .{ .parse_error = .{ .line = tree.tokenLocation(0, e.token).line + 1, .tag = @tagName(e.tag) } };
+    }
+    const starts = try lineStarts(a, src);
+    for (tree.rootDecls()) |n| {
+        const vd = tree.fullVarDecl(n) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(vd.ast.mut_token + 1), name)) continue;
+        const init = vd.ast.init_node.unwrap() orelse continue;
+        var buf: [2]Ast.Node.Index = undefined;
+        const c = tree.fullContainerDecl(&buf, init) orelse continue;
+        var out: std.ArrayList(Decl) = .empty;
+        for (c.ast.members) |m| try out.append(a, try declOf(a, &tree, src, starts, m));
+        return .{ .ok = .{ .decls = out.items, .tokens = tree.tokens.len, .nodes = tree.nodes.len } };
+    }
+    return .no_container;
+}
+
+/// One declaration, from its node: its kind, name, visibility, linkage and
+/// span (its doc comment to its `;`, `}` or field's `,`).
+fn declOf(a: std.mem.Allocator, tree: *const Ast, src: [:0]const u8, starts: []const usize, n: Ast.Node.Index) error{OutOfMemory}!Decl {
+    var d: Decl = .{ .kind = .@"const", .name = "", .name_form = .identifier, .visibility = .file, .linkage = .none, .first = 0, .last = 0, .start = 0, .stop = 0, .comment_above = null };
+    switch (tree.nodeTag(n)) {
+        .fn_decl, .fn_proto, .fn_proto_multi, .fn_proto_one, .fn_proto_simple => {
+            var buf: [1]Ast.Node.Index = undefined;
+            const fp = tree.fullFnProto(&buf, n).?;
+            d.kind = .@"fn";
+            if (fp.name_token) |t| {
+                d.name = tree.tokenSlice(t);
+                d.name_line = lineOf(starts, tree.tokenStart(t));
+            } else d.name_form = .none;
+            if (fp.visib_token != null) d.visibility = .@"pub";
+            if (fp.extern_export_inline_token) |t| d.linkage = linkageOf(tree.tokenTag(t));
+        },
+        .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
+            const vd = tree.fullVarDecl(n).?;
+            d.kind = if (tree.tokenTag(vd.ast.mut_token) == .keyword_const) .@"const" else .@"var";
+            d.name = tree.tokenSlice(vd.ast.mut_token + 1);
+            d.name_line = lineOf(starts, tree.tokenStart(vd.ast.mut_token + 1));
+            if (vd.visib_token != null) d.visibility = .@"pub";
+            if (vd.extern_export_token) |t| d.linkage = linkageOf(tree.tokenTag(t));
+            if (vd.ast.init_node.unwrap()) |init| {
+                const last_init = tree.lastToken(init);
+                d.value = src[tree.tokenStart(tree.firstToken(init)) .. tree.tokenStart(last_init) + tree.tokenSlice(last_init).len];
+                d.private_members = try privateMembers(a, tree, init);
+            }
+        },
+        .test_decl => {
+            d.kind = .@"test";
+            if (tree.nodeData(n).opt_token_and_node[0].unwrap()) |t| {
+                const s = tree.tokenSlice(t);
+                if (tree.tokenTag(t) == .string_literal) {
+                    d.name_form = .string;
+                    d.name = s[1 .. s.len - 1];
+                } else d.name = s;
+            } else d.name_form = .none;
+        },
+        .@"comptime" => {
+            d.kind = .@"comptime";
+            d.name_form = .none;
+        },
+        .container_field_init, .container_field_align, .container_field => {
+            const cf = tree.fullContainerField(n).?;
+            d.kind = .field;
+            d.visibility = .@"pub";
+            d.name = tree.tokenSlice(cf.ast.main_token);
+        },
+        // A file's root, and a container's members, are nothing else in 0.16.
+        else => unreachable,
+    }
+    // The span: back over its doc comment, on to its `;` or `,`.
+    var first = tree.firstToken(n);
+    while (first > 0 and tree.tokenTag(first - 1) == .doc_comment) first -= 1;
+    var last = tree.lastToken(n);
+    if (last + 1 < tree.tokens.len) switch (tree.tokenTag(last + 1)) {
+        .semicolon => last += 1,
+        .comma => if (d.kind == .field) {
+            last += 1;
+        },
+        else => {},
+    };
+    if (d.name_line == 0) d.name_line = lineOf(starts, tree.tokenStart(tree.firstToken(n)));
+    d.start = tree.tokenStart(first);
+    d.stop = tree.tokenStart(last) + tree.tokenSlice(last).len;
+    d.first = lineOf(starts, d.start);
+    d.last = lineOf(starts, d.stop - 1);
+    d.comment_above = commentAbove(src, starts, d.first);
+    return d;
 }
 
 /// A container value's members that are not `pub`: declarations and

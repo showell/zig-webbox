@@ -166,6 +166,20 @@ test "zig_move: declarations on lines next to each other stay next to each other
     try testing.expectEqualStrings("const a = 1;\n\nconst b = 3;\n", n.to_now);
 }
 
+test "zig_move: a section's banner goes with its section when every declaration under it moves, and stays when one is left" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const from = "const a = 1;\n\n// ── the timer ──\n\nconst t1 = 2;\nconst t2 = 3;\n\n// ── the rest ──\n\nconst r = 4;\n";
+    const m = try moveFor(a, from, "", &.{ "t1", "t2" }, .doc, null);
+    try testing.expectEqualStrings("const a = 1;\n\n// ── the rest ──\n\nconst r = 4;\n", m.from_now);
+    try testing.expectEqualStrings("// ── the timer ──\n\nconst t1 = 2;\nconst t2 = 3;\n", m.to_now);
+    // One of the two moves: the banner stays over what is left.
+    const n = try moveFor(a, from, "", &.{"t1"}, .doc, null);
+    try testing.expectEqualStrings("const a = 1;\n\n// ── the timer ──\n\nconst t2 = 3;\n\n// ── the rest ──\n\nconst r = 4;\n", n.from_now);
+    try testing.expectEqualStrings("const t1 = 2;\n", n.to_now);
+}
+
 test "zig_move: an indented comment between two moved declarations joins their cuts (it sliced backwards)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

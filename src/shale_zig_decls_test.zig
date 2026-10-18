@@ -209,3 +209,41 @@ test "zig_decls: each declaration's `uses`, the top-level names it uses (the sea
     try t.expectOutput("for d in zig_decls(\"g.zig\") do print(d.name, join(d.uses, \",\")) end",
         "std\t\na\t\nb\ta,c,std\nc\ta\nS\tb\nt\tS\n");
 }
+
+test "zig_decls of a container: its members, each's `uses` (names) and `reaches` (members through a `.`, by name); a name that is no container stops" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("c.zig",
+        \\const std = @import("std");
+        \\const limit = 3;
+        \\const T = struct {
+        \\    a: u8,
+        \\    b: u8 = 0,
+        \\    /// Reads a.
+        \\    fn getA(self: T) u8 {
+        \\        return self.a;
+        \\    }
+        \\    fn both(self: T) u8 {
+        \\        return self.getA() + self.b + limit + std.math.maxInt(u8);
+        \\    }
+        \\    pub const K = 2;
+        \\};
+        \\
+    );
+    try t.expectOutput("for d in zig_decls(\"c.zig\", {container = \"T\"}) do print(d.kind, d.name, d.visibility, d.first, d.last, join(d.uses, \",\"), join(d.reaches, \",\")) end",
+        "field\ta\tpub\t4\t4\t\t\nfield\tb\tpub\t5\t5\t\t\nfn\tgetA\tfile\t6\t9\t\ta\nfn\tboth\tfile\t10\t12\tlimit,std\tb,getA\nconst\tK\tpub\t13\t13\t\t\n");
+    try t.expectStop("zig_decls(\"c.zig\", {container = \"limit\"})", .atomic, .argument, "no container `limit`");
+    try t.expectStop("zig_decls(\"c.zig\", {inside = \"T\"})", .atomic, .argument, "takes `container`");
+}
+
+test "zig_tokens: a file's tokens from Zig's tokenizer, `{tag, text, line}`; a comment's or a string's words are no identifier; `{tag = ...}` keeps one kind" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("k.zig", "// machine, in a comment\nconst s = \"machine\";\nfn f(machine: u8) u8 {\n    return machine;\n}\n");
+    try t.expectOutput("local n = 0 for k in zig_tokens(\"k.zig\") do n = n + 1 end print(n)", "18\n");
+    try t.expectOutput("for k in zig_tokens(\"k.zig\", {tag = \"identifier\"}) do print(k.text, k.line) end", "s\t2\nf\t3\nmachine\t3\nu8\t3\nu8\t3\nmachine\t4\n");
+    try t.expectOutput("local k = zig_tokens(\"k.zig\")[1] print(k.tag, k.text, k.line)", "keyword_const\tconst\t2\n");
+    try t.expectStop("zig_tokens(\"k.zig\", {tag = \"nope\"})", .atomic, .argument, "no token tag `nope`");
+}

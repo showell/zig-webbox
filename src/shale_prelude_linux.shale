@@ -187,8 +187,9 @@ end
 -- **A ZIG FILE'S TOP-LEVEL DECLARATIONS** (metal-vmm QUEUE 235, 1), from
 -- Zig's own parser, in file order: each `{kind, name, name_form,
 -- visibility, linkage, first, last, start, stop[, comment_above]}`.
-function zig_decls(path)
-  return host("zig_decls", path)
+function zig_decls(path, opts?)
+  if opts == nil then return host("zig_decls", path) end
+  return host("zig_decls", path, opts)
 end
 
 -- **TOP-LEVEL DECLARATIONS MOVED BETWEEN ZIG FILES** (metal-vmm QUEUE 235,
@@ -207,6 +208,11 @@ end
 -- **A ZIG FILE'S `@import`s AND `@embedFile`s** (metal-vmm QUEUE 235, 3),
 -- from Zig's parser, in source order: each `{kind = "import" | "embed",
 -- target, name, line, file = "found" | "missing" | "module"}`.
+function zig_tokens(path, opts?)
+  if opts == nil then return host("zig_tokens", path) end
+  return host("zig_tokens", path, opts)
+end
+
 function zig_imports(path)
   return host("zig_imports", path)
 end

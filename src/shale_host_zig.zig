@@ -194,7 +194,21 @@ pub fn rename(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const
 /// read, the `dupeZ`, a step a token and a step an Ast node. A parse error
 /// stops, naming its first line.
 pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
-    if (args.len != 1) return run.fail(pos, .argument, "`zig_decls` takes a path, given {d} arguments", .{args.len});
+    if (args.len < 1 or args.len > 2) return run.fail(pos, .argument, "`zig_decls` takes a path and options, given {d} arguments", .{args.len});
+    // `{container = name}`: that container's own members, not the file's.
+    var container: ?[]const u8 = null;
+    if (args.len == 2) switch (args[1]) {
+        .table => |t| if (t.kind == .map) {
+            for (t.map.keys(), t.map.values()) |k, x| {
+                if (!std.mem.eql(u8, k, "container")) return run.fail(pos, .argument, "`zig_decls` takes `container`, not `{s}`", .{k});
+                container = switch (x) {
+                    .string => |s| s,
+                    else => return run.fail(pos, .type, "`zig_decls`' `container` is a name, not {s}", .{x.typeName()}),
+                };
+            }
+        } else return run.fail(pos, .type, "`zig_decls`' options are a map, not a list", .{}),
+        else => |v| return run.fail(pos, .type, "`zig_decls`' options are a map, not {s}", .{v.typeName()}),
+    };
     const hub = script.builtins_store;
     const rd = script.builtins_read;
     const p = try hub.pathArg(run, pos, .host, args[0], false);
@@ -207,11 +221,17 @@ pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const 
     const was = try rd.readSizedIn(sa, run, pos, .host, p, size, 0, null);
     const src = sa.dupeZ(u8, was) catch return run.oom(pos);
     try script.builtins.chargeBytes(run, pos, src.len);
-    const got = switch (za.decls(sa, src) catch return run.oom(pos)) {
+    const root = switch (za.decls(sa, src) catch return run.oom(pos)) {
         .ok => |ok| ok,
         .parse_error => |e| return run.fail(pos, .argument, "`zig_decls`: {s} does not parse as Zig: line {d} ({s})", .{ p.rel, e.line, e.tag }),
     };
-    try run.charge(pos, got.tokens + got.nodes);
+    try run.charge(pos, root.tokens + root.nodes);
+    const got = if (container) |name| switch (za.members(sa, src, name) catch return run.oom(pos)) {
+        .ok => |ok| ok,
+        .parse_error => unreachable, // the root parsed
+        .no_container => return run.fail(pos, .argument, "`zig_decls`: {s} has no container `{s}` (a top-level `const {s} = struct {{...}}`, or a union's, an enum's, an opaque's)", .{ p.rel, name, name }),
+    } else root;
+    if (container != null) try run.charge(pos, got.tokens + got.nodes);
     // **WHAT EACH ONE USES** (the seam finder's graph): the top-level names
     // a declaration's span uses, by the one reading of identifiers (so never
     // a field's, a member's after `.`, a comment's or a string's), not its
@@ -223,10 +243,20 @@ pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const 
     };
     const ids = za.identifiers(sa, toks) catch return run.oom(pos);
     try run.charge(pos, ids.len);
+    // The names a use can be: the file's top level, and, in a container,
+    // its members (never the container itself: every method names it).
     var top: std.StringHashMapUnmanaged(void) = .empty;
-    for (got.decls) |d| if (d.name_form == .identifier and d.kind != .@"test" and d.kind != .field) {
+    for (root.decls) |d| if (d.name_form == .identifier and d.kind != .@"test" and d.kind != .field) {
         top.put(sa, d.name, {}) catch return run.oom(pos);
     };
+    var member: std.StringHashMapUnmanaged(void) = .empty;
+    if (container) |name| {
+        _ = top.remove(name);
+        for (got.decls) |d| if (d.name_form == .identifier and d.kind != .@"test") {
+            top.put(sa, d.name, {}) catch return run.oom(pos);
+            member.put(sa, d.name, {}) catch return run.oom(pos);
+        };
+    }
     const list = try run.newTable(pos);
     list.kind = .list;
     var k: usize = 0;
@@ -251,6 +281,28 @@ pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const 
         const uses = try run.newTable(pos);
         uses.kind = .list;
         for (names.items) |n| uses.list.append(a, .{ .string = try keep(run, pos, n) }) catch return run.oom(pos);
+        // **WHAT IT REACHES THROUGH A `.`**, in a container: its members a
+        // method touches as `self.x` (or `other.x`): by name, not by type.
+        var reached: std.ArrayList([]const u8) = .empty;
+        if (container != null) {
+            var rseen: std.StringHashMapUnmanaged(void) = .empty;
+            for (toks, 0..) |tk, ti| {
+                if (tk.start < d.start or tk.start >= d.stop) continue;
+                if (tk.tag != .identifier or ti == 0 or toks[ti - 1].tag != .period) continue;
+                const name = src[tk.start..tk.end];
+                if (std.mem.eql(u8, name, d.name) or !member.contains(name) or rseen.contains(name)) continue;
+                rseen.put(sa, name, {}) catch return run.oom(pos);
+                reached.append(sa, name) catch return run.oom(pos);
+            }
+            std.mem.sort([]const u8, reached.items, {}, struct {
+                fn lt(_: void, x: []const u8, y: []const u8) bool {
+                    return std.mem.lessThan(u8, x, y);
+                }
+            }.lt);
+        }
+        const reaches = try run.newTable(pos);
+        reaches.kind = .list;
+        for (reached.items) |n| reaches.list.append(a, .{ .string = try keep(run, pos, n) }) catch return run.oom(pos);
         const m = try run.newTable(pos);
         m.kind = .map;
         try put(run, pos, m, "kind", .{ .string = @tagName(d.kind) });
@@ -270,7 +322,61 @@ pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const 
             try put(run, pos, m, "comment_above", .{ .table = cm });
         }
         try put(run, pos, m, "uses", .{ .table = uses });
+        if (container != null) try put(run, pos, m, "reaches", .{ .table = reaches });
         list.list.append(a, .{ .table = m }) catch return run.oom(pos);
+    }
+    return .{ .table = list };
+}
+
+/// **`host("zig_tokens", path[, {tag}])`**: the file's tokens, by the one
+/// tokenizer (`za.tokens`, which `zig_rename` and `zig_move` read with):
+/// each `{tag, text, line}`, `tag` std.zig.Token.Tag's name. A plain
+/// comment is no token (a doc comment is); a string is one token, its words
+/// none. `{tag = "identifier"}` keeps one kind, so a script that wants
+/// names does not hold every token. Charged a step a token.
+pub fn tokens(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+    if (args.len < 1 or args.len > 2) return run.fail(pos, .argument, "`zig_tokens` takes a path and options, given {d} arguments", .{args.len});
+    var only: ?za.Tag = null;
+    if (args.len == 2) switch (args[1]) {
+        .table => |t| if (t.kind == .map) {
+            for (t.map.keys(), t.map.values()) |k, x| {
+                if (!std.mem.eql(u8, k, "tag")) return run.fail(pos, .argument, "`zig_tokens` takes `tag`, not `{s}`", .{k});
+                const s = switch (x) {
+                    .string => |v| v,
+                    else => return run.fail(pos, .type, "`zig_tokens`' `tag` is a tag's name, not {s}", .{x.typeName()}),
+                };
+                only = std.meta.stringToEnum(za.Tag, s) orelse return run.fail(pos, .argument, "`zig_tokens`: no token tag `{s}` (std.zig.Token.Tag: `identifier`, `keyword_fn`, `string_literal`, ...)", .{s});
+            }
+        } else return run.fail(pos, .type, "`zig_tokens`' options are a map, not a list", .{}),
+        else => |v| return run.fail(pos, .type, "`zig_tokens`' options are a map, not {s}", .{v.typeName()}),
+    };
+    const hub = script.builtins_store;
+    const rd = script.builtins_read;
+    const p = try hub.pathArg(run, pos, .host, args[0], false);
+    try hub.countRead(run, pos);
+    const size = try rd.fileSize(run, pos, .host, p);
+    var scratch: Scratch = undefined;
+    const sa = scratch.init(backing, run);
+    defer scratch.deinit();
+    const was = try rd.readSizedIn(sa, run, pos, .host, p, size, 0, null);
+    const src = sa.dupeZ(u8, was) catch return run.oom(pos);
+    try script.builtins.chargeBytes(run, pos, src.len);
+    const toks = switch (za.tokens(sa, src) catch return run.oom(pos)) {
+        .ok => |ok| ok,
+        .invalid => |n| return run.fail(pos, .argument, "`zig_tokens`: {s} does not tokenize as Zig at line {d}", .{ p.rel, n }),
+    };
+    try run.charge(pos, toks.len);
+    const starts = za.lineStarts(sa, src) catch return run.oom(pos);
+    const list = try run.newTable(pos);
+    list.kind = .list;
+    for (toks) |tk| {
+        if (only) |o| if (tk.tag != o) continue;
+        const m = try run.newTable(pos);
+        m.kind = .map;
+        try put(run, pos, m, "tag", .{ .string = @tagName(tk.tag) });
+        try put(run, pos, m, "text", .{ .string = try keep(run, pos, src[tk.start..tk.end]) });
+        try put(run, pos, m, "line", .{ .int = @intCast(za.lineOf(starts, tk.start)) });
+        list.list.append(run.alloc, .{ .table = m }) catch return run.oom(pos);
     }
     return .{ .table = list };
 }
