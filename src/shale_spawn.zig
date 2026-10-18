@@ -457,18 +457,17 @@ test "spawn: a TERM to shale while a program runs ends the program's group and s
     try testing.expect(!linux.sigismember(&now, .TERM));
 }
 
-/// A sink that fails at the first output (as the keep does at the host's
-/// cap), noting the program's pid from `pid-sleep`'s line.
-const Refusing = struct {
-    pid: ?linux.pid_t = null,
-    pub const Error = error{OutOfMemory};
-    fn write(r: *Refusing, bytes: []const u8) Refusing.Error!void {
-        if (std.mem.startsWith(u8, bytes, "pid ")) r.pid = std.fmt.parseInt(linux.pid_t, std.mem.trimEnd(u8, bytes[4..], "\n"), 10) catch null;
-        return error.OutOfMemory;
-    }
-};
-
 test "spawn: a sink that fails ends the program's group and reaps it before the failure is said" {
+    // A sink that fails at the first output (as the keep does at the
+    // host's cap), noting the program's pid from `pid-sleep`'s line.
+    const Refusing = struct {
+        pid: ?linux.pid_t = null,
+        pub const Error = error{OutOfMemory};
+        fn write(r: *@This(), bytes: []const u8) error{OutOfMemory}!void {
+            if (std.mem.startsWith(u8, bytes, "pid ")) r.pid = std.fmt.parseInt(linux.pid_t, std.mem.trimEnd(u8, bytes[4..], "\n"), 10) catch null;
+            return error.OutOfMemory;
+        }
+    };
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var r: Refusing = .{};
     const env = [_][]const u8{"PATH=/usr/bin:/bin"};
