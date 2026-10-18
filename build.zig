@@ -179,9 +179,32 @@ pub fn build(b: *std.Build) void {
     // cheapest first. A sibling that is not there fails the step by name.
     // Not in `test`: it needs the siblings, and minutes. Run before a webbox
     // change is pushed to master.
-    const consumers = b.step("consumers", "Each application's own checks against this tree: metal-vmm's queue tool, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
+    const consumers = b.step("consumers", "This tree's own docs checked, then each application's own checks against this tree: metal-vmm's queue tool, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
     const here = b.build_root.path orelse ".";
-    var prev: ?*std.Build.Step = null;
+    // **THE DOCS' CITED PATHS AND NAMES** (metal-vmm QUEUE 237):
+    // tools/doc_check.shale, by this tree's own `shale`, from the folder
+    // that holds the repos: its fixtures first, then the docs. Fails on
+    // any finding. Each repo's gate checks its own (`only=<repo>`, through
+    // `zig build doc-check -- only=<repo>` here), never another's.
+    const docCheck = struct {
+        fn run(bb: *std.Build, bin: std.Build.LazyPath, parent: []const u8) *std.Build.Step.Run {
+            const r = bb.addSystemCommand(&.{ "sh", "-c", bb.fmt(
+                "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; cd '{s}' && " ++
+                    "\"$bin\" zig-webbox/tools/doc_check.shale self_test=1 && " ++
+                    "\"$bin\" --budget arena_bytes=2000000000 --budget steps=1000000000 --budget reads=1000000 --budget read_bytes=2000000000 --budget output_bytes=8000000 zig-webbox/tools/doc_check.shale \"$@\"",
+                .{parent},
+            ) });
+            r.addFileArg(bin);
+            r.has_side_effects = true;
+            r.stdio = .inherit;
+            return r;
+        }
+    }.run;
+    const parent = b.pathJoin(&.{ here, ".." });
+    // This tree's docs, first: the cheapest step, and webbox's own.
+    const own_docs = docCheck(b, runner.getEmittedBin(), parent);
+    own_docs.addArg("only=zig-webbox");
+    var prev: ?*std.Build.Step = &own_docs.step;
     // **metal-vmm's queue tool, by this tree's own `shale`** (metal-vmm
     // QUEUE 233): its Shale tests on its fixtures, first, as the cheapest.
     {
@@ -195,6 +218,7 @@ pub fn build(b: *std.Build) void {
         run.addFileArg(runner.getEmittedBin());
         run.has_side_effects = true;
         run.stdio = .inherit;
+        if (prev) |p| run.step.dependOn(p);
         prev = &run.step;
     }
     for ([_]struct { repo: []const u8, cmd: []const u8 }{
@@ -216,23 +240,11 @@ pub fn build(b: *std.Build) void {
     }
     consumers.dependOn(prev.?);
 
-    // **THE DOCS' CITED PATHS AND NAMES** (metal-vmm QUEUE 237):
-    // tools/doc_check.shale, by this tree's own `shale`, from the folder
-    // that holds the repos: its fixtures first, then every repo's docs.
-    // Fails on any finding. In no gate yet (Steve decides when);
+    // Every repo's docs, or one's (`-- only=<repo>`, each repo's gate);
     // `-- at=dir/ show=N` pass through.
     {
-        const parent = b.pathJoin(&.{ here, ".." });
-        const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
-            "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; cd '{s}' && " ++
-                "\"$bin\" zig-webbox/tools/doc_check.shale self_test=1 && " ++
-                "\"$bin\" --budget arena_bytes=2000000000 --budget steps=1000000000 --budget reads=1000000 --budget read_bytes=2000000000 --budget output_bytes=8000000 zig-webbox/tools/doc_check.shale \"$@\"",
-            .{parent},
-        ) });
-        run.addFileArg(runner.getEmittedBin());
+        const run = docCheck(b, runner.getEmittedBin(), parent);
         if (b.args) |args| run.addArgs(args);
-        run.has_side_effects = true;
-        run.stdio = .inherit;
-        b.step("doc-check", "Every cited path in the repos' docs resolves and every cited name is there (tools/doc_check.shale; needs the sibling checkouts)").dependOn(&run.step);
+        b.step("doc-check", "Every cited path in the repos' docs resolves and every cited name is there; `-- only=<repo>` for one repo's (tools/doc_check.shale; needs the sibling checkouts)").dependOn(&run.step);
     }
 }

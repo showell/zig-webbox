@@ -37,6 +37,9 @@
 const REPOS = {"metal-vmm", "zig-webbox", "angry-gopher", "zig-metal-unikernel", "dog-park", "observatory", "zig-coverage-sdk", "essay-repl-server"}
 const EXTS = {".zig", ".shale", ".md", ".sh", ".py", ".json", ".zon", ".js", ".html", ".css", ".txt", ".conf", ".toml"}
 const SHOW = parse_int(arg("show", "20"))
+-- `only=<repo>`: that repo's docs alone, still resolved against every
+-- sibling (each repo's gate checks its own docs, never another's).
+const ONLY = arg("only", "")
 -- A host's data, never a repo's: a path under one of these is passed by.
 -- A bare data file's name (`polls.txt`) is still a finding.
 const DATA_ROOTS = {"data/", "auth/", "chat_root/", "claude-steve/"}
@@ -430,7 +433,7 @@ function check_all(at, repos)
   for repo in repos do
     local r = fresh()
     r.bases = bases
-    if is_dir(at .. repo) then
+    if is_dir(at .. repo) and (ONLY == "" or repo == ONLY) then
       for p in tracked[repo] do
         if ends_with(p, ".md") and not history(p) then
           r.docs = r.docs + 1
@@ -493,7 +496,7 @@ function report(all, repos)
         end
         if i > SHOW then print("  " .. k .. "  ... and " .. (i - SHOW) .. " more") end
       end
-    else
+    elseif ONLY == "" then
       print(repo .. ": not here")
     end
   end
@@ -591,7 +594,9 @@ end
 if arg("self_test", "") == "1" then
   self_test()
 else
-  local total = report(check_all(arg("at", ""), REPOS), REPOS)
+  local checked = check_all(arg("at", ""), REPOS)
+  if ONLY ~= "" and not has_key(checked, ONLY) then fail("doc check: `only=" .. ONLY .. "` is not one of the repos beside it") end
+  local total = report(checked, REPOS)
   if total > 0 then fail("doc check: " .. total .. " findings") end
   print("doc check: every cited path resolves and every cited name is there")
 end
