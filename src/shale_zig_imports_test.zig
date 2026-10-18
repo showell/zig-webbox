@@ -70,3 +70,37 @@ test "zig_imports: a step a token and a node, more for a file four times the siz
         return error.TestUnexpectedResult;
     }
 }
+
+test "zig_decls and zig_imports: a parse lives for its call; the run keeps only what the script is given" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    // A large file of the repo's own, read again and again, as test_roots.shale does.
+    try t.put("big.zig", @embedFile("shale_host_linux.zig"));
+    const Use = struct {
+        fn of(tt: *T, call: []const u8, n: usize) !usize {
+            var src: std.ArrayList(u8) = .empty;
+            defer src.deinit(testing.allocator);
+            try src.print(testing.allocator, "local kept = 0\nfor i = 1, {d} do kept = kept + #{s}(\"big.zig\") end\nprint(kept > 0)", .{ n, call });
+            var r = tt.run(src.items, .atomic);
+            defer r.deinit();
+            if (r.stop) |s| {
+                std.debug.print("{s}: {s}\n", .{ call, s.message });
+                return error.TestUnexpectedResult;
+            }
+            return r.arena_bytes;
+        }
+    };
+    const size = @embedFile("shale_host_linux.zig").len;
+    for ([_][]const u8{ "zig_decls", "zig_imports" }) |call| {
+        const one = try Use.of(&t, call, 1);
+        const ten = try Use.of(&t, call, 10);
+        // Each call's read, tokens and Ast go when it returns, and the run
+        // keeps the list it gave: zig_decls kept about ten times the file a
+        // call, and keeps under twice it.
+        testing.expect((ten - one) / 9 < 2 * size) catch |e| {
+            std.debug.print("{s}: a call keeps {d} bytes of a {d}-byte file\n", .{ call, (ten - one) / 9, size });
+            return e;
+        };
+    }
+}

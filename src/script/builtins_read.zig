@@ -82,16 +82,23 @@ fn readOr(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// A read of a file whose size is known, from `offset`, `n` bytes or to
 /// its end.
 pub fn readSized(run: *Run, pos: ast.Pos, b: B, p: Path, size: u64, offset: u64, n: ?u64) Error!Value {
-    if (offset >= size) return .{ .string = "" };
+    return .{ .string = try readSizedIn(run.alloc, run, pos, b, p, size, offset, n) };
+}
+
+/// `readSized`'s bytes in `into`: a host's own memory, for a read the
+/// script is never given (a parse's source, freed with the parse).
+/// Charged as any read.
+pub fn readSizedIn(into: std.mem.Allocator, run: *Run, pos: ast.Pos, b: B, p: Path, size: u64, offset: u64, n: ?u64) Error![]const u8 {
+    if (offset >= size) return "";
     const want = @min(n orelse size - offset, size - offset);
     if (want > run.budgets.call_bytes) return run.fail(pos, .argument, "`{s}` brings at most {d} bytes in one call, and this would be {d}: read it in parts, `read(p, offset, n)`", .{ @tagName(b), run.budgets.call_bytes, want });
     if (want > run.budgets.read_bytes -| run.read_bytes) return run.budgetStop(pos, .read_bytes);
-    const buf = run.alloc.alloc(u8, @intCast(want)) catch return run.oom(pos);
+    const buf = into.alloc(u8, @intCast(want)) catch return run.oom(pos);
     const got = store.readAt(run.io, run.alloc, p.full, offset, buf) catch |e| return storeFailed(run, pos, b, p.rel, e);
     run.tally(got);
     run.read_bytes += got;
     try bi.chargeBytes(run, pos, got);
-    return .{ .string = buf[0..got] };
+    return buf[0..got];
 }
 
 // ── lines of a file, a part at a time (QUEUE 229, chunk 3) ──────────────

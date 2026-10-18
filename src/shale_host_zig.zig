@@ -34,6 +34,33 @@ pub const Plan = struct { now: []const u8, spans: []const Span, renamed: usize, 
 pub const Outcome = union(enum) { done: Plan, declaration: usize, invalid: usize };
 
 const za = @import("shale_zig_ast.zig");
+const hl = @import("shale_host_linux.zig");
+
+/// **A PARSE LIVES FOR ITS CALL** (the host hunt: 236's test_roots.shale,
+/// `zig_decls` and `zig_imports` over 100 files, needed a 2 GB arena). The
+/// source's NUL-ended copy, its tokens, its Ast and the plan grow in an
+/// arena over the host's allocator, capped by the run's arena budget while
+/// they live (`Capped`) and freed when the call returns. The run's arena
+/// keeps what the script is given, and what a change hands core.
+const Scratch = struct {
+    capped: hl.Capped,
+    arena: std.heap.ArenaAllocator,
+
+    fn init(s: *Scratch, backing: std.mem.Allocator, run: *Run) std.mem.Allocator {
+        s.capped = .{ .backing = backing, .most = run.budgets.arena_bytes };
+        s.arena = std.heap.ArenaAllocator.init(s.capped.allocator());
+        return s.arena.allocator();
+    }
+
+    fn deinit(s: *Scratch) void {
+        s.arena.deinit();
+    }
+};
+
+/// `x` copied into the run's arena: what the script keeps of a parse.
+fn keep(run: *Run, pos: ast.Pos, x: []const u8) Error![]const u8 {
+    return run.alloc.dupe(u8, x) catch run.oom(pos);
+}
 
 /// **THE RENAME, PLANNED**: pure, over `src`'s tokens and the one reading
 /// of identifiers (`za.identifiers`, which `zig_move` reads with too).
@@ -120,7 +147,7 @@ fn changes(run: *Run, pos: ast.Pos, name: []const u8) Error!void {
     if (run.read_only) return run.fail(pos, .argument, "`{s}` changes the store, and a background run only reads: send it as an `atomic` run", .{name});
 }
 
-pub fn rename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+pub fn rename(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     try changes(run, pos, "zig_rename");
     if (args.len != 3) return run.fail(pos, .argument, "`zig_rename` takes a path, `{{from, to}}` and options, given {d}", .{args.len});
     const hub = script.builtins_store;
@@ -141,16 +168,19 @@ pub fn rename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const size = try rd.fileSize(run, pos, .host, p);
     const was = (try rd.readSized(run, pos, .host, p, size, 0, null)).string;
     const a = run.alloc;
-    const src = a.dupeZ(u8, was) catch return run.oom(pos);
+    var scratch: Scratch = undefined;
+    const sa = scratch.init(backing, run);
+    defer scratch.deinit();
+    const src = sa.dupeZ(u8, was) catch return run.oom(pos);
     try script.builtins.chargeBytes(run, pos, src.len);
-    const got = plan(a, src, from, to, lines) catch return run.oom(pos);
+    const got = plan(sa, src, from, to, lines) catch return run.oom(pos);
     const done = switch (got) {
         .done => |d| d,
         .declaration => |n| return run.fail(pos, .argument, "`zig_rename`: {s} declares `{s}` at line {d}, and `{s}` is qualified, which cannot be declared: rename the declaration itself, or leave it out with `lines`; nothing written", .{ p.rel, from, n, to }),
         .invalid => |n| return run.fail(pos, .argument, "`zig_rename`: {s} does not tokenize as Zig at line {d}; nothing written", .{ p.rel, n }),
     };
     try run.charge(pos, done.tokens);
-    if (done.renamed > 0) try script.builtins_change.rewrite(run, pos, p, was, done.now, done.spans);
+    if (done.renamed > 0) try script.builtins_change.rewrite(run, pos, p, was, try keep(run, pos, done.now), a.dupe(Span, done.spans) catch return run.oom(pos));
     const t = try run.newTable(pos);
     t.kind = .map;
     t.map.put(a, "renamed", .{ .int = @intCast(done.renamed) }) catch return run.oom(pos);
@@ -162,18 +192,21 @@ pub fn rename(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// Zig's parser (shale_zig_ast.zig), as maps, in file order. Charged: the
 /// read, the `dupeZ`, a step a token and a step an Ast node. A parse error
 /// stops, naming its first line.
-pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+pub fn decls(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (args.len != 1) return run.fail(pos, .argument, "`zig_decls` takes a path, given {d} arguments", .{args.len});
     const hub = script.builtins_store;
     const rd = script.builtins_read;
     const p = try hub.pathArg(run, pos, .host, args[0], false);
     try hub.countRead(run, pos);
     const size = try rd.fileSize(run, pos, .host, p);
-    const was = (try rd.readSized(run, pos, .host, p, size, 0, null)).string;
     const a = run.alloc;
-    const src = a.dupeZ(u8, was) catch return run.oom(pos);
+    var scratch: Scratch = undefined;
+    const sa = scratch.init(backing, run);
+    defer scratch.deinit();
+    const was = try rd.readSizedIn(sa, run, pos, .host, p, size, 0, null);
+    const src = sa.dupeZ(u8, was) catch return run.oom(pos);
     try script.builtins.chargeBytes(run, pos, src.len);
-    const got = switch (za.decls(a, src) catch return run.oom(pos)) {
+    const got = switch (za.decls(sa, src) catch return run.oom(pos)) {
         .ok => |ok| ok,
         .parse_error => |e| return run.fail(pos, .argument, "`zig_decls`: {s} does not parse as Zig: line {d} ({s})", .{ p.rel, e.line, e.tag }),
     };
@@ -184,7 +217,7 @@ pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         const m = try run.newTable(pos);
         m.kind = .map;
         try put(run, pos, m, "kind", .{ .string = @tagName(d.kind) });
-        try put(run, pos, m, "name", .{ .string = d.name });
+        try put(run, pos, m, "name", .{ .string = try keep(run, pos, d.name) });
         try put(run, pos, m, "name_form", .{ .string = @tagName(d.name_form) });
         try put(run, pos, m, "visibility", .{ .string = @tagName(d.visibility) });
         try put(run, pos, m, "linkage", .{ .string = @tagName(d.linkage) });
@@ -204,9 +237,11 @@ pub fn decls(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     return .{ .table = list };
 }
 
-/// A Zig file read whole and NUL-ended for the parser, the read and the
-/// copy charged; null for one that is not there, when that is allowed.
-fn readZig(run: *Run, pos: ast.Pos, p: script.builtins_store.Path, missing_ok: bool) Error!?[:0]const u8 {
+/// A Zig file read whole (`was`, in the run's arena when `kept`: a change
+/// hands it core) and NUL-ended for the parser (`src`, in `sa`), the read and the copy charged; null for one
+/// that is not there, when that is allowed.
+const Read = struct { was: []const u8, src: [:0]const u8 };
+fn readZig(sa: std.mem.Allocator, run: *Run, pos: ast.Pos, p: script.builtins_store.Path, missing_ok: bool, kept: bool) Error!?Read {
     const hub = script.builtins_store;
     try hub.countRead(run, pos);
     if (missing_ok) {
@@ -214,10 +249,10 @@ fn readZig(run: *Run, pos: ast.Pos, p: script.builtins_store.Path, missing_ok: b
         if (st == null) return null;
     }
     const size = try script.builtins_read.fileSize(run, pos, .host, p);
-    const was = (try script.builtins_read.readSized(run, pos, .host, p, size, 0, null)).string;
-    const src = run.alloc.dupeZ(u8, was) catch return run.oom(pos);
+    const was = try script.builtins_read.readSizedIn(if (kept) run.alloc else sa, run, pos, .host, p, size, 0, null);
+    const src = sa.dupeZ(u8, was) catch return run.oom(pos);
     try script.builtins.chargeBytes(run, pos, src.len);
-    return src;
+    return .{ .was = was, .src = src };
 }
 
 fn put(run: *Run, pos: ast.Pos, t: *script.value.Table, k: []const u8, v: Value) Error!void {
@@ -231,8 +266,8 @@ fn nameLines(run: *Run, pos: ast.Pos, items: anytype) Error!Value {
     for (items) |x| {
         const m = try run.newTable(pos);
         m.kind = .map;
-        try put(run, pos, m, "name", .{ .string = x.name });
-        if (@hasField(@TypeOf(x), "target")) try put(run, pos, m, "target", .{ .string = x.target });
+        try put(run, pos, m, "name", .{ .string = try keep(run, pos, x.name) });
+        if (@hasField(@TypeOf(x), "target")) try put(run, pos, m, "target", .{ .string = try keep(run, pos, x.target) });
         try put(run, pos, m, "line", .{ .int = @intCast(x.line) });
         list.list.append(run.alloc, .{ .table = m }) catch return run.oom(pos);
     }
@@ -245,7 +280,7 @@ fn nameLines(run: *Run, pos: ast.Pos, items: anytype) Error!Value {
 /// `from` after, each through core's `rewrite`, so a stop between them
 /// leaves the declarations in both, never in neither. Charged: the reads,
 /// the copies, a step a token and a node of both files.
-pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+pub fn move(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     const zm = @import("shale_zig_move.zig");
     try changes(run, pos, "zig_move");
     if (args.len != 3) return run.fail(pos, .argument, "`zig_move` takes `from`, `to` and `{{names, opts}}`, given {d}", .{args.len});
@@ -301,11 +336,16 @@ pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         },
         else => |v| return run.fail(pos, .type, "`zig_move`'s options are a map, not {s}", .{v.typeName()}),
     }
-    const from_src = (try readZig(run, pos, p, false)).?;
-    const to_src = (try readZig(run, pos, q, true)) orelse "";
-    const done = switch (zm.move(a, from_src, to_src, wants.items, mode, after) catch return run.oom(pos)) {
+    var scratch: Scratch = undefined;
+    const sa = scratch.init(backing, run);
+    defer scratch.deinit();
+    const from_read = (try readZig(sa, run, pos, p, false, true)).?;
+    const to_read: Read = (try readZig(sa, run, pos, q, true, true)) orelse .{ .was = "", .src = "" };
+    const from_src = from_read.was;
+    const to_src = to_read.was;
+    const done = switch (zm.move(sa, from_read.src, to_read.src, wants.items, mode, after) catch return run.oom(pos)) {
         .done => |d| d,
-        .refused => |why| return run.fail(pos, .argument, "`zig_move` {s} to {s}: {s}", .{ p.rel, q.rel, why }),
+        .refused => |why| return run.fail(pos, .argument, "`zig_move` {s} to {s}: {s}", .{ p.rel, q.rel, try keep(run, pos, why) }),
     };
     try run.charge(pos, done.work);
     // Both files may change, or neither is written.
@@ -324,10 +364,10 @@ pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (done.to_now.len + done.from_now.len > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
     const to_spans = try spans(run, pos, done.to_spans);
     const from_spans = try spans(run, pos, done.from_spans);
-    try script.builtins_change.rewrite(run, pos, q, to_src, done.to_now, to_spans);
+    try script.builtins_change.rewrite(run, pos, q, to_src, try keep(run, pos, done.to_now), to_spans);
     // What can still stop it there (the store, the output's budget) is said
     // with what was written: `to` holds the copies, `from` still has them.
-    script.builtins_change.rewrite(run, pos, p, from_src, done.from_now, from_spans) catch |e| {
+    script.builtins_change.rewrite(run, pos, p, from_src, try keep(run, pos, done.from_now), from_spans) catch |e| {
         if (e == error.Stop) if (run.stop) |*s| {
             s.message = std.fmt.allocPrint(a, "{s}; `zig_move` wrote {s} first, so it holds the moved declarations, which {s} still has: take {s} back (`git checkout --`) before moving again", .{ s.message, q.rel, p.rel, q.rel }) catch s.message;
         };
@@ -349,12 +389,15 @@ pub fn move(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 /// file `found` or `missing` beside the importer, or a `module` (a target
 /// with no extension). Charged: the read, the copy, a step a token and a
 /// node, and a step a call for its look at the file.
-pub fn imports(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
+pub fn imports(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     if (args.len != 1) return run.fail(pos, .argument, "`zig_imports` takes a path, given {d} arguments", .{args.len});
     const a = run.alloc;
     const p = try script.builtins_store.pathArg(run, pos, .host, args[0], false);
-    const src = (try readZig(run, pos, p, false)).?;
-    const got = switch (webbox.zig_refs.refs(a, src) catch return run.oom(pos)) {
+    var scratch: Scratch = undefined;
+    const sa = scratch.init(backing, run);
+    defer scratch.deinit();
+    const src = (try readZig(sa, run, pos, p, false, false)).?.src;
+    const got = switch (webbox.zig_refs.refs(sa, src) catch return run.oom(pos)) {
         .ok => |ok| ok,
         .parse_error => |line| return run.fail(pos, .argument, "`zig_imports`: {s} does not parse as Zig: line {d}", .{ p.rel, line }),
     };
@@ -364,15 +407,15 @@ pub fn imports(run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
     list.kind = .list;
     for (got.refs) |r| {
         const file: []const u8 = if (std.fs.path.extension(r.target).len == 0) "module" else file: {
-            const full = std.fs.path.resolvePosix(a, &.{ dir, r.target }) catch return run.oom(pos);
-            const st = webbox.store.statOrNull(run.io, a, full) catch |e| return script.builtins_store.storeFailed(run, pos, .host, r.target, e);
+            const full = std.fs.path.resolvePosix(sa, &.{ dir, r.target }) catch return run.oom(pos);
+            const st = webbox.store.statOrNull(run.io, sa, full) catch |e| return script.builtins_store.storeFailed(run, pos, .host, r.target, e);
             break :file if (st != null) "found" else "missing";
         };
         const m = try run.newTable(pos);
         m.kind = .map;
         try put(run, pos, m, "kind", .{ .string = @tagName(r.kind) });
-        try put(run, pos, m, "target", .{ .string = r.target });
-        try put(run, pos, m, "name", .{ .string = r.name });
+        try put(run, pos, m, "target", .{ .string = try keep(run, pos, r.target) });
+        try put(run, pos, m, "name", .{ .string = try keep(run, pos, r.name) });
         try put(run, pos, m, "line", .{ .int = @intCast(r.line) });
         try put(run, pos, m, "file", .{ .string = file });
         list.list.append(a, .{ .table = m }) catch return run.oom(pos);

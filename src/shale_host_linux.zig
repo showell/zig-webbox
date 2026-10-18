@@ -343,10 +343,10 @@ fn call(ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []cons
     }
     if (std.mem.eql(u8, name, "run")) return runProgram(h, run, pos, args);
     if (std.mem.startsWith(u8, name, "job_")) return @import("shale_host_jobs.zig").call(h, run, pos, name, args);
-    if (std.mem.eql(u8, name, "zig_rename")) return @import("shale_host_zig.zig").rename(run, pos, args);
-    if (std.mem.eql(u8, name, "zig_decls")) return @import("shale_host_zig.zig").decls(run, pos, args);
-    if (std.mem.eql(u8, name, "zig_move")) return @import("shale_host_zig.zig").move(run, pos, args);
-    if (std.mem.eql(u8, name, "zig_imports")) return @import("shale_host_zig.zig").imports(run, pos, args);
+    if (std.mem.eql(u8, name, "zig_rename")) return @import("shale_host_zig.zig").rename(h.alloc, run, pos, args);
+    if (std.mem.eql(u8, name, "zig_decls")) return @import("shale_host_zig.zig").decls(h.alloc, run, pos, args);
+    if (std.mem.eql(u8, name, "zig_move")) return @import("shale_host_zig.zig").move(h.alloc, run, pos, args);
+    if (std.mem.eql(u8, name, "zig_imports")) return @import("shale_host_zig.zig").imports(h.alloc, run, pos, args);
     // Whether a path may change: what `edits_all` asks of every file first.
     if (std.mem.eql(u8, name, "may_change")) {
         if (args.len != 1) return run.fail(pos, .argument, "`may_change` takes one path, given {d}", .{args.len});
@@ -709,14 +709,14 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
 /// every free given back, and at most `most` bytes live at once (the run's
 /// arena budget). A tail of 3 over a 10 GB log holds three lines; a keep
 /// that needs more than the budget stops the run (`streamOver`).
-const Capped = struct {
+pub const Capped = struct {
     backing: std.mem.Allocator,
     most: usize,
     live: usize = 0,
     /// Whether an allocation was refused for the cap, not by the backing.
     hit: bool = false,
 
-    fn allocator(c: *Capped) std.mem.Allocator {
+    pub fn allocator(c: *Capped) std.mem.Allocator {
         return .{ .ptr = c, .vtable = &vtable };
     }
 
