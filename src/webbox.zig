@@ -40,24 +40,13 @@ pub const bus = @import("bus.zig");
 pub const sse = @import("sse.zig");
 /// The counting allocator under everything long-lived: live bytes, for leaks.
 pub const mem_meter = @import("mem_meter.zig");
-/// Shale, the script language for a site's own data (metal-vmm QUEUE 199):
-/// `script.run` parses and runs one script inside its budgets, every effect
-/// through `store`.
-pub const script = @import("script/script.zig");
-/// A signed script run on the live site: the envelope, its signature, the
-/// sequence number, the log and the reply behind an application's
-/// `POST /admin/script` (metal-vmm QUEUE 200).
-pub const script_route = @import("script_route.zig");
-/// **THE INSTALLED SUITE** (metal-vmm QUEUE 229, chunk 6): an application's
-/// scripts, run on a schedule as background runs, their last output kept.
-pub const shale_suite = @import("shale_suite.zig");
 /// What the host says about itself, for a page that shows the host's facts.
 pub const host_facts = @import("host_facts.zig");
 /// The library's number parses that no request reaches, for an
 /// application's request-edge check (edge_sites.zig).
 pub const edge_sites = @import("edge_sites.zig");
 /// A Zig file's `@import`s and `@embedFile`s, from Zig's parser: the library
-/// check's reading, and Shale's `zig_imports` on Linux.
+/// check's reading, and shale's `zig_imports` on Linux.
 pub const zig_refs = @import("zig_refs.zig");
 /// One GET from the application, through its host (host_fetch.zig).
 pub const host_fetch = @import("host_fetch.zig");
@@ -80,10 +69,6 @@ pub const client_address = @import("client_address.zig");
 pub const free_space = @import("free_space.zig");
 
 test {
-    _ = script;
-    _ = script_route;
-    _ = shale_suite;
-    _ = @import("script_route_test.zig");
     _ = @import("library_test.zig");
     _ = site;
     _ = body;

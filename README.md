@@ -57,74 +57,34 @@ and its `Host`, and `src/wake.zig`;** this is the map.
 
 ## Scripts: Shale
 
-`webbox.script` (`src/script/`) runs **Shale**, a small language for a
-site's own data. You explore the store and print, read the output, then
-write a script that changes things. It has Lua's look and smaller
-semantics of its own. Every effect goes through webbox's `store`, so a
-script does the same on Linux and metal, and every run stays inside its
-budgets. A script **just runs**: a stopped run keeps what it already did,
-and its effects log says what.
-
-**The reference is [docs/SHALE.md](docs/SHALE.md):**
-- the language and its grammar;
-- every builtin, with its cost and its errors;
-- the budgets and what each charges;
-- the store and its confinement;
-- the runner (`zig build script`) and the signed route on the live site
-  (`script_route`, `zig build shale-sign`);
-- a short tutorial;
-- a cookbook of operator scripts, each tested against a store shaped like
-  angry-gopher's data;
-- what was decided and refused.
-
-    script.run(io, backing_allocator, root, source, budgets, now, out) -> Result
+**Shale**, the script language for a site's own data, is its own repo,
+[shale](https://github.com/showell/shale) (`../shale`), built on this
+library's `store`: an application takes its `shale` module beside
+`webbox`. It lived here (`src/script/`) until 2026-10-18; its history is
+this repo's (`git log -- src/script`).
 
 ## Checks
 
-    zig build test          # every test but the expensive ones: about 30 s
-    zig build consumers     # the applications' own checks against this tree: minutes
-    zig build fuzz          # the expensive fuzzes and sweeps, for a bug hunt
-    zig build doc-check     # every repo's docs: each cited path and name is there
+    zig build test          # the library's tests: seconds
+    zig build consumers     # its docs, then the consumers' own checks against this tree: minutes
 
 **`test`** includes the library's own shape (`src/library_test.zig`: what
 each root reaches it names, the modules each half may import, no page
 embedded, every named module in its test block, `Io` from `host_io`).
-**`consumers`** runs, against this checkout and one at a time, the
+**`consumers`** runs shale's doc check on this repo's docs, then, against
+this checkout and one at a time, shale's `zig build test`, the
 Observatory's and dog-park's `zig build test`, zig-metal-unikernel's `zig
 build gopher` and angry-gopher's `ops/check_zig`; it needs those checkouts
 beside this one, and fails naming one that is missing. Run it before a change
 here goes to master: each of them caught a webbox change that `test` passed.
-**`fuzz`** runs the tests named `expensive fuzz: ...` or `expensive sweep:
-...`, which `test` counts as skipped: a fuzz hunts bugs once, and each bug it
-finds becomes a test of its own. `-Dtest-timing` prints each test's time,
-slowest first. **`doc-check`** runs `tools/doc_check.shale` (metal-vmm QUEUE
-237) from the folder that holds the repos, its fixtures first: in every
-repo's tracked docs but the history, each backticked or linked path must
-resolve (in the doc's repo, a sibling the line names, or one repo alone), and
-each `` `file`'s `name` `` must be in that file. It fails on any finding, and
-no gate runs it yet.
-
 `-Dtest-filter=TEXT` runs only the tests whose names contain it;
-`-Dscript-fuzz=N` sets how many sources the script fuzzer runs. Two more
-steps measure and are run by hand, by no tier: `zig build script-bench`
-(Shale's hot paths) and `zig build shale-scale` (the largest site each
-cookbook script fits). `zig build --help` lists every step and option.
+`-Dtest-timing` prints each test's time, slowest first.
 
 Others run these too: angry-gopher's `ops/check_zig` and zig-metal-unikernel's
 tier 3 both run `zig build test` here. And every file under the kernel's
 `src/pinned/` is a byte-for-byte copy of one here (`src/body.zig` as
 `webbox_body.zig`, `src/wake.zig` as `webbox_wake.zig`); its
 `zig build pinned` fails when a copy differs.
-
-## Docs
-
-- [docs/SHALE.md](docs/SHALE.md): Shale's reference (above).
-- [docs/SHALE-AGENTS.md](docs/SHALE-AGENTS.md): Shale as an agent's tool on
-  Linux.
-- [docs/SHALE-WANTS.md](docs/SHALE-WANTS.md): the ledger of what Claude
-  reached past Shale for.
-- [docs/designs/DESIGN-shale-dogfood.md](docs/designs/DESIGN-shale-dogfood.md):
-  the design for Claude working in Shale instead of bash and Python.
 
 ## Status
 

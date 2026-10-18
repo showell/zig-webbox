@@ -15,19 +15,12 @@ pub const Site = struct { file: []const u8, func: []const u8, why: []const u8 };
 
 /// Paths are from the library's `src/`.
 pub const unreachable_from_requests = [_]Site{
-    .{ .file = "script_route.zig", .func = "lastSequence", .why = "a sequence file the server wrote" },
-    .{ .file = "shale_sign.zig", .func = "main", .why = "the signer, on the box, not the server" },
-    .{ .file = "shale_fixture.zig", .func = "main", .why = "the program Shale's run tests spawn, not the server (zig-webbox, metal-vmm QUEUE 233)" },
-    .{ .file = "shale_jobs.zig", .func = "parseRecord", .why = "a job's record its reaper wrote, read by the Linux shale CLI, not the server (zig-webbox, metal-vmm QUEUE 233)" },
-    .{ .file = "shale_sign.zig", .func = "lastFor", .why = "the signer, on the box, not the server" },
     .{ .file = "log_view.zig", .func = "requestAt", .why = "the host's own log lines, not a request's" },
     .{ .file = "bus.zig", .func = "keepaliveSetting", .why = "the host's start-up setting, not a request's" },
     .{ .file = "counter.zig", .func = "current", .why = "a counter file the server wrote" },
     .{ .file = "linux_host.zig", .func = "portFrom", .why = "the environment" },
     .{ .file = "linux_fetch.zig", .func = "parseHead", .why = "the answer to the application's own fetch, not a request (zig-webbox, metal-vmm QUEUE 228)" },
     .{ .file = "site_secret.zig", .func = "previous", .why = "a secret file the server wrote" },
-    .{ .file = "script/lex.zig", .func = "number", .why = "an integer literal in a script's text, which only the admin's signed script brings (no edge request is signed); errors_test sends it the 64-bit edges" },
-    .{ .file = "script/builtins.zig", .func = "parseInteger", .why = "parse_int's text, from a script, which only the admin's signed script brings; builtins_test sends it the edges, past 64 bits among them" },
 };
 
 /// Whether a type's `{` comes next: at once (`error{`, `struct {`), or after

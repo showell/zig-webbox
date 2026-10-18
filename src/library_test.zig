@@ -5,16 +5,13 @@
 //! `webbox_linux.zig` (the Linux host), and for each:
 //!
 //! - every file reachable from it by a relative `@import` is one it names, or
-//!   in a folder it names a file of (Shale's `script/`), so membership is said
-//!   in one place;
+//!   in a folder it names a file of, so membership is said in one place;
 //! - its files import only the modules it may: `std`, `builtin` and `host_io`
 //!   for the portable half (and a test's `*_test_options`, which only
 //!   webbox's tests provide), and `webbox` too for the Linux half, which reaches
 //!   the portable half as that module, never by path; the portable half never
 //!   reaches the Linux one;
-//! - no file embeds a file, except Shale source beside it (the prelude, which
-//!   the library compiles and never serves): what a page serves is the
-//!   application's;
+//! - no file embeds a file: what a page serves is the application's;
 //! - every module the root names is in its `test {}` block, so its tests run
 //!   (`host_fetch`'s never did);
 //! - no file takes `Io` from std (an `Io` declared as std's): on metal it is
@@ -40,7 +37,7 @@ const roots = [_]Root{
 };
 
 /// Every `@import("x")` or `@embedFile("x")` target in `text`, from Zig's
-/// parser (zig_refs.zig, the reading Shale's `zig_imports` shares, metal-vmm
+/// parser (zig_refs.zig, the reading shale's `zig_imports` shares, metal-vmm
 /// QUEUE 235): a call split over lines is one, a comment's or a string's is
 /// none. A file the parser refuses is a problem of its own. This file's two
 /// other readers stay its own: a root's `pub const NAME = @import("....zig")`
@@ -177,7 +174,6 @@ fn problems(io: Io, a: std.mem.Allocator, dir: Io.Dir) ![]const []const u8 {
             for ([_][]const u8{ "const Io = " ++ "std.Io;", "const Io = " ++ "@import(\"std\").Io;" }) |alias| if (std.mem.indexOf(u8, body, alias) != null)
                 try out.append(a, try std.fmt.allocPrint(a, "{s} takes Io from std (`{s}`): a library file's Io is host_io's", .{ name, alias }));
             for (try refs(a, body, "@embedFile")) |e| {
-                if (std.mem.endsWith(u8, e, ".shale") and std.mem.indexOfScalar(u8, e, '/') == null) continue;
                 try out.append(a, try std.fmt.allocPrint(a, "{s} embeds {s}: what a page serves is the application's, not the library's", .{ name, e }));
             }
             for (try refs(a, body, "@import")) |dep| {
@@ -241,7 +237,7 @@ test "library: its check finds each kind of mistake, on planted trees" {
     try w(tmp.dir, "webbox_linux.zig", "pub const l = @import(\"l.zig\");\n\ntest {\n    _ = l;\n}\n");
     // A multiline string that holds an import is no import (the text
     // reader before 235 took it for one).
-    try w(tmp.dir, "a.zig", "const std = @import(\"std\");\nconst p = @embedFile(\"prelude.shale\");\nconst doc =\n    \\\\@import(\"../users.zig\")\n;\n");
+    try w(tmp.dir, "a.zig", "const std = @import(\"std\");\nconst doc =\n    \\\\@import(\"../users.zig\")\n;\n");
     try w(tmp.dir, "sub/s.zig", "const t = @import(\"t.zig\");\n// const u = @import(\"../users.zig\");\n");
     try w(tmp.dir, "sub/t.zig", "const io = @import(\n    \"host_io\",\n);\n");
     try w(tmp.dir, "l.zig", "const webbox = @import(\"webbox\");\nconst fixture = @import(\"l_test_options\").fixture;\n");
@@ -252,7 +248,7 @@ test "library: its check finds each kind of mistake, on planted trees" {
         .{ .file = "sub/t.zig", .body = "const u = @import(\"../users.zig\");\n", .says = "sub/t.zig imports users.zig, which webbox.zig does not name" },
         .{ .file = "sub/t.zig", .body = "const u = @import(\n    \"../users.zig\",\n);\n", .says = "sub/t.zig imports users.zig" },
         .{ .file = "a.zig", .body = "const p = @embedFile(\"chat.js\");\n", .says = "a.zig embeds chat.js" },
-        .{ .file = "a.zig", .body = "const p = @embedFile(\"../prelude.shale\");\n", .says = "a.zig embeds ../prelude.shale" },
+        .{ .file = "a.zig", .body = "const p = @embedFile(\"prelude.shale\");\n", .says = "a.zig embeds prelude.shale" },
         .{ .file = "a.zig", .body = "const l = @import(\"webbox_linux\");\n", .says = "a.zig imports the module webbox_linux" },
         .{ .file = "a.zig", .body = "const l = @import(\"l.zig\");\n", .says = "a.zig reaches the Linux half's l.zig" },
         .{ .file = "l.zig", .body = "const a = @import(\"a.zig\");\n", .says = "l.zig reaches a.zig by path" },

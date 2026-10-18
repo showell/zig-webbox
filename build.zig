@@ -29,97 +29,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // **THE SHALE RUNNER** (src/script_runner.zig): a script against a
-    // data folder, for writing and trying scripts on Linux.
-    //   SHALE_ROOT=<data> zig build script -- <file.shale>
-    const runner = b.addExecutable(.{ .name = "shale", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/script_runner.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "webbox", .module = webbox },
-            .{ .name = "webbox_linux", .module = webbox_linux },
-        },
-    }) });
-    b.installArtifact(runner);
-    const run_script = b.addRunArtifact(runner);
-    if (b.args) |a| run_script.addArgs(a);
-    b.step("script", "run a Shale script: zig build script -- [--root DIR] [--verbose] [--budget NAME=N]... [<file.shale> | -e SOURCE] [name=value ...]").dependOn(&run_script.step);
-
-    // **SHALE'S HOT PATHS, TIMED** (src/script_bench.zig): no tier runs it.
-    const script_bench = b.addExecutable(.{ .name = "script-bench", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/script_bench.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .imports = &.{.{ .name = "webbox", .module = b.addModule("webbox_release", .{
-            .root_source_file = b.path("src/webbox.zig"),
-            .imports = &.{.{ .name = "host_io", .module = host_io }},
-        }) }},
-    }) });
-    b.step("script-bench", "time Shale's hot paths (ReleaseSafe)").dependOn(&b.addRunArtifact(script_bench).step);
-
-    // **THE SITE'S REAL SCALE** (src/shale_scale.zig, metal-vmm QUEUE
-    // 209(g)): the largest site each cookbook script fits. No tier runs it.
-    const scale = b.addExecutable(.{ .name = "shale-scale", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/shale_scale.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .imports = &.{.{ .name = "webbox", .module = script_bench.root_module.import_table.get("webbox").? }},
-    }) });
-    b.step("shale-scale", "the largest site each cookbook script fits, under the site's budgets (ReleaseSafe)").dependOn(&b.addRunArtifact(scale).step);
-
-    // **THE SHALE SIGNER** (src/shale_sign.zig, metal-vmm QUEUE 200): the
-    // key pair, made once, and a script signed for a target.
-    //   zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]
-    const signer = b.addExecutable(.{ .name = "shale-sign", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/shale_sign.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "webbox", .module = webbox }},
-    }) });
-    b.installArtifact(signer);
-    const run_signer = b.addRunArtifact(signer);
-    if (b.args) |a| run_signer.addArgs(a);
-    b.step("shale-sign", "the Shale signer: zig build shale-sign -- keygen | pubkey | sign <file.shale> <target> [minutes]").dependOn(&run_signer.step);
-    const signer_test = b.addTest(.{ .root_module = signer.root_module });
-
-    // **SHALE-GATE** (tools/shale_gate.zig, metal-vmm QUEUE 233): the
-    // PreToolUse hook's classifier, passing a `shale` launch or the
-    // escape and refusing the rest. Built here; Steve installs the hook.
-    const gate = b.addExecutable(.{ .name = "shale-gate", .root_module = b.createModule(.{
-        .root_source_file = b.path("tools/shale_gate.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) });
-    b.installArtifact(gate);
-    const gate_test = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("tools/shale_gate_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) });
-    const gate_options = b.addOptions();
-    gate_options.addOptionPath("shale_gate", gate.getEmittedBin());
-    gate_test.root_module.addImport("shale_gate_options", gate_options.createModule());
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&b.addRunArtifact(gate_test).step);
-    // **THE SCRIPT FUZZER'S COUNT** (src/script/fuzz_test.zig): a few hundred
-    // sources in the tests, as many as asked for with -Dscript-fuzz.
-    const fuzz_runs = b.option(u32, "script-fuzz", "how many random and mutated sources the script fuzzer runs (default 400)") orelse 400;
-    // **THE EXPENSIVE ONES HUNT, NO GATE PAYS FOR THEM** (Steve, 2026-10-17:
-    // fuzzers are for bug-hunting expeditions; each bug found becomes a
-    // targeted unit test): a test named `expensive fuzz: ...` or `expensive
-    // sweep: ...` is skipped by `zig build test` and counted as skipped, and
-    // `zig build fuzz` runs those and nothing else.
-    const options_of = struct {
-        fn make(bb: *std.Build, runs: u32, expensive: bool) *std.Build.Module {
-            const o = bb.addOptions();
-            o.addOption(u32, "fuzz_runs", runs);
-            o.addOption(bool, "expensive", expensive);
-            return o.createModule();
-        }
-    }.make;
-    const fuzz_step = b.step("fuzz", "The expensive fuzzes and sweeps (tests named `expensive ...`), for a bug hunt; no gate runs them");
     // **ONLY THE TESTS NAMED** (-Dtest-filter=<text>): a change's own tests
     // in seconds, before the whole suite.
     const test_filter = b.option([]const u8, "test-filter", "run only the tests whose names contain this");
@@ -129,18 +39,6 @@ pub fn build(b: *std.Build) void {
         .{ .path = b.path("tools/timing_runner.zig"), .mode = .simple }
     else
         null;
-    // **THE FIXTURE PROGRAM** `run`'s tests run (src/shale_fixture.zig,
-    // metal-vmm QUEUE 233): never /bin/sh. Its path reaches the tests as
-    // `shale_test_options.fixture`.
-    const fixture = b.addExecutable(.{ .name = "shale-fixture", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/shale_fixture.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) });
-    const shale_options = b.addOptions();
-    shale_options.addOptionPath("fixture", fixture.getEmittedBin());
-    // The jobs' reaper is `shale` itself (`shale --reap`): its tests run it.
-    shale_options.addOptionPath("shale", runner.getEmittedBin());
     for ([_][]const u8{ "src/store.zig", "src/counter.zig", "src/bus.zig", "src/mem_meter.zig", "src/host_facts.zig", "src/bind.zig", "src/webbox.zig", "src/webbox_linux.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
@@ -152,24 +50,8 @@ pub fn build(b: *std.Build) void {
         unit.root_module.addImport("webbox", webbox);
         unit.root_module.addImport("webbox_linux", webbox_linux);
         unit.root_module.addImport("host_io", host_io);
-        unit.root_module.addImport("script_test_options", options_of(b, fuzz_runs, false));
-        unit.root_module.addImport("shale_test_options", shale_options.createModule());
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
-    // The expensive tests are all reached from webbox.zig's test block.
-    const hunt = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/webbox.zig"),
-        .target = target,
-        .optimize = optimize,
-    }), .filters = b.dupeStrings(&.{"expensive "}), .test_runner = timing });
-    hunt.root_module.addImport("webbox", webbox);
-    hunt.root_module.addImport("webbox_linux", webbox_linux);
-    hunt.root_module.addImport("host_io", host_io);
-    hunt.root_module.addImport("script_test_options", options_of(b, fuzz_runs, true));
-    hunt.root_module.addImport("shale_test_options", shale_options.createModule());
-    fuzz_step.dependOn(&b.addRunArtifact(hunt).step);
-    test_step.dependOn(&b.addRunArtifact(signer_test).step);
-
     // **THE APPLICATIONS, BUILT ON THIS TREE** (the box's essay "checks that
     // stopped checking", 2026-10-17): a webbox change broke angry-gopher's
     // checks for 14 hours, and the kernel's build and angry-gopher's again
@@ -179,49 +61,14 @@ pub fn build(b: *std.Build) void {
     // cheapest first. A sibling that is not there fails the step by name.
     // Not in `test`: it needs the siblings, and minutes. Run before a webbox
     // change is pushed to master.
-    const consumers = b.step("consumers", "This tree's own docs checked, then each application's own checks against this tree: metal-vmm's queue tool, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
+    const consumers = b.step("consumers", "This tree's own docs checked (by shale's doc check), then each consumer's own checks against this tree: shale's tests, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
     const here = b.build_root.path orelse ".";
-    // **THE DOCS' CITED PATHS AND NAMES** (metal-vmm QUEUE 237):
-    // tools/doc_check.shale, by this tree's own `shale`, from the folder
-    // that holds the repos: its fixtures first, then the docs. Fails on
-    // any finding. Each repo's gate checks its own (`only=<repo>`, through
-    // `zig build doc-check -- only=<repo>` here), never another's.
-    const docCheck = struct {
-        fn run(bb: *std.Build, bin: std.Build.LazyPath, parent: []const u8) *std.Build.Step.Run {
-            const r = bb.addSystemCommand(&.{ "sh", "-c", bb.fmt(
-                "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; cd '{s}' && " ++
-                    "\"$bin\" zig-webbox/tools/doc_check.shale self_test=1 && " ++
-                    "\"$bin\" --budget arena_bytes=2000000000 --budget steps=1000000000 --budget reads=1000000 --budget read_bytes=2000000000 --budget output_bytes=8000000 zig-webbox/tools/doc_check.shale \"$@\"",
-                .{parent},
-            ) });
-            r.addFileArg(bin);
-            r.has_side_effects = true;
-            r.stdio = .inherit;
-            return r;
-        }
-    }.run;
-    const parent = b.pathJoin(&.{ here, ".." });
-    // This tree's docs, first: the cheapest step, and webbox's own.
-    const own_docs = docCheck(b, runner.getEmittedBin(), parent);
-    own_docs.addArg("only=zig-webbox");
-    var prev: ?*std.Build.Step = &own_docs.step;
-    // **metal-vmm's queue tool, by this tree's own `shale`** (metal-vmm
-    // QUEUE 233): its Shale tests on its fixtures, first, as the cheapest.
-    {
-        const dir = b.pathJoin(&.{ here, "..", "metal-vmm" });
-        const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
-            "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; " ++
-                "cd '{s}' 2>/dev/null || {{ echo 'consumers: no metal-vmm beside this checkout ({s})'; exit 1; }}; " ++
-                "echo '==> metal-vmm: shale .shale/queue_test.shale'; \"$bin\" --budget output_bytes=8388608 .shale/queue_test.shale > /dev/null",
-            .{ dir, dir },
-        ) });
-        run.addFileArg(runner.getEmittedBin());
-        run.has_side_effects = true;
-        run.stdio = .inherit;
-        if (prev) |p| run.step.dependOn(p);
-        prev = &run.step;
-    }
+    var prev: ?*std.Build.Step = null;
     for ([_]struct { repo: []const u8, cmd: []const u8 }{
+        // **THE DOCS' CITED PATHS AND NAMES**, this tree's (shale's
+        // tools/doc_check.shale, metal-vmm QUEUE 237): the cheapest first.
+        .{ .repo = "shale", .cmd = "zig build doc-check -- only=zig-webbox" },
+        .{ .repo = "shale", .cmd = "zig build test" },
         .{ .repo = "observatory", .cmd = "zig build test" },
         .{ .repo = "dog-park", .cmd = "zig build test" },
         .{ .repo = "zig-metal-unikernel", .cmd = "zig build gopher" },
@@ -239,12 +86,4 @@ pub fn build(b: *std.Build) void {
         prev = &run.step;
     }
     consumers.dependOn(prev.?);
-
-    // Every repo's docs, or one's (`-- only=<repo>`, each repo's gate);
-    // `-- at=dir/ show=N` pass through.
-    {
-        const run = docCheck(b, runner.getEmittedBin(), parent);
-        if (b.args) |args| run.addArgs(args);
-        b.step("doc-check", "Every cited path in the repos' docs resolves and every cited name is there; `-- only=<repo>` for one repo's (tools/doc_check.shale; needs the sibling checkouts)").dependOn(&run.step);
-    }
 }
