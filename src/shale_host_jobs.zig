@@ -188,7 +188,7 @@ fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
         const j = try find(h, run, pos, args[0], "job_wait");
         if (contains) |c| {
             const os = try hl.osPath(h, run, pos, file orelse j.log, false);
-            if (try scan.look(scratch.allocator(), run, pos, os, c)) return result(run, pos, "found", null, null);
+            if (try scan.look(scratch.allocator(), run, pos, os, c, j.record)) return result(run, pos, "found", null, null);
         }
         if (j.record.done()) return result(run, pos, "exited", j.record.exit, j.record.signal);
         const gone = !jobs.alive(j.record);
@@ -205,25 +205,42 @@ fn wait(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Value {
 }
 
 /// A log searched as it grows: what was read already is not read again.
-const Scan = struct {
-    /// How far the log was searched.
+pub const Scan = struct {
+    /// How far the log was searched, and for which job.
     done: u64 = 0,
+    job: ?Job = null,
     buf: []u8 = &.{},
 
-    const piece = 1024 * 1024;
+    pub const piece = 1024 * 1024;
+    const Job = struct { pid: i32, started: i64 };
 
-    /// Whether `c` is in what the log at `os` holds now. A log not there yet
-    /// is not a failure; any other is said, never taken for "not yet".
-    fn look(s: *Scan, sa: std.mem.Allocator, run: *Run, pos: ast.Pos, os: []const u8, c: []const u8) Error!bool {
+    /// **WHERE A LOOK STARTS**: on from what was searched, less `#c - 1`
+    /// so a line the last read cut is whole; from 0 for a log begun again,
+    /// which is a log shorter than what was searched or another job's
+    /// (`job_start` truncates the log, and the new one may grow past the
+    /// old end between two looks).
+    pub fn from(s: *Scan, size: u64, job: Job, c_len: usize) u64 {
+        if (size < s.done or (s.job != null and !std.meta.eql(s.job.?, job))) s.done = 0;
+        s.job = job;
+        return s.done -| (c_len - 1);
+    }
+
+    /// Whether `c` is in what the log at `os` holds now. A log not there
+    /// (yet, or gone between the look's stat and its read) is not a
+    /// failure; any other is said, never taken for "not yet".
+    fn look(s: *Scan, sa: std.mem.Allocator, run: *Run, pos: ast.Pos, os: []const u8, c: []const u8, r: jobs.Record) Error!bool {
         const store = webbox.store;
         const st = (store.statOrNull(run.io, sa, os) catch |e| return run.fail(pos, .store, "`job_wait`: {s} cannot be read: {s}", .{ os, @errorName(e) })) orelse return false;
-        // A log begun again (shorter than what was searched) is searched again.
-        if (st.size < s.done) s.done = 0;
         if (s.buf.len == 0) s.buf = sa.alloc(u8, piece + c.len) catch return run.oom(pos);
-        var at = s.done -| (c.len - 1);
+        var at = s.from(st.size, .{ .pid = r.pid, .started = r.started }, c.len);
         while (at < st.size) {
-            const n = store.readAt(run.io, sa, os, at, s.buf[0..@min(s.buf.len, st.size - at)]) catch |e|
-                return run.fail(pos, .store, "`job_wait`: {s} cannot be read: {s}", .{ os, @errorName(e) });
+            const n = store.readAt(run.io, sa, os, at, s.buf[0..@min(s.buf.len, st.size - at)]) catch |e| switch (e) {
+                error.FileNotFound => {
+                    s.done = 0;
+                    return false;
+                },
+                else => return run.fail(pos, .store, "`job_wait`: {s} cannot be read: {s}", .{ os, @errorName(e) }),
+            };
             try chargeRead(run, pos, n);
             if (std.mem.indexOf(u8, s.buf[0..n], c) != null) return true;
             if (n < c.len or at + n >= st.size) break;
@@ -233,6 +250,19 @@ const Scan = struct {
         return false;
     }
 };
+
+test "job_wait's scan: on from what was searched, less the needle's length; from 0 for a shorter log or another job's" {
+    var s: Scan = .{};
+    const a: Scan.Job = .{ .pid = 10, .started = 1 };
+    try std.testing.expectEqual(@as(u64, 0), s.from(100, a, 5));
+    s.done = 100;
+    try std.testing.expectEqual(@as(u64, 96), s.from(150, a, 5));
+    // Shorter: begun again.
+    try std.testing.expectEqual(@as(u64, 0), s.from(50, a, 5));
+    // Another job's log, grown past the old end between two looks.
+    s.done = 100;
+    try std.testing.expectEqual(@as(u64, 0), s.from(400, .{ .pid = 11, .started = 2 }, 5));
+}
 
 fn result(run: *Run, pos: ast.Pos, ended: []const u8, code: ?u8, signal: ?u32) Error!Value {
     const t = try run.newTable(pos);

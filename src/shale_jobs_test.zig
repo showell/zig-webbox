@@ -128,8 +128,17 @@ test "jobs: waiting for a line reads only what the log gained since it last look
     // A 7 MB log: read whole each second, its reads piled up in the run's
     // arena until one failed, taken for "not there yet": `exited`.
     try testing.expectEqualStrings("found\n", try once(&t, "local j = job_start({\"shale-fixture\", \"lines\", \"300000\", \"a line of the log\"}, {log = \"big.log\"}) print(job_wait(j, {timeout_ms = 10000, contains = \"log 300000\"}).ended)"));
-    // Across pieces: a line that the poll's read cuts in two is found.
-    try testing.expectEqualStrings("found\n", try once(&t, "print(job_wait(\"big.log.job\", {timeout_ms = 1000, contains = \"log 150000\\na line\"}).ended)"));
+    // Across pieces: 20 bytes on both sides of where the first read
+    // (a piece and the needle's length) ends, so only the overlap finds it.
+    {
+        const io = t.threaded.io();
+        const log = try t.tmp.dir.readFileAlloc(io, "big.log", t.arena.allocator(), .limited(16 << 20));
+        const cut = @import("shale_host_jobs.zig").Scan.piece + 40;
+        const needle = log[cut - 20 .. cut + 20];
+        try testing.expect(std.mem.indexOfScalar(u8, needle, '"') == null);
+        const src = try std.fmt.allocPrint(t.arena.allocator(), "print(job_wait(\"big.log.job\", {{timeout_ms = 1000, contains = \"{f}\"}}).ended)", .{std.zig.fmtString(needle)});
+        try testing.expectEqualStrings("found\n", try once(&t, src));
+    }
     // 4 MB growing over about 4 seconds: read whole at each look, the
     // looks cost more than this budget; read as it grows, about 262,000.
     t.budgets.steps = 400_000;
