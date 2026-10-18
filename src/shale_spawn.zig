@@ -223,11 +223,18 @@ pub fn run(alloc: std.mem.Allocator, spec: Spec, sink: anytype) (Error || SinkEr
     setNonblocking(out_pipe[0]);
     if (in_pipe[1] >= 0) setNonblocking(in_pipe[1]);
 
+    var exited = false;
+    var status: u32 = 0;
+    // **A FAILURE ON THE WAY OUT ENDS IT**: the sink refusing (the keep at
+    // the host's cap) returns before the program's end, which would leave
+    // it running, then a zombie, for as long as `shale` lives.
+    errdefer if (!exited) {
+        _ = linux.kill(-pid, .KILL);
+        _ = linux.wait4(pid, &status, 0, null);
+    };
     var stdin_left: []const u8 = spec.stdin orelse "";
     if (spec.stdin != null and stdin_left.len == 0) closeFd(&in_pipe[1]);
     var buf: [64 * 1024]u8 = undefined;
-    var exited = false;
-    var status: u32 = 0;
     var termed_at: ?u64 = null;
     var killed = false;
     var why_ended: ?Ended = null;
@@ -448,4 +455,35 @@ test "spawn: a TERM to shale while a program runs ends the program's group and s
     var now: linux.sigset_t = undefined;
     _ = linux.sigprocmask(linux.SIG.BLOCK, null, &now);
     try testing.expect(!linux.sigismember(&now, .TERM));
+}
+
+/// A sink that fails at the first output (as the keep does at the host's
+/// cap), noting the program's pid from `pid-sleep`'s line.
+const Refusing = struct {
+    pid: ?linux.pid_t = null,
+    pub const Error = error{OutOfMemory};
+    fn write(r: *Refusing, bytes: []const u8) Refusing.Error!void {
+        if (std.mem.startsWith(u8, bytes, "pid ")) r.pid = std.fmt.parseInt(linux.pid_t, std.mem.trimEnd(u8, bytes[4..], "\n"), 10) catch null;
+        return error.OutOfMemory;
+    }
+};
+
+test "spawn: a sink that fails ends the program's group and reaps it before the failure is said" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var r: Refusing = .{};
+    const env = [_][]const u8{"PATH=/usr/bin:/bin"};
+    try testing.expectError(error.OutOfMemory, run(testing.allocator, .{ .argv = &.{ fixturePath(&buf), "pid-sleep", "20000" }, .env = &env, .timeout_ms = 30_000 }, &r));
+    const pid = r.pid orelse return error.TestUnexpectedResult;
+    // Neither running nor a zombie: gone.
+    var path: [64]u8 = undefined;
+    const stat = try std.fmt.bufPrintZ(&path, "/proc/{d}/stat", .{pid});
+    const fd = linux.open(stat, .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.errno(fd) == .SUCCESS) {
+        var st: [256]u8 = undefined;
+        const n = linux.read(@intCast(fd), &st, st.len);
+        _ = linux.close(@intCast(fd));
+        _ = linux.kill(pid, .KILL);
+        std.debug.print("the program is still there: {s}\n", .{st[0..n]});
+        return error.TestUnexpectedResult;
+    }
 }

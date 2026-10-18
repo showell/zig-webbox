@@ -11,6 +11,7 @@
 //!     shale-fixture stderr TEXT      TEXT on stderr
 //!     shale-fixture kill-self        ends by SIGKILL, its own
 //!     shale-fixture ignore-term MS   TERM ignored, then sleeps
+//!     shale-fixture pid-sleep MS     "pid N", its own, then sleeps
 //!     shale-fixture spill N          N bytes of 'x' with no newline
 //!     shale-fixture chunks N SIZE    N bytes of 100-byte lines, written
 //!                                    SIZE at a time, 1 ms apart
@@ -51,6 +52,10 @@ pub fn main(init: std.process.Init) !u8 {
         var ew = std.Io.File.stderr().writer(io, &eb);
         try ew.interface.print("{s}\n", .{arg});
         try ew.interface.flush();
+    } else if (std.mem.eql(u8, verb, "pid-sleep")) {
+        try w.print("pid {d}\n", .{std.os.linux.getpid()});
+        try w.flush();
+        try io.sleep(.fromMilliseconds(try std.fmt.parseInt(i64, arg, 10)), .awake);
     } else if (std.mem.eql(u8, verb, "kill-self")) {
         try w.flush();
         _ = std.os.linux.kill(std.os.linux.getpid(), .KILL);
