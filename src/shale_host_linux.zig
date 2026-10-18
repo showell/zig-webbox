@@ -269,9 +269,12 @@ fn resolve(ctx: *anyopaque, run: *Run, pos: ast.Pos, path: []const u8) Error!?[]
         var it = std.mem.splitScalar(u8, rest, '/');
         while (it.next()) |part| if (!store.fatName(part)) return run.fail(pos, .argument, "\"{s}\" has a part (\"{s}\") that is not a name: no `.`, `..`, empty parts or characters FAT refuses", .{ path, part });
     }
-    // A mount whose folder is not there stops when it is used.
-    const is_dir = std.Io.Dir.cwd().openDir(run.io, m.dir, .{}) catch null;
-    if (is_dir) |d| d.close(run.io) else return run.fail(pos, .store, "the mount `{s}` is {s}, which is not a folder there", .{ m.name, m.dir });
+    // A mount whose folder is not there, or cannot be opened, stops when
+    // it is used, saying which.
+    if (std.Io.Dir.cwd().openDir(run.io, m.dir, .{})) |d| d.close(run.io) else |e| switch (e) {
+        error.FileNotFound, error.NotDir => return run.fail(pos, .store, "the mount `{s}` is {s}, which is not a folder there", .{ m.name, m.dir }),
+        else => return run.fail(pos, .store, "the mount `{s}` is {s}, which cannot be opened: {s}", .{ m.name, m.dir, @errorName(e) }),
+    }
     const inside = std.mem.startsWith(u8, m.dir, h.root_abs) and (m.dir.len == h.root_abs.len or m.dir[h.root_abs.len] == '/');
     const dir = if (inside) std.fmt.allocPrint(run.alloc, "{s}{s}", .{ try rootOf(h, run, pos), m.dir[h.root_abs.len..] }) catch return run.oom(pos) else m.dir;
     try refuseLinks(run, pos, dir, rest, path[0 .. colon + 1]);
@@ -357,7 +360,9 @@ fn call(ctx: *anyopaque, run: *Run, pos: ast.Pos, name: []const u8, args: []cons
 }
 
 /// What `run` refuses unless it is given a `want`, by argv[0]'s basename
-/// with a version suffix dropped (`python3.12` is `python3`).
+/// with a version suffix dropped (`python3.12` is `python3`), or with its
+/// trailing version digits dropped too (`bash5.2` is `bash`, `perl5` is
+/// `perl`).
 const refused = [_]struct { []const []const u8, []const u8 }{
     .{ &.{ "bash", "sh", "dash", "zsh", "busybox", "python", "python3", "perl", "node" }, "a shell or an interpreter: Shale is the script" },
     .{ &.{ "head", "tail", "grep", "sed", "awk", "gawk", "cut", "sort", "uniq", "wc", "cat", "tr" }, "a text tool: Shale's builtins and run's own filter and keep do this" },
@@ -369,7 +374,8 @@ const refused = [_]struct { []const []const u8, []const u8 }{
 pub fn refuse(h: *Host, run: *Run, pos: ast.Pos, who: []const u8, argv0: []const u8, cwd: []const u8, want: ?[]const u8) Error!void {
     if (want != null) return;
     const base = baseName(argv0);
-    for (refused) |group| for (group[0]) |n| if (std.mem.eql(u8, n, base))
+    const bare = std.mem.trimEnd(u8, base, "0123456789");
+    for (refused) |group| for (group[0]) |n| if (std.mem.eql(u8, n, base) or (bare.len > 0 and std.mem.eql(u8, n, bare)))
         return run.fail(pos, .refused, "`{s}` of `{s}`: {s}; {{want = \"tag: why\"}} to run it anyway", .{ who, base, group[1] });
     if (std.mem.indexOfScalar(u8, argv0, '/') != null and !try tracked(h, run, pos, argv0, cwd))
         return run.fail(pos, .refused, "`{s}` of `{s}`: a program by path that git does not track (a script just written?); {{want = \"tag: why\"}} to run it anyway", .{ who, argv0 });
@@ -619,7 +625,7 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
     // engines' arenas equal, failed a 141 KB `git show` at random. So it
     // is the host's, live and capped (`Capped`), and only the results go
     // to the arena.
-    var capped: Capped = .{ .backing = h.alloc, .most = run.budgets.arena_bytes };
+    var capped: Capped = .{ .backing = h.alloc, .most = run.budgets.arena_bytes -| run.budgeted.held };
     const sa = capped.allocator();
     // The output's ends: the log, the keep or `whole`.
     var out: Out = .{ .alloc = sa };
@@ -692,6 +698,10 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
         @tagName(outcome.ended),                if (outcome.code) |c| std.fmt.allocPrint(a, " {d}", .{c}) catch "" else "",
         outcome.ms,
     });
+    // Its last bytes flushed before the record says whether it is whole.
+    if (log_file != null) log_writer.interface.flush() catch {
+        out.log_failed = true;
+    };
     if (o.log != null) h.record("log {s}{s}", .{ log_shown, if (out.log_failed) ": a write failed, the log is short" else "" });
 
     const r = try run.newTable(pos);
@@ -730,8 +740,8 @@ fn runProgram(h: *Host, run: *Run, pos: ast.Pos, args: []const Value) Error!Valu
 }
 
 /// **WHAT A RUN'S STREAM HOLDS, LIVE AND CAPPED**: the host's allocator,
-/// every free given back, and at most `most` bytes live at once (the run's
-/// arena budget). A tail of 3 over a 10 GB log holds three lines; a keep
+/// every free given back, and at most `most` bytes live at once (what is
+/// left of the run's arena budget). A tail of 3 over a 10 GB log holds three lines; a keep
 /// that needs more than the budget stops the run (`streamOver`).
 pub const Capped = struct {
     backing: std.mem.Allocator,
@@ -894,7 +904,7 @@ test "host: what run refuses without a want, by name and by an untracked path; a
     var t: T = undefined;
     try t.init();
     defer t.deinit();
-    for ([_][]const u8{ "bash", "/usr/bin/python3.12", "grep", "xargs", "sed" }) |name| {
+    for ([_][]const u8{ "bash", "/usr/bin/python3.12", "grep", "xargs", "sed", "bash5.2", "perl5", "/usr/bin/python3" }) |name| {
         var src: [256]u8 = undefined;
         try t.expectStop(try std.fmt.bufPrint(&src, "host(\"run\", {{\"{s}\", \"x\"}}, {{timeout_ms = 1000, tail = 1}})", .{name}), .atomic, .refused, "want =");
     }

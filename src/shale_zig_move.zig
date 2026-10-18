@@ -83,6 +83,13 @@ fn newline(file: []const u8, other: []const u8) []const u8 {
     return if (at > 0 and in[at - 1] == '\r') "\r\n" else "\n";
 }
 
+/// `text` with its lines ended by `nl`: a moved block takes `to`'s endings,
+/// so no file mixes them, and there and back gives each file its own.
+fn endedBy(a: std.mem.Allocator, text: []const u8, nl: []const u8) error{OutOfMemory}![]const u8 {
+    const lf = try std.mem.replaceOwned(u8, a, text, "\r\n", "\n");
+    return if (nl.len == 2) std.mem.replaceOwned(u8, a, lf, "\n", "\r\n") else lf;
+}
+
 pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: []const Want, mode: CommentMode, after: ?[]const u8) error{OutOfMemory}!Outcome {
     const fd = switch (try za.decls(a, from)) {
         .ok => |ok| ok,
@@ -154,6 +161,7 @@ pub fn move(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, wants: [
     // **WHERE THEY GO**, between lines ended as `to`'s are.
     const nl = newline(to, from);
     const gap = try std.mem.concat(a, u8, &.{ nl, nl });
+    for (texts.items) |*t| t.* = try endedBy(a, t.*, nl);
     const block = try std.mem.join(a, gap, texts.items);
     var to_now: []const u8 = undefined;
     var to_span: Span = undefined;

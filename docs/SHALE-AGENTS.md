@@ -102,8 +102,9 @@ has none of it):
   its `target`, the value `from` gives it). `uses_left` is the code's uses
   only: mentions in comments are yours. Not reported: a method called
   through a value (`hold.begin()`), a name through an `@This()` alias.
-  The blank lines it puts between declarations end as `to`'s lines do
-  (CRLF or LF; an empty `to` as `from`'s).
+  The moved lines, and the blank lines it puts between them, end as
+  `to`'s lines do (CRLF or LF; an empty `to` as `from`'s), so neither
+  file mixes the two.
   `zig_imports(p)` lists a Zig file's `@import`s and `@embedFile`s, from
   Zig's parser (a split call is one, a comment's or a string's none):
   `{kind, target, name, line, file}`, `file` being `"found"` or

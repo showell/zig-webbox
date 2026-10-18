@@ -47,7 +47,8 @@ const Scratch = struct {
     arena: std.heap.ArenaAllocator,
 
     fn init(s: *Scratch, backing: std.mem.Allocator, run: *Run) std.mem.Allocator {
-        s.capped = .{ .backing = backing, .most = run.budgets.arena_bytes };
+        // What is left of the budget, so the arena and a parse together stay in it.
+        s.capped = .{ .backing = backing, .most = run.budgets.arena_bytes -| run.budgeted.held };
         s.arena = std.heap.ArenaAllocator.init(s.capped.allocator());
         return s.arena.allocator();
     }

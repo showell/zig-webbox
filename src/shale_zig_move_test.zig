@@ -143,6 +143,18 @@ fn moveFor(a: std.mem.Allocator, from: [:0]const u8, to: [:0]const u8, names: []
     };
 }
 
+test "zig_move: moved lines end as `to`'s do, a CRLF block into an LF file and back, so neither file mixes them" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const crlf = "const a = 1;\r\n\r\nfn b() void {\r\n    _ = a;\r\n}\r\n";
+    const m = try moveFor(a, crlf, "const x = 1;\n", &.{"b"}, .doc, null);
+    try testing.expectEqualStrings("const x = 1;\n\nfn b() void {\n    _ = a;\n}\n", m.to_now);
+    // And back: LF lines into the CRLF file end in CRLF there.
+    const back = try moveFor(a, "fn b() void {\n    _ = a;\n}\n", "const a = 1;\r\n", &.{"b"}, .doc, null);
+    try testing.expectEqualStrings(crlf, back.to_now);
+}
+
 test "zig_move: an indented comment between two moved declarations joins their cuts (it sliced backwards)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
