@@ -31,7 +31,10 @@ pub const Plan = struct { now: []const u8, spans: []const Span, renamed: usize, 
 
 /// A plan, or the line it stopped at: `declaration`, a qualified `to`
 /// where `from` is declared; `invalid`, a token Zig's tokenizer refuses.
-pub const Outcome = union(enum) { done: Plan, declaration: usize, invalid: usize };
+pub const Outcome = union(enum) { done: Plan, declaration: struct { line: usize, name: []const u8 }, invalid: usize };
+
+/// One name and what it becomes.
+pub const Rename = struct { from: []const u8, to: []const u8 };
 
 const za = @import("shale_zig_ast.zig");
 const hl = @import("shale_host_linux.zig");
@@ -66,33 +69,46 @@ fn keep(run: *Run, pos: ast.Pos, x: []const u8) Error![]const u8 {
 /// **THE RENAME, PLANNED**: pure, over `src`'s tokens and the one reading
 /// of identifiers (`za.identifiers`, which `zig_move` reads with too).
 pub fn plan(a: std.mem.Allocator, src: [:0]const u8, from: []const u8, to: []const u8, lines: ?Lines) error{OutOfMemory}!Outcome {
+    return planMany(a, src, &.{.{ .from = from, .to = to }}, lines);
+}
+
+/// **MANY NAMES, ONE PASS** (`zig_renames`): each identifier looked up
+/// among `renames`, by the same rules as one name's; the first declaration
+/// a qualified `to` cannot take stops it, naming it.
+pub fn planMany(a: std.mem.Allocator, src: [:0]const u8, renames: []const Rename, lines: ?Lines) error{OutOfMemory}!Outcome {
     const ts = switch (try za.tokens(a, src)) {
         .ok => |ok| ok,
         .invalid => |n| return .{ .invalid = n },
     };
-    const qualified = std.mem.indexOfScalar(u8, to, '.') != null;
+    var to_of: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (renames) |r| try to_of.put(a, r.from, r.to);
     const starts = try za.lineStarts(a, src);
-    // The comments: the gaps between tokens, and the doc comments.
-    var line: LineCursor = .{ .src = src };
+    // The comments: the gaps between tokens, and the doc comments, each
+    // name counted with a cursor of its own (its offsets only grow).
     var left: usize = 0;
-    var gap: usize = 0;
-    for (ts) |t| {
-        left += try wordsIn(&line, src[gap..t.start], gap, from, lines);
-        gap = t.end;
-        if (t.tag == .doc_comment or t.tag == .container_doc_comment) left += try wordsIn(&line, src[t.start..t.end], t.start, from, lines);
+    for (renames) |r| {
+        var line: LineCursor = .{ .src = src };
+        var gap: usize = 0;
+        for (ts) |t| {
+            left += try wordsIn(&line, src[gap..t.start], gap, r.from, lines);
+            gap = t.end;
+            if (t.tag == .doc_comment or t.tag == .container_doc_comment) left += try wordsIn(&line, src[t.start..t.end], t.start, r.from, lines);
+        }
+        left += try wordsIn(&line, src[gap..], gap, r.from, lines);
     }
-    left += try wordsIn(&line, src[gap..], gap, from, lines);
     var out: std.ArrayList(u8) = .empty;
     var spans: std.ArrayList(Span) = .empty;
     var copied: usize = 0;
     var renamed: usize = 0;
     for (try za.identifiers(a, ts)) |id| {
-        if (!std.mem.eql(u8, src[id.start..id.end], from)) continue;
+        const name = src[id.start..id.end];
+        const to = to_of.get(name) orelse continue;
+        const qualified = std.mem.indexOfScalar(u8, to, '.') != null;
         const n = za.lineOf(starts, id.start);
         if (lines != null and (n < lines.?.first or n > lines.?.last)) continue;
         // A field of that name is another thing: never renamed.
         if (id.role == .field) continue;
-        if (qualified and id.role == .declaration) return .{ .declaration = n };
+        if (qualified and id.role == .declaration) return .{ .declaration = .{ .line = n, .name = name } };
         try out.appendSlice(a, src[copied..id.start]);
         const c0 = out.items.len;
         try out.appendSlice(a, to);
@@ -158,12 +174,30 @@ pub fn rename(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const
         .table => |t| if (t.kind == .map) t else return run.fail(pos, .type, "`zig_rename`'s names are `{{from, to}}`", .{}),
         else => return run.fail(pos, .type, "`zig_rename`'s names are `{{from, to}}`", .{}),
     };
-    const from = try script.builtins.stringArg(run, pos, .host, names.map.get("from") orelse .nil, "`from`");
-    const to = try script.builtins.stringArg(run, pos, .host, names.map.get("to") orelse .nil, "`to`");
-    if (!std.zig.isValidId(from)) return run.fail(pos, .argument, "`zig_rename`'s `from` (\"{s}\") is not a Zig identifier: one name, not a keyword", .{from});
-    var parts = std.mem.splitScalar(u8, to, '.');
-    while (parts.next()) |part| if (!std.zig.isValidId(part))
-        return run.fail(pos, .argument, "`zig_rename`'s `to` (\"{s}\") is not a Zig identifier, or names joined by `.`", .{to});
+    // `{from, to}` (zig_rename) or `{many = {a = "x.a", ...}}` (zig_renames).
+    var renames: std.ArrayList(Rename) = .empty;
+    if (names.map.get("many")) |many| {
+        const m = switch (many) {
+            .table => |t| t,
+            else => return run.fail(pos, .type, "`zig_renames` takes a map of names, `{{a = \"x.a\"}}`, not {s}", .{many.typeName()}),
+        };
+        if (m.kind == .list) return run.fail(pos, .type, "`zig_renames` takes a map of names, `{{a = \"x.a\"}}`, not a list", .{});
+        for (m.map.keys(), m.map.values()) |k, v| {
+            const to_s = try script.builtins.stringArg(run, pos, .host, v, "a name's `to`");
+            renames.append(run.alloc, .{ .from = k, .to = to_s }) catch return run.oom(pos);
+        }
+        if (renames.items.len == 0) return run.fail(pos, .argument, "`zig_renames` of no names: give `{{a = \"x.a\", ...}}`", .{});
+    } else {
+        const from = try script.builtins.stringArg(run, pos, .host, names.map.get("from") orelse .nil, "`from`");
+        const to = try script.builtins.stringArg(run, pos, .host, names.map.get("to") orelse .nil, "`to`");
+        renames.append(run.alloc, .{ .from = from, .to = to }) catch return run.oom(pos);
+    }
+    for (renames.items) |r| {
+        if (!std.zig.isValidId(r.from)) return run.fail(pos, .argument, "`zig_rename`'s `from` (\"{s}\") is not a Zig identifier: one name, not a keyword", .{r.from});
+        var parts = std.mem.splitScalar(u8, r.to, '.');
+        while (parts.next()) |part| if (!std.zig.isValidId(part))
+            return run.fail(pos, .argument, "`zig_rename`'s `to` (\"{s}\") is not a Zig identifier, or names joined by `.`", .{r.to});
+    }
     const lines = try linesOpt(run, pos, args[2]);
     try hub.countRead(run, pos);
     const size = try rd.fileSize(run, pos, .host, p);
@@ -174,10 +208,16 @@ pub fn rename(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const
     defer scratch.deinit();
     const src = sa.dupeZ(u8, was) catch return run.oom(pos);
     try script.builtins.chargeBytes(run, pos, src.len);
-    const got = plan(sa, src, from, to, lines) catch return run.oom(pos);
+    const got = planMany(sa, src, renames.items, lines) catch return run.oom(pos);
     const done = switch (got) {
         .done => |d| d,
-        .declaration => |n| return run.fail(pos, .argument, "`zig_rename`: {s} declares `{s}` at line {d}, and `{s}` is qualified, which cannot be declared: rename the declaration itself, or leave it out with `lines`; nothing written", .{ p.rel, from, n, to }),
+        .declaration => |d| {
+            var to: []const u8 = "";
+            for (renames.items) |r| if (std.mem.eql(u8, r.from, d.name)) {
+                to = r.to;
+            };
+            return run.fail(pos, .argument, "`zig_rename`: {s} declares `{s}` at line {d}, and `{s}` is qualified, which cannot be declared: rename the declaration itself, or leave it out with `lines`; nothing written", .{ p.rel, d.name, d.line, to });
+        },
         .invalid => |n| return run.fail(pos, .argument, "`zig_rename`: {s} does not tokenize as Zig at line {d}; nothing written", .{ p.rel, n }),
     };
     try run.charge(pos, done.tokens);
@@ -381,6 +421,98 @@ pub fn tokens(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const
     return .{ .table = list };
 }
 
+/// What `from_as` makes of a move: each text, and its spans from the one
+/// before (`done.to_now` to `to_qualified` to `to_imported`; `done.from_now`
+/// to `from_pub`).
+const FromAs = struct {
+    to_qualified: []const u8,
+    qualified_spans: []const Span,
+    to_imported: []const u8,
+    import_spans: []const Span,
+    from_pub: []const u8,
+    pub_spans: []const Span,
+    qualified: usize,
+    made_pub: []const []const u8,
+};
+
+fn fromAs(sa: std.mem.Allocator, run: *Run, pos: ast.Pos, done: anytype, fa: []const u8, from_base: []const u8) Error!FromAs {
+    // The import's name must be free in the moved code (no shadowing).
+    const to_z = sa.dupeZ(u8, done.to_now) catch return run.oom(pos);
+    const toks = switch (za.tokens(sa, to_z) catch return run.oom(pos)) {
+        .ok => |ok| ok,
+        .invalid => |n| return run.fail(pos, .argument, "`zig_move`: the moved code does not tokenize at line {d}", .{n}),
+    };
+    for (toks, 0..) |tk, i| if (tk.tag == .identifier and std.mem.eql(u8, to_z[tk.start..tk.end], fa) and (i == 0 or toks[i - 1].tag != .period))
+        return run.fail(pos, .argument, "`zig_move`: `{s}` is a name in the moved code already: `from_as` would shadow it; nothing written", .{fa});
+    // 1. The uses, qualified.
+    var renames: std.ArrayList(Rename) = .empty;
+    var wanted: std.StringHashMapUnmanaged(void) = .empty;
+    for (done.needs_from_from) |n| if (!wanted.contains(n.name)) {
+        wanted.put(sa, n.name, {}) catch return run.oom(pos);
+        renames.append(sa, .{ .from = n.name, .to = std.fmt.allocPrint(sa, "{s}.{s}", .{ fa, n.name }) catch return run.oom(pos) }) catch return run.oom(pos);
+    };
+    const q = switch (planMany(sa, to_z, renames.items, null) catch return run.oom(pos)) {
+        .done => |d| d,
+        .declaration => |d| return run.fail(pos, .argument, "`zig_move`: the moved code declares `{s}` (line {d}), which `from_as` would qualify; nothing written", .{ d.name, d.line }),
+        .invalid => |n| return run.fail(pos, .argument, "`zig_move`: the moved code does not tokenize at line {d}", .{n}),
+    };
+    try run.charge(pos, q.tokens);
+    // 2. The import, after `to`'s last `@import` (or first, if none).
+    const qz = sa.dupeZ(u8, q.now) catch return run.oom(pos);
+    const line = std.fmt.allocPrint(sa, "const {s} = @import(\"{s}\");", .{ fa, from_base }) catch return run.oom(pos);
+    var at: usize = 0;
+    var text: []const u8 = undefined;
+    switch (za.decls(sa, qz) catch return run.oom(pos)) {
+        .ok => |ok| for (ok.decls) |d| if (std.mem.startsWith(u8, d.value, "@import(")) {
+            at = d.stop;
+        },
+        .parse_error => |e| return run.fail(pos, .argument, "`zig_move`: the moved code does not parse at line {d}", .{e.line}),
+    }
+    if (at == 0) {
+        text = std.fmt.allocPrint(sa, "{s}\n\n", .{line}) catch return run.oom(pos);
+    } else text = std.fmt.allocPrint(sa, "\n{s}", .{line}) catch return run.oom(pos);
+    const imported = std.mem.concat(sa, u8, &.{ q.now[0..at], text, q.now[at..] }) catch return run.oom(pos);
+    const import_spans = sa.alloc(Span, 1) catch return run.oom(pos);
+    import_spans[0] = .{ .o0 = at, .o1 = at, .c0 = at, .c1 = at + text.len };
+    // 3. `pub` on those names in `from`, before the keyword (past the doc).
+    const fz = sa.dupeZ(u8, done.from_now) catch return run.oom(pos);
+    var made: std.ArrayList([]const u8) = .empty;
+    var offsets: std.ArrayList(usize) = .empty;
+    switch (za.decls(sa, fz) catch return run.oom(pos)) {
+        .ok => |ok| for (ok.decls) |d| {
+            if (!wanted.contains(d.name) or d.visibility == .@"pub") continue;
+            if (d.kind != .@"const" and d.kind != .@"var" and d.kind != .@"fn") continue;
+            var k = d.start;
+            while (true) {
+                var s = k;
+                while (s < fz.len and (fz[s] == ' ' or fz[s] == '\t')) s += 1;
+                if (!std.mem.startsWith(u8, fz[s..], "///")) break;
+                k = (std.mem.indexOfScalarPos(u8, fz, s, '\n') orelse fz.len) + 1;
+            }
+            offsets.append(sa, k) catch return run.oom(pos);
+            made.append(sa, d.name) catch return run.oom(pos);
+        },
+        .parse_error => |e| return run.fail(pos, .argument, "`zig_move`: `from`, cut, does not parse at line {d}", .{e.line}),
+    }
+    var out: std.ArrayList(u8) = .empty;
+    var spans: std.ArrayList(Span) = .empty;
+    var copied: usize = 0;
+    for (offsets.items) |o| {
+        out.appendSlice(sa, fz[copied..o]) catch return run.oom(pos);
+        const c0 = out.items.len;
+        out.appendSlice(sa, "pub ") catch return run.oom(pos);
+        spans.append(sa, .{ .o0 = o, .o1 = o, .c0 = c0, .c1 = out.items.len }) catch return run.oom(pos);
+        copied = o;
+    }
+    out.appendSlice(sa, fz[copied..]) catch return run.oom(pos);
+    std.mem.sort([]const u8, made.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    return .{ .to_qualified = q.now, .qualified_spans = q.spans, .to_imported = imported, .import_spans = import_spans, .from_pub = out.items, .pub_spans = spans.items, .qualified = q.renamed, .made_pub = made.items };
+}
+
 /// A Zig file read whole (`was`, in the run's arena when `kept`: a change
 /// hands it core) and NUL-ended for the parser (`src`, in `sa`), the read and the copy charged; null for one
 /// that is not there, when that is allowed.
@@ -465,6 +597,8 @@ pub fn move(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const V
     if (wants.items.len == 0) return run.fail(pos, .argument, "`zig_move`: no names: nothing to move", .{});
     var mode: zm.CommentMode = .doc;
     var after: ?[]const u8 = null;
+    // `from_as`: what the moved code uses of `from` is reached through it.
+    var from_as: ?[]const u8 = null;
     switch (packed_args.map.get("opts") orelse Value.nil) {
         .nil => {},
         .table => |t| for (t.map.keys(), t.map.values()) |k, x| {
@@ -476,7 +610,10 @@ pub fn move(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const V
                 mode = std.meta.stringToEnum(zm.CommentMode, s) orelse return run.fail(pos, .argument, "`zig_move`'s `comment` is \"doc\" or \"doc_and_plain\", not \"{s}\"", .{s});
             } else if (std.mem.eql(u8, k, "after")) {
                 after = s;
-            } else return run.fail(pos, .argument, "`zig_move` takes `comment` and `after`, not `{s}`", .{k});
+            } else if (std.mem.eql(u8, k, "from_as")) {
+                if (!std.zig.isValidId(s)) return run.fail(pos, .argument, "`zig_move`'s `from_as` (\"{s}\") is not a Zig identifier", .{s});
+                from_as = s;
+            } else return run.fail(pos, .argument, "`zig_move` takes `comment`, `after` and `from_as`, not `{s}`", .{k});
         },
         else => |v| return run.fail(pos, .type, "`zig_move`'s options are a map, not {s}", .{v.typeName()}),
     }
@@ -502,10 +639,18 @@ pub fn move(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const V
             return out;
         }
     }.of;
-    // **BOTH WRITES OR NEITHER, AS FAR AS THE BUDGETS SAY**: room for the
-    // two changes first, so a budget never stops a move between them.
-    if (run.changes + 2 > run.budgets.changes) return run.budgetStop(pos, .changes);
-    if (done.to_now.len + done.from_now.len > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
+    // **WITH `from_as`**, worked out before anything is written: the moved
+    // code's uses of `from`'s names qualified (one pass, `planMany`), the
+    // import after `to`'s last, and `pub` on those names in `from`.
+    var reach: ?FromAs = null;
+    if (from_as) |fa| reach = try fromAs(sa, run, pos, done, fa, std.fs.path.basename(p.rel));
+    const writes: u64 = if (reach != null) 5 else 2;
+    // **ALL ITS WRITES OR NONE, AS FAR AS THE BUDGETS SAY**: room for every
+    // change first, so a budget never stops a move between them.
+    var bytes: u64 = done.to_now.len + done.from_now.len;
+    if (reach) |r| bytes += r.to_qualified.len + r.to_imported.len + r.from_pub.len;
+    if (run.changes + writes > run.budgets.changes) return run.budgetStop(pos, .changes);
+    if (bytes > run.budgets.change_bytes -| run.change_bytes) return run.budgetStop(pos, .change_bytes);
     const to_spans = try spans(run, pos, done.to_spans);
     const from_spans = try spans(run, pos, done.from_spans);
     try script.builtins_change.rewrite(run, pos, q, to_src, try keep(run, pos, done.to_now), to_spans);
@@ -517,9 +662,21 @@ pub fn move(backing: std.mem.Allocator, run: *Run, pos: ast.Pos, args: []const V
         };
         return e;
     };
+    if (reach) |r| {
+        try script.builtins_change.rewrite(run, pos, q, try keep(run, pos, done.to_now), try keep(run, pos, r.to_qualified), a.dupe(Span, r.qualified_spans) catch return run.oom(pos));
+        try script.builtins_change.rewrite(run, pos, q, try keep(run, pos, r.to_qualified), try keep(run, pos, r.to_imported), a.dupe(Span, r.import_spans) catch return run.oom(pos));
+        try script.builtins_change.rewrite(run, pos, p, try keep(run, pos, done.from_now), try keep(run, pos, r.from_pub), a.dupe(Span, r.pub_spans) catch return run.oom(pos));
+    }
     const t = try run.newTable(pos);
     t.kind = .map;
     try put(run, pos, t, "moved", .{ .int = @intCast(done.moved) });
+    if (reach) |r| {
+        try put(run, pos, t, "qualified", .{ .int = @intCast(r.qualified) });
+        const mp = try run.newTable(pos);
+        mp.kind = .list;
+        for (r.made_pub) |n| mp.list.append(a, .{ .string = try keep(run, pos, n) }) catch return run.oom(pos);
+        try put(run, pos, t, "made_pub", .{ .table = mp });
+    }
     try put(run, pos, t, "needs_pub", try nameLines(run, pos, done.needs_pub));
     try put(run, pos, t, "needs_import", try nameLines(run, pos, done.needs_import));
     try put(run, pos, t, "needs_from_from", try nameLines(run, pos, done.needs_from_from));

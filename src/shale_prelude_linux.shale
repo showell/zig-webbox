@@ -187,6 +187,11 @@ end
 -- **A ZIG FILE'S TOP-LEVEL DECLARATIONS** (metal-vmm QUEUE 235, 1), from
 -- Zig's own parser, in file order: each `{kind, name, name_form,
 -- visibility, linkage, first, last, start, stop[, comment_above]}`.
+-- Many names at once: `{a = "x.a", b = "x.b"}`, one pass, one write.
+function zig_renames(path, names, opts?)
+  return host("zig_rename", path, {many = names}, opts)
+end
+
 function zig_decls(path, opts?)
   if opts == nil then return host("zig_decls", path) end
   return host("zig_decls", path, opts)

@@ -109,11 +109,18 @@ has none of it):
   its `target`, the value `from` gives it). `uses_left` is the code's uses
   only: mentions in comments are yours. Not reported: a method called
   through a value (`hold.begin()`), a name through an `@This()` alias.
+  `{from_as = "gopher"}` reaches what the moved code uses of `from` through
+  it, in the same call: those uses qualified (`gopher.served`), the import
+  put in `to`, and `pub` put on those names in `from`; it gives `qualified`
+  and `made_pub` too, and refuses a `from_as` the moved code already names.
   The moved lines, and the blank lines it puts between them, end as
   `to`'s lines do (CRLF or LF; an empty `to` as `from`'s), so neither
   file mixes the two. Declarations on lines next to each other stay so. A
   section's banner (a `// ──` line, heading what is under it to the next
   banner) goes with its section when every declaration under it moves.
+  `zig_renames(p, {a = "x.a", b = "x.b"}, opts?)` is `zig_rename` of many
+  names in one pass: one read, one write, one diff; each name held to
+  `zig_rename`'s rules, the first refusal said, nothing written.
   `zig_tokens(p, {tag}?)` lists a Zig file's tokens, `{tag, text, line}`
   (std.zig.Token.Tag's names), by the tokenizer the other three read with:
   a plain comment is no token, a string one. `{tag = "identifier"}` keeps

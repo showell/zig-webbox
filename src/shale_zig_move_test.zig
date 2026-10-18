@@ -215,6 +215,20 @@ test "zig_move: a CRLF file's separators are CRLF, there and back (found by the 
     try testing.expectEqualStrings("const x = 1;\r\n\r\nconst b = 2;\r\n", o.to_now);
 }
 
+test "zig_move with from_as: what the moved code uses of `from` reached through it, those names `pub` in `from`, the import in `to`" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("g.zig", "const std = @import(\"std\");\nvar served: u64 = 0;\n/// Open now.\nconst open_now = 1;\npub const shown = 2;\n\nfn facts() u64 {\n    return served + open_now + shown;\n}\n");
+    try t.expectOutput("local r = zig_move(\"g.zig\", \"f.zig\", {\"facts\"}, {from_as = \"gopher\"}) print(r.moved, r.qualified, join(r.made_pub, \",\"))", "edit f.zig: 1 hunk, -1 +4 lines\nedit g.zig: 1 hunk, -5 +1 lines\nedit f.zig: 1 hunk, -1 +1 lines\nedit f.zig: 1 hunk, -1 +3 lines\nedit g.zig: 2 hunks, -2 +2 lines\n1\t3\topen_now,served\n");
+    try testing.expectEqualStrings("const gopher = @import(\"g.zig\");\n\nfn facts() u64 {\n    return gopher.served + gopher.open_now + gopher.shown;\n}\n", try t.file("f.zig"));
+    try testing.expectEqualStrings("const std = @import(\"std\");\npub var served: u64 = 0;\n/// Open now.\npub const open_now = 1;\npub const shown = 2;\n", try t.file("g.zig"));
+    // A `from_as` the moved code already names is refused, nothing written.
+    try t.put("h.zig", "var x: u8 = 0;\nfn gopher() u8 {\n    return x;\n}\nfn y() u8 {\n    return gopher() + x;\n}\n");
+    try t.expectStop("zig_move(\"h.zig\", \"i.zig\", {\"y\"}, {from_as = \"gopher\"})", .atomic, .argument, "`gopher` is a name in the moved code");
+    try testing.expectError(error.FileNotFound, t.file("i.zig"));
+}
+
 test "zig_move: with the change budget room for one of its two writes, it writes neither" {
     var t: T = undefined;
     try init(&t);

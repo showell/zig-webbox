@@ -125,6 +125,21 @@ test "zig_rename: a qualified `to` in a declaration's place stops, naming the li
     try testing.expectEqualStrings("const m = @import(\"m.zig\");\nconst x = m.from + 1;\nfn g() u8 {\n    return m.from;\n}\n", try t.file("u.zig"));
 }
 
+test "zig_renames: many names in one pass, one read, one write, one diff; each name's rules as zig_rename's, the first refusal said, nothing written" {
+    var t: T = undefined;
+    try init(&t);
+    defer t.deinit();
+    try t.put("m.zig", "const g = @import(\"g.zig\");\nfn f() u8 {\n    return served + open_now + g.served;\n}\nconst open_now_label = \"open_now\";\n");
+    // `g.served` follows a `.`: another thing, left.
+    try testing.expectEqualStrings("2\t0", try lastLine(&t, "local r = zig_renames(\"m.zig\", {served = \"g.served\", open_now = \"g.open_now\"}) print(r.renamed, r.left_in_comments)", .atomic));
+    try testing.expectEqualStrings("const g = @import(\"g.zig\");\nfn f() u8 {\n    return g.served + g.open_now + g.served;\n}\nconst open_now_label = \"open_now\";\n", try t.file("m.zig"));
+    // One name's declaration with a qualified `to`: stops, naming it; the other is not written either.
+    try t.put("d.zig", "const a = 1;\nconst b = a;\n");
+    try t.expectStop("zig_renames(\"d.zig\", {a = \"x.a\", b = \"c\"})", .atomic, .argument, "declares `a` at line 1");
+    try testing.expectEqualStrings("const a = 1;\nconst b = a;\n", try t.file("d.zig"));
+    try t.expectStop("zig_renames(\"d.zig\", {})", .atomic, .argument, "no names");
+}
+
 test "zig_rename: what it refuses: `from` not an identifier, `to` not one or a qualified one, a file that does not tokenize; opts" {
     var t: T = undefined;
     try init(&t);
