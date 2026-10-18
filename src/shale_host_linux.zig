@@ -460,21 +460,32 @@ pub const Scrub = struct {
     pub fn write(s: *Scrub, bytes: []const u8) Sink.Error!void {
         if (s.secrets.len == 0) return s.next.write(bytes);
         try s.carry.appendSlice(s.alloc, bytes);
+        try s.scan(false);
+    }
+
+    /// The carry scrubbed and passed on, but for what may be a secret's
+    /// start when more is to come (`last` false). At each place, a
+    /// secret the rest is the start of is waited for, though a shorter one
+    /// is whole there (`abc` and `abcdef`: `abc` at a read's end may go on
+    /// to the longer); then the longest whole one is told, so a secret that
+    /// begins another never tells the other's rest.
+    fn scan(s: *Scrub, last: bool) Sink.Error!void {
         const buf = s.carry.items;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(s.alloc);
         var i: usize = 0;
         scan: while (i < buf.len) {
-            for (s.secrets) |kv| {
-                const v = kv[1];
-                if (std.mem.startsWith(u8, buf[i..], v)) {
-                    try out.print(s.alloc, "<secret {s}>", .{kv[0]});
-                    i += v.len;
-                    continue :scan;
-                }
+            const rest = buf[i..];
+            if (!last) for (s.secrets) |kv| if (rest.len < kv[1].len and std.mem.startsWith(u8, kv[1], rest)) break :scan;
+            var best: ?[2][]const u8 = null;
+            for (s.secrets) |kv| if (std.mem.startsWith(u8, rest, kv[1]) and (best == null or kv[1].len > best.?[1].len)) {
+                best = kv;
+            };
+            if (best) |kv| {
+                try out.print(s.alloc, "<secret {s}>", .{kv[0]});
+                i += kv[1].len;
+                continue :scan;
             }
-            // A secret that may go on in the next read: hold it.
-            for (s.secrets) |kv| if (buf.len - i < kv[1].len and std.mem.startsWith(u8, kv[1], buf[i..])) break :scan;
             try out.append(s.alloc, buf[i]);
             i += 1;
         }
@@ -483,9 +494,10 @@ pub const Scrub = struct {
         s.carry.shrinkRetainingCapacity(buf.len - i);
     }
 
+    /// The output ended: what was held, scrubbed with nothing more to come.
     pub fn finish(s: *Scrub) Sink.Error!void {
-        try s.next.write(s.carry.items);
-        s.carry.clearRetainingCapacity();
+        if (s.secrets.len == 0) return;
+        try s.scan(true);
     }
 };
 
@@ -917,6 +929,27 @@ test "host: env adds to what a program inherits; a secret reaches it and never c
     for ([_][]const u8{ "x ab", "cd", "ef y abc", "Z abcde" }) |piece| try scrub.write(piece);
     try scrub.finish();
     try testing.expectEqualStrings("x <secret K> y abcZ abcde", got.items);
+}
+
+test "host: the scrubber: a secret that begins another is never told for it, whole or split, nor left raw at the end" {
+    const Case = struct { pieces: []const []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .pieces = &.{"x abcdef y"}, .want = "x <secret LONG> y" },
+        .{ .pieces = &.{ "x abc", "def y" }, .want = "x <secret LONG> y" },
+        .{ .pieces = &.{ "x abc", "dX y" }, .want = "x <secret SHORT>dX y" },
+        .{ .pieces = &.{"x abc"}, .want = "x <secret SHORT>" },
+        .{ .pieces = &.{ "x ab", "c" }, .want = "x <secret SHORT>" },
+    }) |c| {
+        var out: Out = .{ .alloc = testing.allocator, .whole = undefined, .whole_most = 1 << 20 };
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(testing.allocator);
+        out.whole = &got;
+        var scrub: Scrub = .{ .alloc = testing.allocator, .secrets = &.{ .{ "SHORT", "abc" }, .{ "LONG", "abcdef" } }, .next = &out };
+        defer scrub.carry.deinit(testing.allocator);
+        for (c.pieces) |piece| try scrub.write(piece);
+        try scrub.finish();
+        try testing.expectEqualStrings(c.want, got.items);
+    }
 }
 
 test "host: whole keeps everything up to its bound and pipes into stdin; a kept result is refused as stdin" {
