@@ -1,0 +1,536 @@
+-- **EVERY CITED PATH RESOLVES, EVERY CITED NAME IS THERE** (metal-vmm
+-- QUEUE 237; SHALE-WANTS.md `doc-check`): the first of the checks five
+-- cold agents ran over every doc by hand, for paths and names only. In
+-- each repo's tracked `*.md` but the history (FEEDBACK*, QUEUE-ARCHIVE*,
+-- `docs/designs/`, and the essays in `notes/`), outside fenced blocks:
+--
+--   a PATH is a backticked or linked word with a `/` or a known
+--   extension. It is looked for from the doc's repo (a link from the
+--   doc's folder first), then in a sibling the line names, then in every
+--   repo: found nowhere is `gone`; found only in two or more siblings,
+--   none named on the line, is `ambiguous`, so the doc says which.
+--
+--   a NAME is `` `f.zig`'s `name` `` or `` `name` (f.zig) ``: a top-level
+--   declaration or test of `f` (Zig's parser, `zig_decls`), or a nested
+--   declaration or field (a word match: `const name`, `fn name`, `name:`,
+--   so said in the report). In another kind of file, the word.
+--
+--   `file:N` is read as `file`; the line is not checked (Steve: "lines
+--   later"). Counted, and those with a name beside them whose line does
+--   not hold the name are counted too.
+--
+-- It fails on any finding. From the folder that holds the repos:
+--   shale --budget arena_bytes=2000000000 --budget steps=200000000 zig-webbox/tools/doc_check.shale
+--   ... zig-webbox/tools/doc_check.shale self_test=1    its fixtures first
+-- `zig build doc-check` runs both, with this tree's `shale`.
+
+const REPOS = {"metal-vmm", "zig-webbox", "angry-gopher", "zig-metal-unikernel", "dog-park", "observatory", "zig-coverage-sdk"}
+const EXTS = {".zig", ".shale", ".md", ".sh", ".py", ".json", ".zon", ".js", ".html", ".css", ".txt", ".conf", ".toml"}
+const SHOW = parse_int(arg("show", "20"))
+
+-- Whether a tracked path is history, not checked.
+function history(p)
+  local base = p
+  local slash = split(p, "/")
+  base = slash[#slash]
+  if starts_with(base, "FEEDBACK") or starts_with(base, "QUEUE-ARCHIVE") then return true end
+  return starts_with(p, "docs/designs/") or contains(p, "/docs/designs/") or starts_with(p, "notes/") or contains(p, "/notes/")
+end
+
+function has_ext(w)
+  for e in EXTS do
+    if ends_with(w, e) then return true end
+  end
+  return false
+end
+
+-- A word as cited: `{path, line}` (line 0 for none), or nil when it is no
+-- path: a URL, a glob, a placeholder, a mount (`repos:x`), an absolute or
+-- home path, a flag, a module.
+function as_path(w)
+  w = trim(w)
+  while #w > 0 and contains("(\"'[<", sub(w, 1, 1)) do w = sub(w, 2) end
+  while #w > 0 and contains(".,;)\"'>]", sub(w, -1)) do w = sub(w, 1, -2) end
+  if ends_with(w, "'s") then w = sub(w, 1, -3) end
+  if contains(w, "://") or starts_with(w, "mailto:") then return nil end
+  local hash = find(w, "#")
+  if hash ~= nil then w = sub(w, 1, hash - 1) end
+  local line = 0
+  local m = re_find(w, ":(\\d+)[-,0-9]*$")
+  if m ~= nil then
+    line = parse_int(m.group)
+    w = sub(w, 1, m.at - 1)
+  end
+  if w == "" or starts_with(w, "/") or starts_with(w, "~") or starts_with(w, "-") or starts_with(w, "@") then return nil end
+  if re_match(w, "[^A-Za-z0-9_./+-]") then return nil end
+  if not (contains(w, "/") or has_ext(w)) then return nil end
+  -- `a/b` with no dot anywhere and no extension, in prose, is often an
+  -- either-or (`read/write`); a folder ends in `/`.
+  if not contains(w, ".") and not ends_with(w, "/") and not has_ext(w) then return nil end
+  if contains(w, "...") or contains(w, "//") then return nil end
+  local dotted = starts_with(w, "./")
+  while starts_with(w, "./") do w = sub(w, 3) end
+  -- **PASSED BY, BY NAME** (each counted in the report):
+  -- an extension alone (`.zig`) or a name's suffix (`_test.zig`);
+  if has_ext(w) and not contains(w, "/") and (starts_with(w, "_") or (starts_with(w, ".") and not contains(sub(w, 2), "."))) then return {skip = "an extension or a suffix"} end
+  -- Zig code that reads as a file (`std.json`) and Zig's own library;
+  if starts_with(w, "std.") or starts_with(w, "std/") or starts_with(w, "lib/std/") then return {skip = "Zig's std"} end
+  -- a traversal shown as an example (`1/../2`, `data/../x`);
+  local inner = w
+  while starts_with(inner, "../") do inner = sub(inner, 4) end
+  if contains(inner, "/../") or ends_with(inner, "/..") then return {skip = "a traversal example"} end
+  local folder = ends_with(w, "/") or (dotted and not has_ext(w))
+  if folder and #w > 1 then w = sub(w, 1, -2) end
+  if w == "" or w == "." or w == ".." then return nil end
+  -- a folder named alone (`data/`, `auth/`): the host's data, or a
+  -- placeholder, far more often than this repo's.
+  if folder and not contains(w, "/") then
+    for r in REPOS do
+      if w == r then return {path = w, line = line} end
+    end
+    return {skip = "a folder named alone"}
+  end
+  return {path = w, line = line}
+end
+
+-- The backticked spans and the link targets of a line, each a list of
+-- words: a span's words, a link's target alone.
+function cited(text)
+  local out = {}
+  local rest = text
+  while true do
+    local a = find(rest, "`")
+    if a == nil then break end
+    local after = sub(rest, a + 1)
+    local b = find(after, "`")
+    if b == nil then break end
+    push(out, {kind = "code", text = sub(after, 1, b - 1)})
+    rest = sub(after, b + 1)
+  end
+  rest = text
+  while true do
+    local a = find(rest, "](")
+    if a == nil then break end
+    local after = sub(rest, a + 2)
+    local b = find(after, ")")
+    if b == nil then break end
+    push(out, {kind = "link", text = sub(after, 1, b - 1)})
+    rest = sub(after, b + 1)
+  end
+  return out
+end
+
+-- `p` joined to folder `dir` ("" the repo's root), `..` taken back; nil
+-- when it climbs out of the repo.
+function joined(dir, p)
+  local parts = {}
+  if dir ~= "" then parts = split(dir, "/") end
+  for x in split(p, "/") do
+    if x == ".." then
+      if #parts == 0 then return nil end
+      parts = take(parts, #parts - 1)
+    elseif x ~= "." and x ~= "" then
+      push(parts, x)
+    end
+  end
+  return join(parts, "/")
+end
+
+-- Where `p` is, as a repo-relative path in `repo` under `at`, or nil.
+function in_repo(at, repo, p)
+  if p == nil then return nil end
+  p = joined("", p)
+  if p == nil then return nil end
+  local full = at .. repo
+  if p ~= "" then full = full .. "/" .. p end
+  if exists(full) then return full end
+  return nil
+end
+
+-- The repos a line names, by name.
+function named(text)
+  local out = {}
+  for r in REPOS do
+    if contains(text, r) then push(out, r) end
+  end
+  return out
+end
+
+-- Where a cited path is: `{found = full path}`, or `{gone = true}`, or
+-- `{ambiguous = "a, b"}`.
+function resolve(at, repo, docdir, c, kind, text, bases)
+  local p = c.path
+  -- A bare file name (`router.zig`) is any tracked file of that name: in
+  -- the doc's repo, a sibling the line names, then any repo.
+  if not contains(p, "/") then
+    if has_key(bases, repo) and has_key(bases[repo], p) then return {found = ""} end
+    for r in named(text) do
+      if has_key(bases, r) and has_key(bases[r], p) then return {found = ""} end
+    end
+    local where = {}
+    for r in REPOS do
+      if has_key(bases, r) and has_key(bases[r], p) then push(where, r) end
+    end
+    if #where == 1 then return {found = ""} end
+    if #where > 1 then return {ambiguous = join(where, ", ")} end
+  end
+  -- `../sibling/x` and `sibling/x`: the sibling's.
+  local first = split(p, "/")[1]
+  if first == ".." then
+    local up = joined(docdir, p)
+    if up ~= nil then
+      local f = in_repo(at, repo, up)
+      if f ~= nil then return {found = f} end
+    end
+    local q = p
+    while starts_with(q, "../") do q = sub(q, 4) end
+    p = q
+    first = split(p, "/")[1]
+  end
+  for r in REPOS do
+    if first == r then
+      local f = in_repo(at, r, sub(p, #r + 2))
+      if f ~= nil then return {found = f} end
+    end
+  end
+  if kind == "link" then
+    local f = in_repo(at, repo, joined(docdir, p))
+    if f ~= nil then return {found = f} end
+  end
+  local f = in_repo(at, repo, p)
+  if f ~= nil then return {found = f} end
+  if kind == "code" then
+    f = in_repo(at, repo, joined(docdir, p))
+    if f ~= nil then return {found = f} end
+  end
+  for r in named(text) do
+    f = in_repo(at, r, p)
+    if f ~= nil then return {found = f} end
+  end
+  local where = {}
+  local found = nil
+  for r in REPOS do
+    f = in_repo(at, r, p)
+    if f ~= nil then
+      push(where, r)
+      found = f
+    end
+  end
+  if #where == 1 then return {found = found} end
+  if #where > 1 then return {ambiguous = join(where, ", ")} end
+  -- Not here; what the repo's `.gitignore` covers is asked after, all at
+  -- once (`ignored`).
+  local asks = {p}
+  local from_doc = joined(docdir, p)
+  if from_doc ~= nil and from_doc ~= p then push(asks, from_doc) end
+  return {gone = true, asks = asks}
+end
+
+-- Which of `paths` the repo's `.gitignore` covers: a build's output (or a
+-- host's file), there once something is built. One `git` for them all.
+function ignored(at, repo, paths)
+  local set = {}
+  if #paths == 0 then return set end
+  local r = run({"git", "-C", real(at .. repo), "check-ignore", "--no-index", "--stdin"}, {timeout_ms = 60000, whole = 1048576, stdin = join(paths, "\n") .. "\n"})
+  for p in lines(r.out) do
+    if p ~= "" then set[p] = true end
+  end
+  return set
+end
+
+-- Whether `name` is in file `f`: `{yes, how}`; `how` is "parser" or "word".
+function has_name(f, name, decls_of)
+  local base = name
+  local dot = find(name, ".")
+  if dot ~= nil then base = sub(name, 1, dot - 1) end
+  if ends_with(f, ".zig") then
+    if not has_key(decls_of, f) then
+      local set = {}
+      for d in zig_decls(f) do set[d.name] = true end
+      decls_of[f] = set
+    end
+    if has_key(decls_of[f], name) or has_key(decls_of[f], base) then return {yes = true, how = "parser"} end
+  end
+  local last = name
+  if dot ~= nil then
+    local parts = split(name, ".")
+    last = parts[#parts]
+  end
+  local src = read(f)
+  local w = "\\b" .. last .. "\\b"
+  if re_match(src, "(const|var|fn|test) +\"?" .. last .. "\\b") or re_match(src, w .. " *:") or re_match(src, w) then return {yes = true, how = "word"} end
+  return {yes = false, how = "word"}
+end
+
+-- The names a line cites with their file: `` `f`'s `n` `` and
+-- `` `n` (f) `` (and `(in f)`, `(f:N)`).
+function name_cites(text)
+  local out = {}
+  local rest = text
+  while true do
+    local m = re_find(rest, "`([^`]+)`'s `")
+    if m == nil then break end
+    local after = sub(rest, m.at + #m.text)
+    local e = find(after, "`")
+    if e == nil then break end
+    push(out, {file = m.group, name = sub(after, 1, e - 1)})
+    rest = sub(after, e + 1)
+  end
+  rest = text
+  while true do
+    local m = re_find(rest, "`([A-Za-z_][A-Za-z0-9_.]*)` \\(")
+    if m == nil then break end
+    local after = sub(rest, m.at + #m.text)
+    local e = find(after, ")")
+    if e == nil then break end
+    local f = sub(after, 1, e - 1)
+    if starts_with(f, "in ") then f = sub(f, 4) end
+    push(out, {file = f, name = m.group})
+    rest = sub(after, e + 1)
+  end
+  return out
+end
+
+-- A name worth checking: an identifier, not a call or a phrase.
+function identifier(n)
+  return re_match(n, "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$")
+end
+
+-- One doc's findings, added to `r`.
+function check_doc(at, repo, doc, r)
+  local docdir = ""
+  local parts = split(doc, "/")
+  if #parts > 1 then docdir = join(take(parts, #parts - 1), "/") end
+  local fenced = false
+  local n = 0
+  for text in lines(read(at .. repo .. "/" .. doc)) do
+    n = n + 1
+    if starts_with(trim(text), "```") then
+      fenced = not fenced
+    elseif not fenced then
+      local where = repo .. "/" .. doc .. ":" .. n
+      local paths = {}
+      for span in cited(text) do
+        local ws = {span.text}
+        if span.kind == "code" then ws = words(span.text) end
+        for w in ws do
+          local c = as_path(w)
+          if c ~= nil and has_key(c, "skip") then
+            r.skipped[c.skip] = get(r.skipped, c.skip, 0) + 1
+          elseif c ~= nil then
+            r.paths = r.paths + 1
+            local got = resolve(at, repo, docdir, c, span.kind, text, r.bases)
+            if c.line > 0 then r.lines = r.lines + 1 end
+            if has_key(got, "gone") then
+              push(r.pending, {said = where .. ": `" .. c.path .. "`", asks = got.asks})
+            elseif has_key(got, "ambiguous") then
+              push(r.ambiguous, where .. ": `" .. c.path .. "` is in " .. got.ambiguous .. ": say which")
+            else
+              paths[c.path] = {full = got.found, line = c.line}
+            end
+          end
+        end
+      end
+      for nc in name_cites(text) do
+        local c = as_path(nc.file)
+        if c ~= nil and not has_key(c, "skip") and identifier(nc.name) and has_key(paths, c.path) then
+          local f = paths[c.path].full
+          if f == "" then f = get(r.where_base, c.path, nil) end
+          if f ~= nil and not is_dir(f) then
+            r.names = r.names + 1
+            local h = has_name(f, nc.name, r.decls_of)
+            if not h.yes then
+              push(r.gone_names, where .. ": `" .. nc.name .. "` is not in " .. c.path)
+            else
+              if h.how == "word" then r.by_word = r.by_word + 1 end
+              local ln = c.line
+              if ln > 0 then
+                r.line_named = r.line_named + 1
+                local at_line = lines(read(f))
+                local last = split(nc.name, ".")
+                local word = last[#last]
+                local hit = false
+                for k = ln, ln + 2 do
+                  if k <= #at_line and re_match(at_line[k], "\\b" .. word .. "\\b") then hit = true end
+                end
+                if not hit then r.line_wrong = r.line_wrong + 1 end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+function fresh()
+  return {paths = 0, names = 0, by_word = 0, lines = 0, line_named = 0, line_wrong = 0, gone = {}, ambiguous = {}, gone_names = {}, decls_of = {}, docs = 0, skipped = {}, ignored = 0, pending = {}}
+end
+
+-- Every repo under `at` that is there: its report.
+function check_all(at, repos)
+  local all = {}
+  -- Every repo's tracked files by their names, and where a name is when
+  -- it is one file.
+  local bases = {}
+  local tracked = {}
+  for repo in repos do
+    if is_dir(at .. repo) then
+      local set = {}
+      tracked[repo] = git_ls_files(at .. repo)
+      for p in tracked[repo] do
+        local parts = split(p, "/")
+        local b = parts[#parts]
+        if has_key(set, b) then set[b] = "" else set[b] = at .. repo .. "/" .. p end
+      end
+      bases[repo] = set
+    end
+  end
+  for repo in repos do
+    local r = fresh()
+    r.bases = bases
+    r.where_base = {}
+    if has_key(bases, repo) then
+      for b in keys(bases[repo]) do
+        if bases[repo][b] ~= "" then r.where_base[b] = bases[repo][b] end
+      end
+    end
+    if is_dir(at .. repo) then
+      for p in tracked[repo] do
+        if ends_with(p, ".md") and not history(p) then
+          r.docs = r.docs + 1
+          check_doc(at, repo, p, r)
+        end
+      end
+      local asks = {}
+      for g in r.pending do
+        for a in g.asks do push(asks, a) end
+      end
+      local ig = ignored(at, repo, unique(asks))
+      for g in r.pending do
+        local hit = false
+        for a in g.asks do
+          if has_key(ig, a) then hit = true end
+        end
+        if hit then r.ignored = r.ignored + 1 else push(r.gone, g.said) end
+      end
+      all[repo] = r
+    end
+  end
+  return all
+end
+
+function findings(r)
+  return #r.gone + #r.ambiguous + #r.gone_names
+end
+
+function report(all, repos)
+  local total = 0
+  for repo in repos do
+    if has_key(all, repo) then
+      local r = all[repo]
+      total = total + findings(r)
+      print(repo .. ": " .. r.docs .. " docs, " .. r.paths .. " paths (" .. r.lines .. " with `:N`), " .. r.names .. " names (" .. r.by_word .. " by a word match); gone " .. #r.gone .. ", ambiguous " .. #r.ambiguous .. ", names gone " .. #r.gone_names .. "; `:N` beside a name " .. r.line_named .. ", its line without the name " .. r.line_wrong)
+      local passed = {"  passed by: " .. r.ignored .. " git ignores (a build's output)"}
+      local ks = keys(r.skipped)
+      sort(ks)
+      for k in ks do push(passed, r.skipped[k] .. " " .. k) end
+      print(join(passed, ", "))
+      for k in {"gone", "ambiguous", "gone_names"} do
+        local i = 0
+        for f in r[k] do
+          i = i + 1
+          if i <= SHOW then print("  " .. k .. "  " .. f) end
+        end
+        if i > SHOW then print("  " .. k .. "  ... and " .. (i - SHOW) .. " more") end
+      end
+    else
+      print(repo .. ": not here")
+    end
+  end
+  return total
+end
+
+-- **THE FIXTURES**: two repos, each rule's case, each finding expected.
+const FIX = "zig-webbox/zig-out/doc_check"
+
+function expect(cond, what)
+  if not cond then fail("doc check self test: " .. what) end
+  print("ok  " .. what)
+  return nil
+end
+
+function fixture_repo(name, files)
+  local dir = FIX .. "/" .. name
+  mkdir(dir)
+  for p in keys(files) do
+    local parts = split(p, "/")
+    local d = dir
+    for k = 1, #parts - 1 do
+      d = d .. "/" .. parts[k]
+      if not exists(d) then mkdir(d) end
+    end
+    replace(dir .. "/" .. p, files[p])
+  end
+  must(run({"git", "init", "-q"}, {cwd = dir, timeout_ms = 30000, whole = 4096}))
+  must(run({"git", "add", "-A"}, {cwd = dir, timeout_ms = 30000, whole = 4096}))
+  return nil
+end
+
+function self_test()
+  if exists(FIX) then remove_tree(FIX) end
+  mkdir(FIX)
+  fixture_repo("metal-vmm", {
+    ["README.md"] = "See `docs/here.md` and [the guide](docs/here.md), `src/a.zig:3`'s `alpha` (and `src/a.zig:9`'s `alpha`, a wrong line), and `beta` (src/a.zig).\n" ..
+      "Gone: `src/gone.zig`. Sibling: zig-webbox's `src/w.zig`. Both have `src/both.zig`.\n" ..
+      "A name gone: `src/a.zig`'s `nothing_here`. Nested: `src/a.zig`'s `Inner.depth`, and `depth` (src/a.zig) alone.\n" ..
+      "Not paths: `zig build test`, `a/b`, `src/**/*.zig`, `~/.config/x`, `https://x.y/z.md`, `repos:dog-park`.\n" ..
+      "Whose: `src/both.zig`, on a line naming no repo.\n" ..
+      "Passed by: `.zig`, `_test.zig`, `std.json`, `1/../2`, `data/`, `./auth`; built: `zig-out/bin/x.elf`; a sibling itself: `../zig-webbox`, `angry-gopher/`.\n" ..
+      "```\nsrc/in_a_fence.zig\n```\n",
+    ["docs/here.md"] = "Back to [the readme](../README.md); `../zig-webbox/src/w.zig` by path.\n",
+    ["FEEDBACK.md"] = "`src/history_only.zig` is gone and that is fine.\n",
+    ["notes/essay.md"] = "`src/essay_only.zig` too.\n",
+    ["src/a.zig"] = "const std = @import(\"std\");\n\npub const alpha = 1;\n\nconst Inner = struct {\n    depth: u8,\n};\n\nfn beta() void {}\n\n\n\n\n",
+    ["src/both.zig"] = "",
+    [".gitignore"] = "zig-out/\n",
+  })
+  fixture_repo("zig-webbox", {
+    ["src/w.zig"] = "pub const w = 1;\n",
+    ["src/both.zig"] = "",
+    ["docs/x.md"] = "Our `src/both.zig`, and metal-vmm's `src/a.zig`.\n",
+  })
+  fixture_repo("angry-gopher", {["src/both.zig"] = ""})
+  local all = check_all(FIX .. "/", {"metal-vmm", "zig-webbox", "angry-gopher"})
+  local m = all["metal-vmm"]
+  local gone = join(m.gone, "\n")
+  expect(#m.gone == 1 and contains(gone, "README.md:2: `src/gone.zig`"), "a path that is gone is a finding (and only that one)")
+  expect(not contains(gone, "w.zig"), "a sibling-named path is found there, by the line's naming and by `../`")
+  expect(#m.ambiguous == 0, "a path in this repo is this repo's, though siblings have it")
+  local z = all["zig-webbox"]
+  expect(#z.gone == 0 and #z.ambiguous == 0, "a sibling's path the line names is found")
+  expect(not contains(gone, "here.md") and not contains(gone, "README.md`"), "a link to a doc resolves from the doc's folder")
+  expect(not contains(gone, "history_only") and not contains(gone, "essay_only"), "a history file and an essay are passed by")
+  expect(not contains(gone, "in_a_fence"), "a fenced block is passed by")
+  expect(#m.gone_names == 1 and contains(m.gone_names[1], "`nothing_here` is not in src/a.zig"), "a name that is gone is a finding")
+  expect(m.names == 6 and m.by_word == 1, "names by the parser (`Inner.depth` by its `Inner`), a nested one alone by a word match")
+  expect(m.ignored == 1, "a path the repo's .gitignore covers is a build's, passed by")
+  expect(get(m.skipped, "an extension or a suffix", 0) == 2 and get(m.skipped, "Zig's std", 0) == 1 and get(m.skipped, "a traversal example", 0) == 1 and get(m.skipped, "a folder named alone", 0) == 2, "each rule passes its own by, and counts it")
+  expect(m.lines == 2 and m.line_named == 2 and m.line_wrong == 1, "`file:N` counted, and its line checked beside a name")
+  remove(FIX .. "/metal-vmm/src/both.zig")
+  local again = check_all(FIX .. "/", {"metal-vmm", "zig-webbox", "angry-gopher"})
+  local amb = again["metal-vmm"].ambiguous
+  expect(#amb == 1 and contains(amb[1], "README.md:5: `src/both.zig` is in zig-webbox, angry-gopher"), "a path only in two siblings, the line naming neither, is ambiguous; the line naming one is that one's")
+  remove_tree(FIX)
+  print("doc check: its fixtures each come out as they should")
+  return nil
+end
+
+if arg("self_test", "") == "1" then
+  self_test()
+else
+  local total = report(check_all(arg("at", ""), REPOS), REPOS)
+  if total > 0 then fail("doc check: " .. total .. " findings") end
+  print("doc check: every cited path resolves and every cited name is there")
+end

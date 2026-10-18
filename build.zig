@@ -215,4 +215,24 @@ pub fn build(b: *std.Build) void {
         prev = &run.step;
     }
     consumers.dependOn(prev.?);
+
+    // **THE DOCS' CITED PATHS AND NAMES** (metal-vmm QUEUE 237):
+    // tools/doc_check.shale, by this tree's own `shale`, from the folder
+    // that holds the repos: its fixtures first, then every repo's docs.
+    // Fails on any finding. In no gate yet (Steve decides when);
+    // `-- at=dir/ show=N` pass through.
+    {
+        const parent = b.pathJoin(&.{ here, ".." });
+        const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
+            "bin=\"$(cd \"$(dirname \"$0\")\" && pwd)/$(basename \"$0\")\"; cd '{s}' && " ++
+                "\"$bin\" zig-webbox/tools/doc_check.shale self_test=1 && " ++
+                "\"$bin\" --budget arena_bytes=2000000000 --budget steps=1000000000 --budget reads=1000000 --budget read_bytes=2000000000 --budget output_bytes=8000000 zig-webbox/tools/doc_check.shale \"$@\"",
+            .{parent},
+        ) });
+        run.addFileArg(runner.getEmittedBin());
+        if (b.args) |args| run.addArgs(args);
+        run.has_side_effects = true;
+        run.stdio = .inherit;
+        b.step("doc-check", "Every cited path in the repos' docs resolves and every cited name is there (tools/doc_check.shale; needs the sibling checkouts)").dependOn(&run.step);
+    }
 }

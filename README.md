@@ -84,6 +84,7 @@ and its effects log says what.
     zig build test          # every test but the expensive ones: about 30 s
     zig build consumers     # the applications' own checks against this tree: minutes
     zig build fuzz          # the expensive fuzzes and sweeps, for a bug hunt
+    zig build doc-check     # every repo's docs: each cited path and name is there
 
 **`test`** includes the library's own shape (`src/library_test.zig`: what
 each root reaches it names, the modules each half may import, no page
@@ -96,7 +97,12 @@ here goes to master: each of them caught a webbox change that `test` passed.
 **`fuzz`** runs the tests named `expensive fuzz: ...` or `expensive sweep:
 ...`, which `test` counts as skipped: a fuzz hunts bugs once, and each bug it
 finds becomes a test of its own. `-Dtest-timing` prints each test's time,
-slowest first.
+slowest first. **`doc-check`** runs `tools/doc_check.shale` (metal-vmm QUEUE
+237) from the folder that holds the repos, its fixtures first: in every
+repo's tracked docs but the history, each backticked or linked path must
+resolve (in the doc's repo, a sibling the line names, or one repo alone), and
+each `` `file`'s `name` `` must be in that file. It fails on any finding, and
+no gate runs it yet.
 
 `-Dtest-filter=TEXT` runs only the tests whose names contain it;
 `-Dscript-fuzz=N` sets how many sources the script fuzzer runs. Two more
