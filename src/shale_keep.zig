@@ -90,14 +90,12 @@ pub const Keep = struct {
         k.line.deinit(k.alloc);
         for (k.head.items) |l| k.alloc.free(l);
         k.head.deinit(k.alloc);
-        for (k.ringLines()) |l| k.alloc.free(l);
+        // Each ring from where it starts: a drain stopped part way leaves
+        // `back` starting past 0.
+        for (0..k.ring_len) |i| k.alloc.free(k.ring[(k.ring_at + i) % k.ring.len]);
         k.alloc.free(k.ring);
-        for (k.back[0..k.back_len]) |l| k.alloc.free(l);
+        for (0..k.back_len) |i| k.alloc.free(k.back[(k.back_at + i) % k.back.len]);
         k.alloc.free(k.back);
-    }
-
-    fn ringLines(k: *const Keep) [][]u8 {
-        return k.ring[0..k.ring_len];
     }
 
     /// The program's next bytes, any number.
@@ -128,10 +126,15 @@ pub const Keep = struct {
         const hit = if (k.o.re) |p| p.matches(l, &k.work) else true;
         if (hit) {
             k.matched += 1;
-            // The lines before it, in order, then it.
-            var i: usize = 0;
-            while (i < k.back_len) : (i += 1) try k.pass(k.back[(k.back_at + i) % k.back.len]);
-            k.back_len = 0;
+            // The lines before it, in order, then it. Each leaves the ring
+            // before it is passed on: `pass` owns it then (and frees it if
+            // it fails), so a failure part way leaves none in two places.
+            while (k.back_len > 0) {
+                const l0 = k.back[k.back_at];
+                k.back_at = (k.back_at + 1) % k.back.len;
+                k.back_len -= 1;
+                try k.pass(l0);
+            }
             k.back_at = 0;
             try k.pass(try k.cut(l, k.line_over));
             k.after_left = k.o.after;
@@ -340,4 +343,26 @@ test "keep: the edges: nothing, no final newline, fewer lines than head and tail
     const none = try kept(a, "a\nerror\nb\n", .{}, "error", null, 2);
     try testing.expectEqualStrings("… 1 line left out …\n", none.out);
     try testing.expectEqual(@as(u64, 1), none.matched);
+}
+
+test "keep: an allocation refused anywhere (the host's cap) leaves nothing freed twice and nothing leaked" {
+    var refused: regex.Refusal = undefined;
+    var prog = try regex.compile(testing.allocator, "error", .{}, &refused);
+    defer prog.deinit(testing.allocator);
+    var sc = try regex.Scratch.init(testing.allocator, &prog);
+    defer sc.deinit(testing.allocator);
+    const out = "a\nb\nc\nerror one\nd\ne\nf\ng\nerror two\nh\n";
+    // Every allocation the keep makes, refused in turn.
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_at });
+        const a = failing.allocator();
+        var k = Keep.init(a, .{ .re = .{ .program = &prog, .scratch = &sc }, .before = 3, .after = 1, .head = 8, .tail = 1 }) catch continue;
+        defer k.deinit();
+        k.feed(out) catch continue;
+        const got = k.finish() catch continue;
+        a.free(got.out);
+        if (!failing.has_induced_failure) break;
+    }
+    try testing.expect(fail_at > 5);
 }
