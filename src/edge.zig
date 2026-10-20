@@ -52,14 +52,14 @@ pub const RejectKind = enum {
     malformed_multipart, // a multipart upload we couldn't parse a file out of
 };
 
-const N = @typeInfo(RejectKind).@"enum".fields.len;
+const N = @typeInfo(RejectKind).@"enum".field_names.len;
 
 /// counters[kind] — process-lifetime, lock-free. .monotonic is enough: we never
 /// order these against other memory, we just want an eventually-correct tally.
-var counters = [_]std.atomic.Value(u64){std.atomic.Value(u64).init(0)} ** N;
+var counters: [N]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0));
 
 fn bump(kind: RejectKind) void {
-    _ = counters[@intFromEnum(kind)].fetchAdd(1, .monotonic);
+    _ = counters[@backingInt(kind)].fetchAdd(1, .monotonic);
 }
 
 /// statusFor maps a reject kind to its canonical HTTP status. Category, not
@@ -93,7 +93,7 @@ pub fn reject(req: *Request, kind: RejectKind, msg: []const u8) !void {
 /// host refusing an oversized head before any route sees it).
 /// How many of `kind` have been counted.
 pub fn countOf(kind: RejectKind) u64 {
-    return counters[@intFromEnum(kind)].load(.monotonic);
+    return counters[@backingInt(kind)].load(.monotonic);
 }
 
 pub fn count(kind: RejectKind) void {

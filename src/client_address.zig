@@ -58,5 +58,5 @@ pub fn save() Saved {
 test "plausible: an address's characters at an address's length, and nothing else" {
     try std.testing.expect(plausible("203.0.113.7"));
     try std.testing.expect(plausible("2001:db8::1"));
-    for ([_][]const u8{ "", "unknown", "1.2.3.4 ", "a" ** 46, "../x" }) |bad| try std.testing.expect(!plausible(bad));
+    for ([_][]const u8{ "", "unknown", "1.2.3.4 ", &@as([46]u8, @splat('a')), "../x" }) |bad| try std.testing.expect(!plausible(bad));
 }

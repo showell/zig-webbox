@@ -387,7 +387,7 @@ pub fn write(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: Wri
     // The flags are spelled in place, not named: std.Io and the bare-metal
     // host's io call their type differently.
     if (opts.private) {
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data, .flags = .{ .permissions = @enumFromInt(0o600) } });
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data, .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) } });
     } else {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = data });
     }
@@ -418,7 +418,7 @@ pub fn replace(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts: W
     const tmp_name = try siblingName(alloc, std.fs.path.basename(p));
     const tmp = if (dir) |d| try std.fs.path.join(alloc, &.{ d, tmp_name }) else tmp_name;
     if (opts.private) {
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @enumFromInt(0o600) } });
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) } });
     } else if (comptime @import("builtin").os.tag == .linux) {
         // **ON LINUX THE NEW FILE HAS THE OLD ONE'S MODE**: a replace is the
         // same file written anew, so an executable script stays one.
@@ -461,7 +461,7 @@ pub fn createNew(io: Io, alloc: Alloc, path: []const u8, data: []const u8, opts:
     const tmp_name = try std.fmt.allocPrint(alloc, "~{x:0>8}.new", .{std.mem.readInt(u32, &r, .little)});
     const tmp = if (dir) |d| try std.fs.path.join(alloc, &.{ d, tmp_name }) else tmp_name;
     if (opts.private) {
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @enumFromInt(0o600), .exclusive = true } });
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)), .exclusive = true } });
     } else {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data, .flags = .{ .exclusive = true } });
     }
@@ -554,9 +554,9 @@ const Fixture = struct {
 };
 
 test "names FAT holds, and names it refuses" {
-    for ([_][]const u8{ "a", "plan.md", "Plan-2.reactions.jsonl", "0f3a.png", "_session_secret", "a b", "x" ** 96 }) |ok|
+    for ([_][]const u8{ "a", "plan.md", "Plan-2.reactions.jsonl", "0f3a.png", "_session_secret", "a b", &@as([96]u8, @splat('x')) }) |ok|
         try testing.expect(fatName(ok));
-    for ([_][]const u8{ "", ".", "..", "what?", "a:b", "a/b", "a\\b", "trailing.", "trailing ", "caf\xc3\xa9", "tab\t", "x" ** 97 }) |bad|
+    for ([_][]const u8{ "", ".", "..", "what?", "a:b", "a/b", "a\\b", "trailing.", "trailing ", "caf\xc3\xa9", "tab\t", &@as([97]u8, @splat('x')) }) |bad|
         try testing.expect(!fatName(bad));
 }
 
@@ -608,7 +608,7 @@ test "a name FAT refuses is refused here too, before anything is made" {
     const io = threaded.io();
 
     try testing.expectError(error.BadName, write(io, a, f.p("data/what?.md"), "x", .{}));
-    try testing.expectError(error.BadName, append(io, a, f.p("data/" ++ "x" ** 97), "x"));
+    try testing.expectError(error.BadName, append(io, a, f.p("data/" ++ &@as([97]u8, @splat('x'))), "x"));
     try testing.expectError(error.BadName, makeDir(io, a, f.p("data/trailing./inner")));
     try testing.expectError(error.BadName, removeTree(io, a, f.p("data/users/   ")));
     try testing.expect(!try has(io, a, f.p("data/trailing.")));
@@ -647,8 +647,8 @@ test "replace makes the file hold exactly the data, keeps its name, and leaves n
     // One sibling name per file, in any case, and short enough for any name.
     try testing.expectEqualStrings(try siblingName(a, "Topic.count"), try siblingName(a, "topic.COUNT"));
     try testing.expect(!std.mem.eql(u8, try siblingName(a, "a.count"), try siblingName(a, "b.count")));
-    try testing.expectEqual(@as(usize, 13), (try siblingName(a, "x" ** 96)).len);
-    try testing.expect(fatName(try siblingName(a, "x" ** 96)));
+    try testing.expectEqual(@as(usize, 13), (try siblingName(a, &@as([96]u8, @splat('x')))).len);
+    try testing.expect(fatName(try siblingName(a, &@as([96]u8, @splat('x')))));
 }
 
 test "a path the bare-metal host could not hold is refused, measured as it would spell it" {
@@ -666,10 +666,10 @@ test "a path the bare-metal host could not hold is refused, measured as it would
     setBases(data, f.p("home/someone/a-long-host-path/prod/auth"));
 
     // data/ + 245 bytes is 250: held. Spelled here it is far longer.
-    const near = try std.fs.path.join(a, &.{ data, "x" ** 90, "y" ** 90, "z" ** 63 });
+    const near = try std.fs.path.join(a, &.{ data, &@as([90]u8, @splat('x')), &@as([90]u8, @splat('y')), &@as([63]u8, @splat('z')) });
     try write(io, a, near, "ok", .{});
     // data/ + 252 bytes is 257: refused, before anything is made.
-    const over = try std.fs.path.join(a, &.{ data, "x" ** 90, "y" ** 90, "q" ** 70 });
+    const over = try std.fs.path.join(a, &.{ data, &@as([90]u8, @splat('x')), &@as([90]u8, @splat('y')), &@as([70]u8, @splat('q')) });
     try testing.expectError(error.PathTooLong, write(io, a, over, "no", .{}));
     try testing.expectError(error.PathTooLong, append(io, a, over, "no"));
     try testing.expectError(error.PathTooLong, replace(io, a, over, "no", .{}));
@@ -685,8 +685,8 @@ test "a path the bare-metal host could not hold is refused, measured as it would
     try testing.expect(!try has(io, a, try std.fs.path.join(a, parts[0..17])));
 
     // Under auth/ too; and not a path that only begins like a root.
-    try testing.expectError(error.PathTooLong, write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/auth"), "x" ** 96, "y" ** 96, "z" ** 96 }), "no", .{}));
-    try write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/data2"), "x" ** 96, "y" ** 96, "z" ** 96 }), "free", .{});
+    try testing.expectError(error.PathTooLong, write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/auth"), &@as([96]u8, @splat('x')), &@as([96]u8, @splat('y')), &@as([96]u8, @splat('z')) }), "no", .{}));
+    try write(io, a, try std.fs.path.join(a, &.{ f.p("home/someone/a-long-host-path/prod/data2"), &@as([96]u8, @splat('x')), &@as([96]u8, @splat('y')), &@as([96]u8, @splat('z')) }), "free", .{});
 }
 
 test "a missing file is empty, and something unreadable in its place is not" {
@@ -834,7 +834,7 @@ test "a private write, replace or create leaves the file 0600, even over one tha
     const Mode = struct {
         fn of(io2: Io, path: []const u8) !u32 {
             const st = try Io.Dir.cwd().statFile(io2, path, .{});
-            return @intFromEnum(st.permissions) & 0o777;
+            return @backingInt(st.permissions) & 0o777;
         }
     };
     try write(io, a, f.p("data/s1"), "x", .{ .private = true });
@@ -846,7 +846,7 @@ test "a private write, replace or create leaves the file 0600, even over one tha
     // A file that was there, readable by all (a hand-seeded secret): a
     // private write makes it private, where O_CREAT's mode, applying only
     // to a file it creates, left it 0644.
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = f.p("data/seeded"), .data = "old", .flags = .{ .permissions = @enumFromInt(0o644) } });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = f.p("data/seeded"), .data = "old", .flags = .{ .permissions = @fromBackingInt(@intCast(0o644)) } });
     try write(io, a, f.p("data/seeded"), "new", .{ .private = true });
     try testing.expectEqual(@as(u32, 0o600), try Mode.of(io, f.p("data/seeded")));
     try testing.expectEqualStrings("new", try read(io, a, f.p("data/seeded"), .unlimited));
@@ -862,15 +862,15 @@ test "a replace keeps the file's mode on Linux: an executable script stays one (
     defer threaded.deinit();
     const io = threaded.io();
     try write(io, a, f.p("data/run.sh"), "old", .{});
-    const z = try a.dupeZ(u8, f.p("data/run.sh"));
+    const z = try a.dupeSentinel(u8, f.p("data/run.sh"), 0);
     try testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z, 0o755)));
     try replace(io, a, f.p("data/run.sh"), "new", .{});
     const st = try Io.Dir.cwd().statFile(io, f.p("data/run.sh"), .{});
-    try testing.expectEqual(@as(u32, 0o755), @intFromEnum(st.permissions) & 0o777);
+    try testing.expectEqual(@as(u32, 0o755), @backingInt(st.permissions) & 0o777);
     try testing.expectEqualStrings("new", try read(io, a, f.p("data/run.sh"), .unlimited));
     // A private replace still makes it 0600, whatever it was.
     try replace(io, a, f.p("data/run.sh"), "x", .{ .private = true });
-    try testing.expectEqual(@as(u32, 0o600), @intFromEnum((try Io.Dir.cwd().statFile(io, f.p("data/run.sh"), .{})).permissions) & 0o777);
+    try testing.expectEqual(@as(u32, 0o600), @backingInt((try Io.Dir.cwd().statFile(io, f.p("data/run.sh"), .{})).permissions) & 0o777);
 }
 
 test "a replace onto a folder fails, and leaves no temporary file beside it (the real rename's refusal)" {

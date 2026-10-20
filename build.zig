@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     // Not in `test`: it needs the siblings, and minutes. Run before a webbox
     // change is pushed to master.
     const consumers = b.step("consumers", "This tree's own docs checked (by shale's doc check), then each consumer's own checks against this tree: shale's tests, metal-vmm's queue tool, the Observatory's and dog-park's tests, the kernel's gopher.elf, angry-gopher's ops/check_zig (needs the sibling checkouts)");
-    const here = b.build_root.path orelse ".";
+    const here = b.root.root_dir.path orelse ".";
     var prev: ?*std.Build.Step = null;
     for ([_]struct { repo: []const u8, cmd: []const u8 }{
         // **THE DOCS' CITED PATHS AND NAMES**, this tree's (shale's

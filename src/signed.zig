@@ -114,7 +114,7 @@ test "signed: a MAC of any other length names no one, and never runs past its bu
     }
     try testing.expect(verify(kind, secret, v[0 .. v.len - 1], 1000) == null);
     try testing.expect(verify(kind, secret, "42.1000.", 1000) == null);
-    try testing.expect(verify(kind, secret, try std.fmt.allocPrint(a, "42.1000.{s}", .{"A" ** 400}), 1000) == null);
+    try testing.expect(verify(kind, secret, try std.fmt.allocPrint(a, "42.1000.{s}", .{&@as([400]u8, @splat('A'))}), 1000) == null);
 }
 
 test "signed: a value names its id exactly at its lifetime and skew, and not one second past either" {

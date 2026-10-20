@@ -164,7 +164,7 @@ fn keptPath(target: []const u8) Text {
     // case, the slashes are kept and the next segment goes, up to `.`,
     // `/`, `?`, `#`, a space or a quote.
     const key = "/uploads/";
-    if (std.ascii.indexOfIgnoreCase(path, key)) |at| {
+    if (std.ascii.findIgnoreCase(path, key)) |at| {
         var from = at + key.len;
         while (from < path.len and path[from] == '/') from += 1;
         const end = std.mem.indexOfAnyPos(u8, path, from, "./?# \t\"'") orelse path.len;

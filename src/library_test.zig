@@ -44,7 +44,7 @@ const roots = [_]Root{
 /// names (`namedModules`) and its `test {` block.
 fn refs(a: std.mem.Allocator, text: []const u8, comptime call: []const u8) ![]const []const u8 {
     const kind: zig_refs.Kind = if (comptime std.mem.eql(u8, call, "@import")) .import else .embed;
-    const all = switch (try zig_refs.refs(a, try a.dupeZ(u8, text))) {
+    const all = switch (try zig_refs.refs(a, try a.dupeSentinel(u8, text, 0))) {
         .ok => |ok| ok.refs,
         .parse_error => |line| {
             parse_problems.append(a, std.fmt.allocPrint(a, "a file does not parse as Zig at line {d}", .{line}) catch return error.OutOfMemory) catch return error.OutOfMemory;

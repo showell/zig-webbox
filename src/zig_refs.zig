@@ -22,20 +22,20 @@ pub const Refs = union(enum) {
 };
 
 pub fn refs(a: std.mem.Allocator, src: [:0]const u8) error{OutOfMemory}!Refs {
-    const tree = try Ast.parse(a, src, .zig);
+    const tree = try Ast.parse(a, src, .{ .mode = .zig });
     if (tree.errors.len != 0) return .{ .parse_error = tree.tokenLocation(0, tree.errors[0].token).line + 1 };
     // The names: a declaration whose value is the call itself.
     var bound: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
     for (0..tree.nodes.len) |k| {
-        const node: Ast.Node.Index = @enumFromInt(k);
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(k));
         if (node == .root) continue;
         if (tree.fullVarDecl(node)) |vd| if (vd.ast.init_node.unwrap()) |init|
-            try bound.put(a, @intFromEnum(init), tree.tokenSlice(vd.ast.mut_token + 1));
+            try bound.put(a, @backingInt(init), tree.tokenSlice(vd.ast.mut_token + 1));
     }
     const At = struct { tok: u32, ref: Ref };
     var found: std.ArrayList(At) = .empty;
     for (0..tree.nodes.len) |k| {
-        const node: Ast.Node.Index = @enumFromInt(k);
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(k));
         var buf: [2]Ast.Node.Index = undefined;
         const params = tree.builtinCallParams(&buf, node) orelse continue;
         const main = tree.nodeMainToken(node);
@@ -49,7 +49,7 @@ pub fn refs(a: std.mem.Allocator, src: [:0]const u8) error{OutOfMemory}!Refs {
         try found.append(a, .{ .tok = main, .ref = .{
             .kind = kind,
             .target = target,
-            .name = bound.get(@intFromEnum(node)) orelse "",
+            .name = bound.get(@backingInt(node)) orelse "",
             .line = tree.tokenLocation(0, main).line + 1,
         } });
     }

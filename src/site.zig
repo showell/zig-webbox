@@ -369,14 +369,14 @@ fn betweenOf(comptime A: type, io: Io, now: Now) Wake {
 test "site: an application's between is called in its own shape: bool with Unix seconds, Wake with both clocks, none idle" {
     const Old = struct {
         var seen: i64 = 0;
-        fn between(_: Io, now: i64) bool {
+        pub fn between(_: Io, now: i64) bool {
             seen = now;
             return now == 1_800_000_000;
         }
     };
     const New = struct {
         var seen: Now = undefined;
-        fn between(_: Io, now: Now) Wake {
+        pub fn between(_: Io, now: Now) Wake {
             seen = now;
             return .{ .at = now.awake_ns + 60 * std.time.ns_per_s };
         }
@@ -394,11 +394,11 @@ test "site: an application's between is called in its own shape: bool with Unix 
 test "site: a long topic's upload is counted under uploads: the family is read from the whole path (189's minor 10)" {
     const A = struct {
         const Family = enum { chat, uploads };
-        fn family(path: []const u8) Family {
+        pub fn family(path: []const u8) Family {
             return if (std.mem.endsWith(u8, path, "/upload")) .uploads else .chat;
         }
     };
-    const topic = "t" ** 150;
+    const topic = &@as([150]u8, @splat('t'));
     try testing.expectEqualStrings("uploads", familyName(A, "/chat/c/1_2/" ++ topic ++ "/upload?x=1"));
     try testing.expectEqualStrings("chat", familyName(A, "/chat/c/1_2/" ++ topic));
     try testing.expectEqualStrings("all", familyName(struct {}, "/x"));

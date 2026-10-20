@@ -129,7 +129,7 @@ test "host_fetch: no host, no fetch; a host's fetch is started once at a time an
     provide(.{ .start = Fake.startIt, .result = Fake.resultIt });
     try start(t, d);
     try std.testing.expectError(error.Busy, start(t, d));
-    try std.testing.expectError(error.PathTooLong, start(.{ .ip = t.ip, .port = 80, .path = "/" ** (path_most + 1) }, d));
+    try std.testing.expectError(error.PathTooLong, start(.{ .ip = t.ip, .port = 80, .path = &@as([path_most + 1]u8, @splat('/')) }, d));
     try std.testing.expectEqual(@as(?Result, null), result());
     Fake.ended = .{ .outcome = .ok, .status = 200, .body = "{}" };
     try std.testing.expectEqual(Outcome.ok, result().?.outcome);

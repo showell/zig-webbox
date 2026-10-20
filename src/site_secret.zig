@@ -152,15 +152,15 @@ test "the previous secret is taken until the second before previous-until, not a
     defer tmp.cleanup();
     const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
 
-    const prev = "q" ** 32;
+    const prev = &@as([32]u8, @splat('q'));
     try store.write(io, a, try std.fs.path.join(a, &.{ dir, previous_name }), prev, .{});
     try store.write(io, a, try std.fs.path.join(a, &.{ dir, previous_until_name }), "5000\n", .{});
     try std.testing.expectEqualStrings(prev, (try previous(io, a, dir, 4999)).?);
     try std.testing.expect((try previous(io, a, dir, 5000)) == null);
 
     const cur = try std.fs.path.join(a, &.{ dir, current_name });
-    try store.write(io, a, cur, "s" ** 32, .{});
+    try store.write(io, a, cur, &@as([32]u8, @splat('s')), .{});
     try std.testing.expectEqual(@as(usize, 32), (try load(io, a, dir)).?.len);
-    try store.replace(io, a, cur, "s" ** 31, .{});
+    try store.replace(io, a, cur, &@as([31]u8, @splat('s')), .{});
     try std.testing.expect((try load(io, a, dir)) == null);
 }

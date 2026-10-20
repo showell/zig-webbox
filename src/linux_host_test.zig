@@ -447,7 +447,7 @@ test "linux_host: a stream kept after its request's body gives the body's charge
     try bench.init();
     defer bench.deinit();
     const io = bench.threaded.io();
-    var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 100);
+    var c = try bench.client("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ &@as([100]u8, @splat('x')));
     defer c.end(io);
     // The stream's head came: the stream is open. The route flushes that
     // head before it returns, so the charge comes back a moment after: it
@@ -497,7 +497,7 @@ test "linux_host: a small body charged as it came gives its charge back when it 
     defer bench.deinit();
     const io = bench.threaded.io();
     // Forty bytes of a hundred, then nothing: charged forty, then 408.
-    var c = try bench.client("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ "x" ** 40);
+    var c = try bench.client("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n" ++ &@as([40]u8, @splat('x')));
     try c.listen(io);
     const done = c.answer.within(io, 2000);
     c.end(io);
@@ -661,7 +661,7 @@ test "linux_host: the body read before the turn reaches its handler as it is, ne
         try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nsame"));
     }
     {
-        const got = try exchange("POST /upload-same HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 2000000\r\n\r\n" ++ "u" ** 2000000);
+        const got = try exchange("POST /upload-same HTTP/1.1\r\nHost: x\r\nX-Who: ann\r\nContent-Length: 2000000\r\n\r\n" ++ &@as([2000000]u8, @splat('u')));
         defer std.testing.allocator.free(got);
         try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nsame"));
     }
@@ -793,7 +793,7 @@ test "linux_host: a small body's read holds no more memory than it charged (meta
     const n = 300 * 1024;
     const raw = try std.fmt.allocPrint(std.testing.allocator, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{n});
     defer std.testing.allocator.free(raw);
-    const whole_raw = try std.mem.concat(std.testing.allocator, u8, &.{ raw, &([_]u8{'x'} ** n) });
+    const whole_raw = try std.mem.concat(std.testing.allocator, u8, &.{ raw, &(@as([n]u8, @splat('x'))) });
     defer std.testing.allocator.free(whole_raw);
     var reader: std.Io.Reader = .fixed(whole_raw);
     var out_buf: [256]u8 = undefined;
@@ -1222,7 +1222,7 @@ fn countAnswers(bytes: []const u8) usize {
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, bytes, at, "\r\n\r\n")) |end| {
         const head = bytes[at..end];
-        const length: usize = if (std.ascii.indexOfIgnoreCase(head, "content-length: ")) |i| std.fmt.parseInt(usize, std.mem.sliceTo(head[i + 16 ..], '\r'), 10) catch 0 else 0;
+        const length: usize = if (std.ascii.findIgnoreCase(head, "content-length: ")) |i| std.fmt.parseInt(usize, std.mem.sliceTo(head[i + 16 ..], '\r'), 10) catch 0 else 0;
         if (bytes.len < end + 4 + length) break;
         n += 1;
         at = end + 4 + length;

@@ -377,8 +377,9 @@ pub fn methodNotAllowed(req: *std.http.Server.Request, allow: std.http.Method) !
 /// when the result is null. Every host has the body in memory by now
 /// (body.zig: the turn never waits on the network).
 ///
-/// `max + 1`: allocRemaining errors when the limit is *reached* (≥), so to allow
-/// a body of exactly `max` and reject only `max + 1` we pass `max + 1`.
+/// `max`: allocRemaining (since Zig 0.17) takes a body of exactly its limit
+/// and errors past it, so a body of `max` is read and `max + 1` refused.
+/// (Under 0.16 it errored on reaching the limit, and this passed `max + 1`.)
 ///
 /// No-framing guard: a request with NO Content-Length and NO chunked transfer
 /// encoding has no body (RFC 9110). zig's bodyReader would otherwise frame that
@@ -408,7 +409,7 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
     var buf: [4 * 1024]u8 = undefined;
     const declared = req.head.content_length;
     const reader = try req.readerExpectContinue(&buf);
-    const got = reader.allocRemaining(alloc, .limited(max + 1)) catch |e| switch (e) {
+    const got = reader.allocRemaining(alloc, .limited(max)) catch |e| switch (e) {
         error.StreamTooLong => {
             try edge.reject(req, .body_too_large, "request body too large\n");
             return null;
@@ -508,14 +509,14 @@ test "readLimitedBody: a body of exactly the limit is read, one byte more is ref
     const a = arena.allocator();
     const max = 8;
     var status: []const u8 = "";
-    const at = try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\n" ++ "b" ** max, max, &status);
-    try testing.expectEqualStrings("b" ** max, at.?);
-    try testing.expect(try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\n" ++ "b" ** (max + 1), max, &status) == null);
+    const at = try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\n" ++ &@as([max]u8, @splat('b')), max, &status);
+    try testing.expectEqualStrings(&@as([max]u8, @splat('b')), at.?);
+    try testing.expect(try readBodyOf(a, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\n" ++ &@as([max + 1]u8, @splat('b')), max, &status) == null);
     try testing.expectEqualStrings("413", status);
     // Chunked, the same edge: the length is not stated, the bytes are counted.
     const chunked = "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
-    try testing.expectEqualStrings("b" ** max, (try readBodyOf(a, chunked ++ "8\r\n" ++ "b" ** max ++ "\r\n0\r\n\r\n", max, &status)).?);
-    try testing.expect(try readBodyOf(a, chunked ++ "9\r\n" ++ "b" ** (max + 1) ++ "\r\n0\r\n\r\n", max, &status) == null);
+    try testing.expectEqualStrings(&@as([max]u8, @splat('b')), (try readBodyOf(a, chunked ++ "8\r\n" ++ &@as([max]u8, @splat('b')) ++ "\r\n0\r\n\r\n", max, &status)).?);
+    try testing.expect(try readBodyOf(a, chunked ++ "9\r\n" ++ &@as([max + 1]u8, @splat('b')) ++ "\r\n0\r\n\r\n", max, &status) == null);
     try testing.expectEqualStrings("413", status);
 }
 
@@ -571,7 +572,7 @@ fn receiveThroughHostBuffer(raw: []const u8) !void {
 test "head_bytes: a request head of exactly head_bytes is received, one byte more is oversize (431)" {
     const start = "GET / HTTP/1.1\r\nHost: x\r\nX-Pad: ";
     const end = "\r\n\r\n";
-    const pad = "p" ** (head_bytes - start.len - end.len);
+    const pad = &@as([head_bytes - start.len - end.len]u8, @splat('p'));
     try receiveThroughHostBuffer(start ++ pad ++ end);
     try testing.expectError(error.HttpHeadersOversize, receiveThroughHostBuffer(start ++ pad ++ "p" ++ end));
 }
