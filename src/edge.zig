@@ -120,9 +120,9 @@ pub fn countsText(alloc: Alloc) ![]u8 {
 pub fn countsJSON(alloc: Alloc) ![]u8 {
     var b: std.ArrayList(u8) = .empty;
     try b.append(alloc, '{');
-    inline for (@typeInfo(RejectKind).@"enum".fields, 0..) |f, i| {
+    inline for (@typeInfo(RejectKind).@"enum".field_names, 0..) |name, i| {
         if (i != 0) try b.append(alloc, ',');
-        try b.print(alloc, "\"{s}\":{d}", .{ f.name, counters[i].load(.monotonic) });
+        try b.print(alloc, "\"{s}\":{d}", .{ name, counters[i].load(.monotonic) });
     }
     try b.append(alloc, '}');
     return b.toOwnedSlice(alloc);
