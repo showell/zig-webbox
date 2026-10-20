@@ -104,11 +104,11 @@ pub fn count(kind: RejectKind) void {
 /// `body_too_large 3, header_too_large 1`, or `none`.
 pub fn countsText(alloc: Alloc) ![]u8 {
     var b: std.ArrayList(u8) = .empty;
-    inline for (@typeInfo(RejectKind).@"enum".fields, 0..) |f, i| {
+    inline for (@typeInfo(RejectKind).@"enum".field_names, 0..) |name, i| {
         const n = counters[i].load(.monotonic);
         if (n != 0) {
             if (b.items.len != 0) try b.appendSlice(alloc, ", ");
-            try b.print(alloc, "{s} {d}", .{ f.name, n });
+            try b.print(alloc, "{s} {d}", .{ name, n });
         }
     }
     if (b.items.len == 0) try b.appendSlice(alloc, "none");
