@@ -74,8 +74,9 @@ pub const Error = error{ BadName, PathTooLong, PathTooDeep };
 /// before a response compares it with the count its last sync covered
 /// (Linux: linux_durable.zig); the bare-metal host's io keeps its own
 /// account and reads nothing here. Atomic: on Linux a kept stream's task
-/// reads it outside the turn.
-pub var changes: std.atomic.Value(u64) = .init(0);
+/// reads it outside the turn. A `usize`, as wasm32 has no 64-bit atomics
+/// (shale's browser build), and no disk to sync.
+pub var changes: std.atomic.Value(usize) = .init(0);
 
 fn changed() void {
     _ = changes.fetchAdd(1, .acq_rel);
