@@ -127,7 +127,7 @@ pub fn Server(comptime S: type) type {
             // process's lifetime. Each request gets its own handle on it (a
             // Bus), which is where a stream handler leaves the stream it
             // kept.
-            const hub = &started.hub;
+            const hub = started.hub;
 
             if (bus.keepaliveSetting(env.get(options.env.keepalive_ms)) catch |e| {
                 std.debug.print("{s}: {s}={s} is not a number of milliseconds above zero; not starting\n", .{ options.name, options.env.keepalive_ms, env.get(options.env.keepalive_ms) orelse "" });

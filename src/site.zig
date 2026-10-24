@@ -93,10 +93,14 @@ pub fn Site(comptime App: type) type {
     return struct {
         /// What `start` made, and what the application's setup did.
         pub const Started = struct {
-            /// The registry live streams publish through, one per process.
-            hub: bus.Hub,
+            /// The registry live streams publish through, one per process:
+            /// the site's, which its routes and its `between` reach too.
+            hub: *bus.Hub,
             app: App.StartReport,
         };
+
+        /// The hub `start` made, for `between`'s Bus: null before it.
+        var hub_kept: ?*bus.Hub = null;
 
         /// **THE SETUP, ONCE, BEFORE THE FIRST REQUEST**, in the one right
         /// order: the store pointed at the host's roots, the application's
@@ -116,7 +120,10 @@ pub fn Site(comptime App: type) type {
                 .unknown => null,
             };
             client_address.trusted_proxy = host.trusted_proxy;
-            return .{ .hub = bus.Hub.init(io, base), .app = app };
+            const hub = try base.create(bus.Hub);
+            hub.* = bus.Hub.init(io, base);
+            hub_kept = hub;
+            return .{ .hub = hub, .app = app };
         }
 
         /// **BETWEEN REQUESTS** (metal-vmm QUEUE 211): the application's
@@ -124,7 +131,7 @@ pub fn Site(comptime App: type) type {
         /// time (a background script's, Shale's `script_route.sliceBackground`);
         /// when it next needs a turn (`Wake`). A site with none is idle.
         pub fn between(io: Io, now: Now) Wake {
-            return betweenOf(App, io, now);
+            return betweenOf(App, io, now, hub_kept);
         }
 
         /// The route's cap on a body, from the head's target (its path; the
@@ -354,19 +361,28 @@ pub const Now = @import("wake.zig").Now;
 /// A period's next time, scheduled from when it was due (wake.zig).
 pub const periodAfter = @import("wake.zig").periodAfter;
 
-/// **AN APPLICATION'S `between`, AS EITHER SHAPE**: one that answers `Wake`
-/// is handed both clocks; one that answers `bool` (whether there is more)
-/// keeps the Unix seconds it was written for, and its answer is `.more` or
-/// `.idle`. Never a clock cast into the other.
-fn betweenOf(comptime A: type, io: Io, now: Now) Wake {
+/// **AN APPLICATION'S `between`, IN ANY OF ITS SHAPES**: `between(io, now:
+/// Now, bus: *Bus) Wake`, both clocks and a Bus on the site's hub, as its
+/// routes have, so the work between requests publishes to the streams they
+/// serve (a live view's ticks); `between(io, now: Now) Wake`; or
+/// `between(io, unix_s: i64) bool` (whether there is more), the Unix seconds
+/// it was written for, its answer `.more` or `.idle`. Never a clock cast
+/// into the other. One that takes a Bus is not called before `start` made
+/// the hub: nobody is listening yet.
+fn betweenOf(comptime A: type, io: Io, now: Now, hub: ?*bus.Hub) Wake {
     if (!@hasDecl(A, "between")) return .idle;
-    const answers = @typeInfo(@TypeOf(A.between)).@"fn".return_type.?;
+    const shape = @typeInfo(@TypeOf(A.between)).@"fn";
+    const answers = shape.return_type.?;
     if (answers == bool) return if (A.between(io, now.unix_s)) .more else .idle;
+    if (answers == Wake and shape.param_types.len == 3) {
+        var b = bus.Bus.of(hub orelse return .idle);
+        return A.between(io, now, &b);
+    }
     if (answers == Wake) return A.between(io, now);
     @compileError("an application's between answers bool or webbox.site.Wake (site.zig)");
 }
 
-test "site: an application's between is called in its own shape: bool with Unix seconds, Wake with both clocks, none idle" {
+test "site: an application's between is called in its own shape: bool with Unix seconds, Wake with both clocks, and a Bus on the hub, none idle" {
     const Old = struct {
         var seen: i64 = 0;
         pub fn between(_: Io, now: i64) bool {
@@ -383,12 +399,31 @@ test "site: an application's between is called in its own shape: bool with Unix 
     };
     const io = std.testing.io;
     const now: Now = .{ .awake_ns = 5 * std.time.ns_per_s, .unix_s = 1_800_000_000 };
-    try testing.expectEqual(Wake.more, betweenOf(Old, io, now));
+    const Ticking = struct {
+        var calls: u32 = 0;
+        pub fn between(_: Io, _: Now, b: *bus.Bus) Wake {
+            calls += 1;
+            b.publish("ticks", "tick");
+            return .idle;
+        }
+    };
+    try testing.expectEqual(Wake.more, betweenOf(Old, io, now, null));
     try testing.expectEqual(@as(i64, 1_800_000_000), Old.seen);
-    try testing.expectEqual(Wake.idle, betweenOf(Old, io, .{ .awake_ns = 0, .unix_s = 7 }));
-    try testing.expectEqual(Wake{ .at = 65 * std.time.ns_per_s }, betweenOf(New, io, now));
+    try testing.expectEqual(Wake.idle, betweenOf(Old, io, .{ .awake_ns = 0, .unix_s = 7 }, null));
+    try testing.expectEqual(Wake{ .at = 65 * std.time.ns_per_s }, betweenOf(New, io, now, null));
     try testing.expectEqual(now, New.seen);
-    try testing.expectEqual(Wake.idle, betweenOf(struct {}, io, now));
+    try testing.expectEqual(Wake.idle, betweenOf(struct {}, io, now, null));
+
+    // Before a hub there is nobody to tell: not called.
+    try testing.expectEqual(Wake.idle, betweenOf(Ticking, io, now, null));
+    try testing.expectEqual(@as(u32, 0), Ticking.calls);
+    var hub = bus.Hub.init(io, testing.allocator);
+    defer hub.entries.deinit(testing.allocator);
+    const sub = try hub.open("ticks");
+    defer hub.close(sub);
+    try testing.expectEqual(Wake.idle, betweenOf(Ticking, io, now, &hub));
+    try testing.expectEqual(@as(u32, 1), Ticking.calls);
+    try testing.expectEqual(@as(usize, 1), sub.count);
 }
 
 test "site: a long topic's upload is counted under uploads: the family is read from the whole path (189's minor 10)" {
