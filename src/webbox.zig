@@ -12,6 +12,8 @@
 /// (`start`, then `route` per request) around the application's own setup
 /// and route table; `Host` is what a host supplies.
 pub const site = @import("site.zig");
+/// Several applications as one site: a primary at `/`, others mounted
+/// under their own prefix (`Mount`).
 pub const combo = @import("combo.zig");
 /// When an application next needs to run, and the clock it is asked by
 /// (`Wake`, `Now`, `periodAfter`); `site` re-exports them.
