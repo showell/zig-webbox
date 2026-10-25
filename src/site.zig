@@ -91,6 +91,10 @@ pub fn Site(comptime App: type) type {
         if (!@hasDecl(App, decl[0])) @compileError("a site's application declares " ++ decl[1] ++ " (site.zig, Site)");
     }
     return struct {
+        /// The application this site serves: combo.zig's Mount reaches its
+        /// table to compose several.
+        pub const Application = App;
+
         /// What `start` made, and what the application's setup did.
         pub const Started = struct {
             /// The registry live streams publish through, one per process:
@@ -358,7 +362,10 @@ const testing = std.testing;
 fn familyName(comptime A: type, target: []const u8) []const u8 {
     if (!@hasDecl(A, "family")) return "all";
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
-    return @tagName(A.family(path));
+    // An enum's tag, or a name already (a Mount's, whose parts' families are
+    // names of different enums).
+    const f = A.family(path);
+    return if (@TypeOf(f) == []const u8) f else @tagName(f);
 }
 
 /// When the application next needs a turn, and the clocks a host hands
@@ -376,7 +383,7 @@ pub const periodAfter = @import("wake.zig").periodAfter;
 /// it was written for, its answer `.more` or `.idle`. Never a clock cast
 /// into the other. One that takes a Bus is not called with no hub (a site
 /// makes one on first need; only out of memory leaves it none).
-fn betweenOf(comptime A: type, io: Io, now: Now, hub: ?*bus.Hub) Wake {
+pub fn betweenOf(comptime A: type, io: Io, now: Now, hub: ?*bus.Hub) Wake {
     if (!@hasDecl(A, "between")) return .idle;
     const shape = @typeInfo(@TypeOf(A.between)).@"fn";
     const answers = shape.return_type.?;

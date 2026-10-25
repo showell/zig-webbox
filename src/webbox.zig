@@ -12,6 +12,7 @@
 /// (`start`, then `route` per request) around the application's own setup
 /// and route table; `Host` is what a host supplies.
 pub const site = @import("site.zig");
+pub const combo = @import("combo.zig");
 /// When an application next needs to run, and the clock it is asked by
 /// (`Wake`, `Now`, `periodAfter`); `site` re-exports them.
 pub const wake = @import("wake.zig");
@@ -71,6 +72,7 @@ pub const free_space = @import("free_space.zig");
 test {
     _ = @import("library_test.zig");
     _ = site;
+    _ = combo;
     _ = body;
     _ = http;
     _ = edge;

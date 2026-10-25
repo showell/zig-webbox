@@ -49,6 +49,21 @@ pub fn target(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const 
     return alloc.dupe(u8, req.head.target);
 }
 
+/// **A MOUNTED APPLICATION'S TARGET** (combo.zig): the head's target with its
+/// first `n` bytes (the mount's prefix) off, so the mount sees itself at `/`;
+/// the whole target is returned for `restoreTarget` once the mount answers.
+/// The head is not copied: the mount reads it through this module as any
+/// application does.
+pub fn stripTarget(req: *std.http.Server.Request, n: usize) []const u8 {
+    const whole = req.head.target;
+    req.head.target = whole[n..];
+    return whole;
+}
+
+pub fn restoreTarget(req: *std.http.Server.Request, whole: []const u8) void {
+    req.head.target = whole;
+}
+
 /// The target's path, without its query, copied into `buf` (cut short to
 /// fit): an owned copy with no allocation, for a count kept of every
 /// request (traffic.zig, metal-vmm QUEUE 189.5).
