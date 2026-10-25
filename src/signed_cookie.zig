@@ -6,6 +6,11 @@
 //! taken; a new one issued; and one renewed when it is used, past half its
 //! life or under the previous secret. When to issue one, and anything an application remembers about who
 //! was issued one, is the application's.
+//!
+//! **A VISITOR** (`visitor`): for a site that keeps something per visitor
+//! and asks them nothing, a random id in a signed cookie, given on the
+//! first visit and read back on every later one. The signature is the
+//! credential: nothing is stored until the application stores something.
 
 const std = @import("std");
 const Io = @import("host_io").Io;
@@ -23,11 +28,31 @@ pub const Cookie = struct {
     legacy_name: ?[]const u8 = null,
     /// Its signing rules; `kind.lifetime_secs` is also its Max-Age.
     kind: signed.Kind,
+    /// How it travels: Secure, behind HTTPS, unless a site says otherwise.
+    transport: Transport = .https,
 };
+
+/// **HOW A COOKIE TRAVELS.** `https` for anything served: Secure, and named
+/// `__Host-` (`named`). `plain_http` for development over plain http, where
+/// a browser drops a Secure cookie: neither.
+pub const Transport = enum { https, plain_http };
+
+/// A cookie's name over `t`: `__Host-<base>` over HTTPS, `base` alone over
+/// plain http (a `__Host-` cookie must be Secure).
+pub fn named(comptime base: []const u8, t: Transport) []const u8 {
+    return switch (t) {
+        .https => http.host_prefix ++ base,
+        .plain_http => base,
+    };
+}
 
 /// The Set-Cookie header value for a signed `value`.
 pub fn header(c: Cookie, alloc: Alloc, value: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "{s}={s}; Path=/; Max-Age={d}; " ++ http.cookie_attributes, .{ c.name, value, c.kind.lifetime_secs });
+    const attributes = switch (c.transport) {
+        .https => http.cookie_attributes,
+        .plain_http => "HttpOnly; SameSite=Lax",
+    };
+    return std.fmt.allocPrint(alloc, "{s}={s}; Path=/; Max-Age={d}; {s}", .{ c.name, value, c.kind.lifetime_secs, attributes });
 }
 
 /// A value that verified: the id it names, when it was signed, and with
@@ -65,11 +90,11 @@ pub const Invalid = enum {
 /// after a change of secret, with the previous one while it is still taken.
 pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Reading {
     var one: [1][]const u8 = undefined;
-    const named: http.Named = if (c.legacy_name) |old|
+    const sent: http.Named = if (c.legacy_name) |old|
         try http.cookieOrLegacy(req, alloc, c.name, old, http.namesNow(now))
     else
         .{ .values = try http.cookie(req, alloc, c.name), .legacy = false };
-    const values: []const []const u8 = switch (named.values) {
+    const values: []const []const u8 = switch (sent.values) {
         .none => return .none,
         .one => |v| blk: {
             one[0] = v;
@@ -83,7 +108,7 @@ pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secr
     for (values) |value| switch (verifyEither(c, current, prev, value, now)) {
         .no => {},
         // A legacy-named value signed after the move is a plant: not read.
-        .yes => |v| if (named.legacy and v.issued >= http.legacy_issued_before_unix) {} else switch (found) {
+        .yes => |v| if (sent.legacy and v.issued >= http.legacy_issued_before_unix) {} else switch (found) {
             .nothing_yet => found = .{ .one = v },
             .one => return .{ .invalid = .more_than_one_verifies },
         },
@@ -92,7 +117,7 @@ pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secr
         .nothing_yet => .{ .invalid = .does_not_verify },
         .one => |v| blk: {
             var under = v;
-            under.legacy = named.legacy;
+            under.legacy = sent.legacy;
             break :blk .{ .verified = under };
         },
     };
@@ -131,6 +156,48 @@ pub fn renew(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, sec
     };
     if (!needsRenewal(c, v, now)) return null;
     return issue(c, io, alloc, secret_dir, v.id, now);
+}
+
+/// **WHO IS ASKING, WITH NO ACCOUNT.** The id this request's cookie `c`
+/// names, or a new one; and the Set-Cookie header to answer with, when the
+/// visitor is new or theirs is due to be signed again.
+pub const Visitor = struct {
+    id: []const u8,
+    set_cookie: ?[]const u8,
+    seen: Seen,
+
+    /// `unrecognised`: a cookie came and named no one (a forgery, one past
+    /// its life, another site's); the visitor is given a new id, as a new
+    /// one is.
+    pub const Seen = enum { new, returning, unrecognised };
+};
+
+/// A visitor's id: 8 random bytes as 16 lowercase hex digits. The
+/// `kind.validId` of a visitor cookie.
+pub fn isVisitorId(id: []const u8) bool {
+    if (id.len != 16) return false;
+    for (id) |ch| if (!std.ascii.isDigit(ch) and !(ch >= 'a' and ch <= 'f')) return false;
+    return true;
+}
+
+/// This request's visitor, by cookie `c` signed with the secret in
+/// `secret_dir` (`error.NoSecret` with none: nothing unsigned is issued).
+pub fn visitor(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Visitor {
+    const seen: Visitor.Seen = switch (try read(c, io, alloc, req, secret_dir, now)) {
+        .verified => |v| return .{
+            .id = v.id,
+            .set_cookie = if (needsRenewal(c, v, now)) try issue(c, io, alloc, secret_dir, v.id, now) else null,
+            .seen = .returning,
+        },
+        .none => .new,
+        .invalid => .unrecognised,
+        .no_secret => return error.NoSecret,
+    };
+    var bytes: [8]u8 = undefined;
+    io.random(&bytes);
+    const id = try alloc.dupe(u8, &std.fmt.bytesToHex(bytes, .lower));
+    const set = (try issue(c, io, alloc, secret_dir, id, now)) orelse return error.NoSecret;
+    return .{ .id = id, .set_cookie = set, .seen = seen };
 }
 
 test "signed_cookie: the header carries the name, the value and the lifetime; it needs renewal past half its life, or under the previous secret" {
@@ -174,6 +241,15 @@ const Rig = struct {
         return signed.sign(a, c.kind, secret, id, now);
     }
     fn reading(self: *Rig, c: Cookie, cookie_lines: []const []const u8, now: i64) !Reading {
+        return self.asked(c, cookie_lines, now, .reading);
+    }
+    fn visiting(self: *Rig, c: Cookie, cookie_lines: []const []const u8, now: i64) !Visitor {
+        return self.asked(c, cookie_lines, now, .visiting);
+    }
+    fn asked(self: *Rig, c: Cookie, cookie_lines: []const []const u8, now: i64, comptime what: enum { reading, visiting }) !switch (what) {
+        .reading => Reading,
+        .visiting => Visitor,
+    } {
         const a = self.arena.allocator();
         var head: std.ArrayList(u8) = .empty;
         try head.appendSlice(a, "GET / HTTP/1.1\r\nHost: x\r\n");
@@ -183,7 +259,10 @@ const Rig = struct {
         var out: std.Io.Writer.Allocating = .init(a);
         var server = std.http.Server.init(&reader, &out.writer);
         var req = try server.receiveHead();
-        return read(c, self.threaded.io(), a, &req, self.dir, now);
+        return switch (what) {
+            .reading => read(c, self.threaded.io(), a, &req, self.dir, now),
+            .visiting => visitor(c, self.threaded.io(), a, &req, self.dir, now),
+        };
     }
 };
 
@@ -246,4 +325,40 @@ test "signed_cookie: the legacy name is read only when the new one is absent, an
     try std.testing.expect(!now.legacy and !needsRenewal(c, now, 5000));
     // Issued under the new name.
     try std.testing.expect(std.mem.startsWith(u8, try header(c, a, seven), "__Host-device="));
+}
+
+test "signed_cookie: a visitor is given an id once, recognised by it after, renewed past half its life, and a forged one is a new visitor" {
+    var rig: Rig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    const a = rig.arena.allocator();
+    const c: Cookie = .{ .name = "visitor", .transport = .plain_http, .kind = .{ .label = "visitor\n", .lifetime_secs = 1000, .skew_secs = 5, .validId = isVisitorId } };
+    const first = try rig.visiting(c, &.{}, 5000);
+    try std.testing.expectEqual(Visitor.Seen.new, first.seen);
+    try std.testing.expect(isVisitorId(first.id));
+    // Plain http: neither Secure nor `__Host-`.
+    const set = first.set_cookie.?;
+    try std.testing.expect(std.mem.startsWith(u8, set, "visitor=") and std.mem.indexOf(u8, set, "Secure") == null);
+    const sent = set[0..std.mem.indexOfScalar(u8, set, ';').?];
+    const back = try rig.visiting(c, &.{sent}, 5100);
+    try std.testing.expectEqual(Visitor.Seen.returning, back.seen);
+    try std.testing.expectEqualStrings(first.id, back.id);
+    try std.testing.expect(back.set_cookie == null);
+    // Past half its life: the same visitor, signed again.
+    const late = try rig.visiting(c, &.{sent}, 5600);
+    try std.testing.expectEqualStrings(first.id, late.id);
+    try std.testing.expect(late.set_cookie != null);
+    // A value changed by a byte names no one: a new visitor, a new id.
+    const forged = try std.fmt.allocPrint(a, "{s}0", .{sent});
+    const stranger = try rig.visiting(c, &.{forged}, 5100);
+    try std.testing.expectEqual(Visitor.Seen.unrecognised, stranger.seen);
+    try std.testing.expect(!std.mem.eql(u8, stranger.id, first.id) and stranger.set_cookie != null);
+    // Two new visitors are two ids.
+    try std.testing.expect(!std.mem.eql(u8, (try rig.visiting(c, &.{}, 5000)).id, first.id));
+}
+
+test "signed_cookie: named and the header follow the transport" {
+    try std.testing.expectEqualStrings("__Host-todo", named("todo", .https));
+    try std.testing.expectEqualStrings("todo", named("todo", .plain_http));
+    try std.testing.expect(!isVisitorId("0123456789ABCDEF") and !isVisitorId("0123") and isVisitorId("0123456789abcdef"));
 }
