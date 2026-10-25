@@ -99,8 +99,18 @@ pub fn Site(comptime App: type) type {
             app: App.StartReport,
         };
 
-        /// The hub `start` made, for `between`'s Bus: null before it.
+        /// The site's hub, made on first need: by `start`, or by a `between`
+        /// a host calls before it (a test steps a site it never started).
         var hub_kept: ?*bus.Hub = null;
+
+        fn hubOf(io: Io) !*bus.Hub {
+            if (hub_kept) |h| return h;
+            const base = mem_meter.base();
+            const hub = try base.create(bus.Hub);
+            hub.* = bus.Hub.init(io, base);
+            hub_kept = hub;
+            return hub;
+        }
 
         /// **THE SETUP, ONCE, BEFORE THE FIRST REQUEST**, in the one right
         /// order: the store pointed at the host's roots, the application's
@@ -120,10 +130,7 @@ pub fn Site(comptime App: type) type {
                 .unknown => null,
             };
             client_address.trusted_proxy = host.trusted_proxy;
-            const hub = try base.create(bus.Hub);
-            hub.* = bus.Hub.init(io, base);
-            hub_kept = hub;
-            return .{ .hub = hub, .app = app };
+            return .{ .hub = try hubOf(io), .app = app };
         }
 
         /// **BETWEEN REQUESTS** (metal-vmm QUEUE 211): the application's
@@ -131,7 +138,7 @@ pub fn Site(comptime App: type) type {
         /// time (a background script's, Shale's `script_route.sliceBackground`);
         /// when it next needs a turn (`Wake`). A site with none is idle.
         pub fn between(io: Io, now: Now) Wake {
-            return betweenOf(App, io, now, hub_kept);
+            return betweenOf(App, io, now, hubOf(io) catch null);
         }
 
         /// The route's cap on a body, from the head's target (its path; the
@@ -367,8 +374,8 @@ pub const periodAfter = @import("wake.zig").periodAfter;
 /// serve (a live view's ticks); `between(io, now: Now) Wake`; or
 /// `between(io, unix_s: i64) bool` (whether there is more), the Unix seconds
 /// it was written for, its answer `.more` or `.idle`. Never a clock cast
-/// into the other. One that takes a Bus is not called before `start` made
-/// the hub: nobody is listening yet.
+/// into the other. One that takes a Bus is not called with no hub (a site
+/// makes one on first need; only out of memory leaves it none).
 fn betweenOf(comptime A: type, io: Io, now: Now, hub: ?*bus.Hub) Wake {
     if (!@hasDecl(A, "between")) return .idle;
     const shape = @typeInfo(@TypeOf(A.between)).@"fn";
