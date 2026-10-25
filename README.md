@@ -16,7 +16,7 @@ host runs it.
   `.webbox` in its `build.zig.zon`; a grep of the sibling checkouts finds
   them all.
 
-Zig 0.17.0 (`build.zig.zon`'s `minimum_zig_version`). Every repo here is a
+Zig 0.17.0 (the minimum version in `build.zig.zon`). Every repo here is a
 sibling checkout under one directory, and each names the others by
 relative path.
 
