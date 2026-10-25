@@ -19,8 +19,9 @@
 //!   kept); otherwise the prefix comes off the target before the mount's
 //!   routes see it. A mount's pages use relative URLs.
 //! - **Files**: a mount is set up with `<data>/<name>` and `<auth>/<name>`,
-//!   its name the prefix's segment, so what it keeps cannot meet another's.
-//!   The primary keeps the host's roots.
+//!   its name the prefix's segment, so what it keeps cannot meet another's;
+//!   its first write makes them, not the setup. The primary keeps the
+//!   host's roots.
 //! - **Families, body limits, uploaders**: by path, to the part it reaches. A
 //!   mount with no families of its own counts under its name.
 //! - **Between requests**: every part, in its own shape, on one bus: any part
@@ -36,7 +37,6 @@ const Io = @import("host_io").Io;
 const http = @import("http.zig");
 const bus = @import("bus.zig");
 const site_mod = @import("site.zig");
-const store = @import("store.zig");
 
 /// A mounted application: its prefix (`/name`, one segment of `[a-z0-9-]`,
 /// which also names its folders) and its root.
@@ -85,11 +85,13 @@ pub fn Mount(comptime Primary: type, comptime mounts: []const Piggyback) type {
 
         pub fn setup(io: Io, base: std.mem.Allocator, roots: ?site_mod.Roots) !StartReport {
             var out: StartReport = .{ .primary = try P.setup(io, base, roots), .mounts = undefined };
+            // Each mount's folders are made by its first write (the store's
+            // writes make their parents), never here: a setup that wrote
+            // stops the machine when its volume refuses the write, where a
+            // request's write fails only that request.
             inline for (mounts, 0..) |m, i| {
                 const data = try std.fmt.allocPrint(base, "{s}/{s}", .{ if (roots) |r| r.data_dir else "data", nameOf(m) });
                 const auth = try std.fmt.allocPrint(base, "{s}/{s}", .{ if (roots) |r| r.auth_dir else "auth", nameOf(m) });
-                try store.makeDir(io, base, data);
-                try store.makeDir(io, base, auth);
                 out.mounts[i] = try tableOf(m.root).setup(io, base, .{ .data_dir = data, .auth_dir = auth });
             }
             return out;
@@ -295,7 +297,7 @@ test "combo: between asks every part: the earliest wake" {
     try testing.expectEqual(site_mod.Wake{ .at = 3 }, Both.site.Application.between(testing.io, .{ .awake_ns = 0, .unix_s = 0 }, &b));
 }
 
-test "combo: each mount set up in its own folders under the host's roots; hosting composes" {
+test "combo: each mount set up with its own folders under the host's roots, which setup does not write; hosting composes" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -308,8 +310,10 @@ test "combo: each mount set up in its own folders under the host's roots; hostin
     try testing.expectEqualStrings(data, r.primary.data);
     try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/todo", .{data}), r.mounts[0].data);
     try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}/chat", .{auth}), r.mounts[1].auth);
-    try tmp.dir.access(testing.io, "data/todo", .{});
-    try tmp.dir.access(testing.io, "auth/chat", .{});
+    // Made by a mount's first write, never by setup: a setup write a volume
+    // refuses would stop the machine.
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "data/todo", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "auth/chat", .{}));
 
     try testing.expectEqualStrings("the primary's data", Both.hosting.data_name);
     try testing.expectEqual(@as(usize, 99), Both.hosting.whole_read_max);
