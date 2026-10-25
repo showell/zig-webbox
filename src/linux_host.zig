@@ -231,6 +231,7 @@ pub fn Server(comptime S: type) type {
             const cap = S.bodyLimit(try http.target(req, arena));
             const planned = body_rule.plan(&req.head, cap);
             if (planned != .refused) body_rule.meetExpectation(&req.head);
+            body_rule.emptyWhenUnframed(&req.head);
             const read: body_rule.Read, const upload = switch (planned) {
                 .none => return null,
                 .refused => |r| return switch (r) {

@@ -150,6 +150,15 @@ pub fn meetExpectation(head: *Head) void {
     };
 }
 
+/// **A REQUEST THAT GIVES NO LENGTH HAS NO BODY** (RFC 9112 6.3): a method
+/// that may carry one, with neither Content-Length nor Transfer-Encoding, is
+/// given Content-Length 0, which is what std's server must see to answer it.
+/// Otherwise its answer asserts on the missing framing (Server.discardBody)
+/// and the process ends: one `curl -X POST` took a Linux host down.
+pub fn emptyWhenUnframed(head: *Head) void {
+    if (head.method.requestHasBody() and head.transfer_encoding == .none and head.content_length == null) head.content_length = 0;
+}
+
 /// The plan for a body under `head`, given its route's cap.
 pub fn plan(head: *const Head, cap: u64) Plan {
     const f = switch (framing(head)) {
@@ -436,4 +445,16 @@ test "a chunked scan asked again as bytes come agrees with one asked once, and p
     // The scan stopped at the last chunk's size line: the three before it
     // are never parsed again.
     try testing.expectEqual(@as(usize, "3\r\nhel\r\n2;x=y\r\nlo\r\n1\r\n!\r\n".len), scan.at);
+}
+
+test "body: a POST with no length and no chunking is framed empty; a framed one and a GET are left as they are" {
+    var post = try headOf("POST /x HTTP/1.1\r\nHost: h\r\n\r\n");
+    emptyWhenUnframed(&post);
+    try testing.expectEqual(@as(?u64, 0), post.content_length);
+    var sized = try headOf("POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n");
+    emptyWhenUnframed(&sized);
+    try testing.expectEqual(@as(?u64, 5), sized.content_length);
+    var get = try headOf("GET /x HTTP/1.1\r\nHost: h\r\n\r\n");
+    emptyWhenUnframed(&get);
+    try testing.expectEqual(@as(?u64, null), get.content_length);
 }
