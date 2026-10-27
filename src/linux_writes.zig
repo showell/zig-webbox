@@ -121,7 +121,7 @@ pub const Sent = struct {
     pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
         const t = watchWrite(s.io, s.stream, s.deadline());
-        defer if (!doneWrite(s.io, t)) {
+        defer if (!endedInTime(s.io, t)) {
             s.shut = true;
         };
         return s.to.writeSplat(data, splat);
@@ -130,7 +130,7 @@ pub const Sent = struct {
     pub fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
         const s: *Sent = @alignCast(@fieldParentPtr("interface", w));
         const t = watchWrite(s.io, s.stream, s.deadline());
-        defer if (!doneWrite(s.io, t)) {
+        defer if (!endedInTime(s.io, t)) {
             s.shut = true;
         };
         return s.to.sendFile(file_reader, limit);
@@ -178,7 +178,7 @@ fn watchWrite(io: Io, stream: net.Stream, deadline_ms: u64) WriteTicket {
 
 /// Whether the write ended before its deadline: false when the watchdog
 /// took it out of the table and shut its socket.
-fn doneWrite(io: Io, t: WriteTicket) bool {
+fn endedInTime(io: Io, t: WriteTicket) bool {
     const i = t.slot orelse return true;
     writes_lock.lockUncancelable(io);
     defer writes_lock.unlock(io);
