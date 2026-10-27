@@ -92,7 +92,7 @@ const TestSite = struct {
         }
         // A handler that refuses an upload without reading it.
         if (std.mem.eql(u8, try http.target(req, alloc), "/refuses")) {
-            try http.redirect(req, "/login");
+            try http.redirect(req, .literal("/login"));
             return null;
         }
         // A stream kept after its body was read: the host serves it on.

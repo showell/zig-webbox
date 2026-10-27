@@ -103,7 +103,7 @@ pub fn Mount(comptime Primary: type, comptime mounts: []const Piggyback) type {
             inline for (mounts) |m| {
                 if (http.pathUnder(path, m.prefix)) |sub| {
                     // The bare prefix: to the mount's own `/`, its query kept.
-                    if (sub.len == 0) return http.redirect(req, try std.fmt.allocPrint(alloc, "{s}/{s}", .{ m.prefix, target[path.len..] }));
+                    if (sub.len == 0) return http.redirect(req, try http.Target.format(alloc, "{s}/{s}", .{ m.prefix, target[path.len..] }));
                     const whole = http.stripTarget(req, m.prefix.len);
                     defer http.restoreTarget(req, whole);
                     return tableOf(m.root).routes(req, io, alloc, b);
