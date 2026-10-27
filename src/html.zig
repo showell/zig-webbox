@@ -21,13 +21,29 @@ pub fn htmlEscape(alloc: Alloc, s: []const u8) ![]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
-/// scriptSafe makes a JSON/text blob safe to embed inside an inline <script>:
-/// the only sequence that can close the element early is `</` (e.g. `</script>`),
-/// so escape it to `<\/`. Browsers read `<\/script>` as literal text. Returns an
-/// alloc-owned copy.
+/// scriptSafe makes a JSON blob safe to embed inside an inline <script>: every
+/// `<` becomes `\u003c`, which JSON reads back as the same `<`. Escaping only
+/// `</` is not enough (metal-vmm QUEUE 266): `<!--` then `<script` puts the
+/// HTML tokenizer in its double-escaped state, where the page's own
+/// `</script>` no longer ends the element, and what follows runs as part of
+/// it. With no `<` at all, no tag or comment can start. JSON only: `<` can
+/// stand only inside a JSON string, where the escape means the same, but not
+/// in script code (`a < b`). Returns an alloc-owned copy.
 pub fn scriptSafe(alloc: Alloc, s: []const u8) ![]u8 {
-    const n = std.mem.replacementSize(u8, s, "</", "<\\/");
+    const n = std.mem.replacementSize(u8, s, "<", "\\u003c");
     const out = try alloc.alloc(u8, n);
-    _ = std.mem.replace(u8, s, "</", "<\\/", out);
+    _ = std.mem.replace(u8, s, "<", "\\u003c", out);
     return out;
+}
+
+test "scriptSafe: no `<` is left, so neither `</script>` nor `<!--<script` can end or swallow the element (metal-vmm QUEUE 266)" {
+    const a = std.testing.allocator;
+    const got = try scriptSafe(a, "{\"x\":\"<!--<script>\",\"y\":\"</script><script src=/evil.js>\"}");
+    defer a.free(got);
+    try std.testing.expectEqualStrings("{\"x\":\"\\u003c!--\\u003cscript>\",\"y\":\"\\u003c/script>\\u003cscript src=/evil.js>\"}", got);
+    try std.testing.expect(std.mem.indexOfScalar(u8, got, '<') == null);
+    // What the browser's JSON.parse gives back is the text as it was.
+    const parsed = try std.json.parseFromSlice(struct { x: []const u8, y: []const u8 }, a, got, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("<!--<script>", parsed.value.x);
 }
