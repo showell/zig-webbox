@@ -44,14 +44,12 @@ and its `Host`, and `src/wake.zig`;** this is the map.
   `start(io, Host)` once, before the first request; then per request
   `route`, and serve or drop the stream it answers (`bus.serveKept`,
   `bus.nextFrame`, `bus.drop`).
-- **`Host`**, everything a host supplies, once: `roots` (the data and
-  secrets directories), `free_space`, `trusted_proxy`, and the optional
-  `facts`, `log`, `logs`, `say` and `fetch`.
+- **`Host`** is everything a host supplies, once (the data and secrets
+  roots, free space, the trusted proxy, and optional facts, logs and fetch).
 - **`between(io, Now) Wake`**, the application's work between requests,
   one slice at a time. `Wake` says when it next needs a turn: `more` (now),
   `at` (a time on the awake clock) or `idle` (until a request or its
-  fetch ends). `Now` carries both clocks; `periodAfter` schedules a period
-  from when it was due.
+  fetch ends).
 - **The fetch** (`host_fetch`): one GET at a time, which the application
   starts from `between` and reads on a later call. A host offers it as a
   `Fetcher`; the outcomes are `Outcome`. On Linux it is `linux_fetch`, on a
@@ -67,9 +65,7 @@ An application's build hands its hosts one module, its **hosted root**,
 which exports two declarations:
 
 - **`site`**: `webbox.site.Site(App)`, where `App` is the application's
-  table: `routes`, `setup`, `StartReport`, `bodyLimit`, and the optional
-  `uploader`, `family` and `between`. `src/site.zig` (above `Site`) says
-  each.
+  table; `src/site.zig` (above `Site`) says what it declares.
 - **`hosting`**: what only the application can say about itself:
   `name`, `data_name`, `whole_read_max`, `cache_largest_most` and
   `describeStart(report, writer)`. zig-metal-unikernel's kernel requires the
@@ -121,23 +117,24 @@ are from each repo's `build.zig` (`zig build -l` lists them).
 |---|---|---|---|---|
 | [zig-webbox](https://github.com/showell/zig-webbox) | this library | `zig build test`, `zig build consumers` | through zig-metal-unikernel | (a library) |
 | [angry-gopher](https://github.com/showell/angry-gopher) | Gopher Chat and the rest of lynrummy.com; **primary** of lynrummy.com's combination (`zig-server/src/router.zig`: Codex Chat at `/codex-chat`, the UO town at `/uo`) | `ops/check_zig` (its gate); `cd zig-server && zig build run` (:9001) | zig-metal-unikernel's `zig build gopher` (`gopher.elf`) | lynrummy.com, on the `metal` droplet behind prod's Caddy |
-| [cobble-webbox](https://github.com/showell/cobble-webbox) | Cobblestone's Codex apps: Codex Chat (module `codex_chat`), Damian's UO town (`uo_town`), the games, Idea Forge | `zig build test`; `serve-chat` (:9106), `serve-uo` (:9107), `serve` (games, :9104), `serve-ideas` (:9105) | none of its own: mounted in angry-gopher's | inside lynrummy.com: Codex Chat since v38; the UO town is on angry-gopher's master, unreleased |
+| [cobble-webbox](https://github.com/showell/cobble-webbox) | Cobblestone's Codex apps: Codex Chat (module `codex_chat`), Damian's UO town (`uo_town`), the games, Idea Forge | `zig build test`; `serve-chat` (:9106), `serve-uo` (:9107), `serve` (games, :9104), `serve-ideas` (:9105) | none of its own: mounted in angry-gopher's | inside lynrummy.com: Codex Chat at `/codex-chat/`, the UO town at `/uo/town/` (unannounced) |
 | [dog-park](https://github.com/showell/dog-park) | the Dog Park game (Zig, Roc physics); **primary** of Dog Park + TODO (`src/combos/dogpark_todo.zig`) | `zig build test`, `zig build check`; `play` (:9103); `dogpark-todo`, `serve-dogpark-todo` (:9113) | `zig build metal` (`dogpark.elf`), `metal-gate`; `metal-dogpark-todo` (`dogpark-todo.elf`) | dogpark.lynrummy.com, its own droplet (its `DEPLOY.md`) |
-| [roc-webbox](https://github.com/showell/roc-webbox) | a Roc platform for webbox, a TODO list on it (modules `roc_todo`, `roc_todo_metal`, `roc_hooks`) | `zig build test` (the Roc `roc-version` pins); `serve` (:9110) | `zig build metal` (`roc-todo.elf`) | nowhere: alone, or in dog-park's combination |
+| [roc-webbox](https://github.com/showell/roc-webbox) | a Roc platform for webbox, a TODO list on it (modules `roc_todo`, `roc_todo_metal`, `roc_hooks`), and the Roc chat router (`roc_chat`, which angry-gopher's Linux build routes `/chat` and `/channel` through) | `zig build test` (the Roc `roc-version` pins); `serve` (:9110) | `zig build metal` (`roc-todo.elf`) | the TODO list: nowhere, alone or in dog-park's combination |
 | [observatory](https://github.com/showell/observatory) | a machine that polls another's `/version` | `zig build test`; `run` (:9104) | `zig build metal` (`observatory.elf`) | prod, as a Linux program watching Dog Park |
 | [shale](https://github.com/showell/shale) | the script language, on `store` | `zig build test` | (in the applications' kernels) | (a library) |
 | [zig-metal-unikernel](https://github.com/showell/zig-metal-unikernel) | the kernel that serves any hosted root with no OS (`addAppKernel`) | `zig build test`; `zig build gopher`; tiers in its README | it is the kernel | its `DEPLOY.md`: a release is a `v*` tag |
 
 Ports collide (cobble-webbox's `serve` and the Observatory's `run` are both
-:9104); each step names the environment variable that moves it.
+:9104); each step's description names the environment variable that moves
+it, except the Observatory's, whose is `OBSERVATORY_PORT`.
 
 ## Scripts: Shale
 
 **Shale**, the script language for a site's own data, is its own repo,
 [shale](https://github.com/showell/shale) (`../shale`), built on this
 library's `store`: an application takes its `shale` module beside
-`webbox`. It lived here (`src/script/`) until 2026-10-18; its history is
-this repo's (`git log -- src/script`).
+`webbox`. Its history before it moved is this repo's
+(`git log -- src/script`).
 
 ## Checks
 
@@ -145,14 +142,12 @@ this repo's (`git log -- src/script`).
     zig build consumers     # its docs, then the consumers' own checks against this tree: minutes
 
 **`test`** includes the library's own shape (`src/library_test.zig`: what
-each root reaches it names, the modules each half may import, no page
-embedded, every named module in its test block, `Io` from `host_io`).
-**`consumers`** runs shale's doc check on this repo's docs, then, against
-this checkout and one at a time, shale's `zig build test`, metal-vmm's
-queue tool (by shale's `shale`), the Observatory's and dog-park's `zig build test`, zig-metal-unikernel's `zig
-build gopher` and angry-gopher's `ops/check_zig`; it needs those checkouts
+each half may import and reach). **`consumers`** runs shale's doc check on this repo's docs, then, against
+this checkout and one at a time, the checks of shale, metal-vmm, the
+Observatory, dog-park, zig-metal-unikernel (`zig build gopher`) and
+angry-gopher (`ops/check_zig`), as `build.zig` lists them; it needs those checkouts
 beside this one, and fails naming one that is missing. Run it before a change
-here goes to master: each of them caught a webbox change that `test` passed.
+here goes to master: each catches webbox changes that `test` passes.
 cobble-webbox's and roc-webbox's own tests are not in it (angry-gopher's
 check compiles cobble-webbox's two mounted modules).
 `-Dtest-filter=TEXT` runs only the tests whose names contain it;
@@ -168,6 +163,5 @@ tier 3 both run `zig build test` here. And every file under the kernel's
 
 | | |
 |---|---|
-| Source | first moved from angry-gopher's `zig-server/src`, with its history |
-| Serves | lynrummy.com, on zig-metal-unikernel: its newest release tag's message names the zig-webbox commit (`git -C ../zig-metal-unikernel tag -n1 --sort=-creatordate`, the first line). dogpark.lynrummy.com, on the same kernel, through dog-park's own image. master may be ahead of both; `combo.Mount` is newer than v38, the release serving lynrummy.com on 2026-10-25 |
-| Tests | the library's own unit tests; the request-edge harness for its number parses still runs in angry-gopher |
+| Serves | lynrummy.com, on zig-metal-unikernel: its newest release tag's message names the zig-webbox commit (`git -C ../zig-metal-unikernel tag -n1 --sort=-creatordate`, the first line). dogpark.lynrummy.com, on the same kernel, through dog-park's own image. master may be ahead of both |
+| Tests | the library's own unit tests; the request-edge harness for its number parses runs in angry-gopher |
