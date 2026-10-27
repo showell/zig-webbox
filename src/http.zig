@@ -335,37 +335,51 @@ pub fn formDecode(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
 ///
 /// **SEALED** (metal-vmm QUEUE 250): `redirect` takes only a `Target`, and
 /// only this file makes one, so a target from a form or a query cannot
-/// reach the `location` header unchecked. Zig has no private fields: a
-/// literal without `target_seal` does not compile, and shale's
-/// cookbook/sealed.shale (angry-gopher's ops/check_zig runs it over this
-/// tree, in `zig build consumers`) refuses one that sets it outside this file.
+/// reach the `location` header unchecked. Zig has no private fields, so
+/// a literal, or a change to one made, is refused by shale's
+/// cookbook/sealed.shale outside this file, over this tree and every
+/// consumer's (`zig build consumers`, angry-gopher's ops/check_zig): it
+/// refuses `.target_path =` and `.target_seal =`. The path is read by
+/// `path()`. **A `location` HEADER IS SET HERE ONLY** (`redirect`,
+/// `redirectWith`); the same lint refuses `.name = "location"` elsewhere.
 pub const Target = struct {
-    path: []const u8,
+    target_path: []const u8,
     target_seal: Seal,
 
-    /// `next` if it is a path on this site, else the site's root.
+    /// `next` if it is a path on this site, else the site's root: for a
+    /// target a visitor names (`?next=`), where the root is the answer.
     pub fn of(next: []const u8) Target {
-        return .{ .path = if (internal(next)) next else "/", .target_seal = .{} };
+        return .{ .target_path = if (internal(next)) next else "/", .target_seal = .{} };
+    }
+
+    /// The path the `location` header carries.
+    pub fn path(t: Target) []const u8 {
+        return t.target_path;
     }
 
     /// A path written in the source, checked as it compiles.
-    pub fn literal(comptime path: []const u8) Target {
-        comptime if (!internal(path)) @compileError("not a path on this site: " ++ path);
-        return .{ .path = path, .target_seal = .{} };
+    pub fn literal(comptime p: []const u8) Target {
+        comptime if (!internal(p)) @compileError("not a path on this site: " ++ p);
+        return .{ .target_path = p, .target_seal = .{} };
     }
 
     /// A relative path written in the source (`town/`), checked as it
     /// compiles: it lands under whatever prefix a host mounts the page at, so
     /// it may not begin with a slash or a backslash, and with no `:` it names
     /// no scheme (`https:`, `javascript:`).
-    pub fn relative(comptime path: []const u8) Target {
-        comptime if (!relativeOnSite(path)) @compileError("not a relative path on this site: " ++ path);
-        return .{ .path = path, .target_seal = .{} };
+    pub fn relative(comptime p: []const u8) Target {
+        comptime if (!relativeOnSite(p)) @compileError("not a relative path on this site: " ++ p);
+        return .{ .target_path = p, .target_seal = .{} };
     }
 
-    /// `fmt` filled in, checked as `of` checks it.
-    pub fn format(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !Target {
-        return of(try std.fmt.allocPrint(alloc, fmt, args));
+    /// `fmt` filled in, checked as `of` checks it, and **one not on this site
+    /// is `error.NotOnSite`**, never the root (the box's review): a path the
+    /// server builds goes where it says or nowhere, and the caller says
+    /// which answer that is.
+    pub fn format(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) error{ OutOfMemory, NotOnSite }!Target {
+        const p = try std.fmt.allocPrint(alloc, fmt, args);
+        if (!internal(p)) return error.NotOnSite;
+        return .{ .target_path = p, .target_seal = .{} };
     }
 };
 
@@ -497,26 +511,45 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
 
 /// redirect sends a 303 See Other to `location`, a path on this site.
 pub fn redirect(req: *std.http.Server.Request, location: Target) !void {
+    return redirectWith(req, location, .{});
+}
+
+/// A redirect's status and what rides with it (a Set-Cookie, say).
+pub const RedirectOptions = struct {
+    status: std.http.Status = .see_other,
+    /// At most `redirect_headers_most`; no `location` among them.
+    headers: []const std.http.Header = &.{},
+};
+
+pub const redirect_headers_most = 8;
+
+/// A redirect to `location` with `opts.status` and `opts.headers` beside it:
+/// the one way, with `redirect`, that a `location` header is set.
+pub fn redirectWith(req: *std.http.Server.Request, location: Target, opts: RedirectOptions) !void {
+    if (opts.headers.len > redirect_headers_most) return error.TooManyHeaders;
+    var hs: [redirect_headers_most + 1]std.http.Header = undefined;
+    hs[0] = .{ .name = "location", .value = location.target_path };
+    for (opts.headers, hs[1..][0..opts.headers.len]) |h, *to| {
+        if (std.ascii.eqlIgnoreCase(h.name, "location")) return error.LocationTwice;
+        to.* = h;
+    }
     declineExpectation(req);
-    try req.respond("", .{
-        .status = .see_other,
-        .extra_headers = &.{.{ .name = "location", .value = location.path }},
-    });
+    try req.respond("", .{ .status = opts.status, .extra_headers = hs[0 .. opts.headers.len + 1] });
 }
 
 const testing = std.testing;
 
 test "Target: a path on this site is kept; anything a browser could read as another host, or that splits a header, is the root" {
-    for ([_][]const u8{ "/", "/game", "/chat/c/1_2/ChitChat?x=1#msg-ChitChat_3" }) |ok| try testing.expectEqualStrings(ok, Target.of(ok).path);
-    for ([_][]const u8{ "", "game", "//evil.example", "https://evil.example", "/\\evil.example", "/\t/evil.example", "/x\r\nset-cookie: a=b", "/x\x7f" }) |bad| try testing.expectEqualStrings("/", Target.of(bad).path);
-    try testing.expectEqualStrings("/login", Target.literal("/login").path);
-    try testing.expectEqualStrings("town/", Target.relative("town/").path);
+    for ([_][]const u8{ "/", "/game", "/chat/c/1_2/ChitChat?x=1#msg-ChitChat_3" }) |ok| try testing.expectEqualStrings(ok, Target.of(ok).path());
+    for ([_][]const u8{ "", "game", "//evil.example", "https://evil.example", "/\\evil.example", "/\t/evil.example", "/x\r\nset-cookie: a=b", "/x\x7f" }) |bad| try testing.expectEqualStrings("/", Target.of(bad).path());
+    try testing.expectEqualStrings("/login", Target.literal("/login").path());
+    try testing.expectEqualStrings("town/", Target.relative("town/").path());
     try testing.expect(comptime !relativeOnSite("/x") and !relativeOnSite("https://evil.example") and !relativeOnSite("\\\\evil") and !relativeOnSite("") and relativeOnSite("a/b?c=1"));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("/chat/c/7", (try Target.format(arena.allocator(), "/chat/c/{d}", .{7})).path);
-    const evil = try Target.format(arena.allocator(), "{s}", .{"//evil.example"});
-    try testing.expectEqualStrings("/", evil.path);
+    try testing.expectEqualStrings("/chat/c/7", (try Target.format(arena.allocator(), "/chat/c/{d}", .{7})).path());
+    // A built path off the site is an error, never the root.
+    for ([_][]const u8{ "//evil.example", "/a\\b", "/x\ny" }) |bad| try testing.expectError(error.NotOnSite, Target.format(arena.allocator(), "{s}", .{bad}));
 }
 
 test "parseCookieValue: picks the named cookie, trims spaces, ignores the rest" {

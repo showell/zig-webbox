@@ -69,6 +69,10 @@ pub fn build(b: *std.Build) void {
         // tools/doc_check.shale, metal-vmm QUEUE 237): the cheapest first.
         .{ .repo = "shale", .cmd = "zig build doc-check -- only=zig-webbox" },
         .{ .repo = "shale", .cmd = "zig build test" },
+        // **A TARGET IS MADE, AND A `location` SET, HERE ALONE** (metal-vmm
+        // QUEUE 250), in every consumer's tree: Zig cannot keep
+        // http.Target's fields private, so the seal lint does.
+        .{ .repo = "shale", .cmd = "zig-out/bin/shale --root .. cookbook/sealed.shale dir=zig-webbox/src,angry-gopher/zig-server/src,dog-park/src,roc-webbox/src,cobble-webbox/src seals=target_seal:zig-webbox/src/http.zig,target_path:zig-webbox/src/http.zig headers=location:zig-webbox/src/http.zig" },
         // metal-vmm's queue tool, by shale's `shale` on this tree.
         .{ .repo = "metal-vmm", .cmd = "(cd ../shale && zig build) && ../shale/zig-out/bin/shale --budget output_bytes=8388608 .shale/queue_test.shale > /dev/null" },
         .{ .repo = "observatory", .cmd = "zig build test" },
