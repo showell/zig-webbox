@@ -330,12 +330,58 @@ pub fn formDecode(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
 /// another host. A browser reads a backslash as a slash and drops a tab or
 /// newline before it looks, so `/\evil.example` and `/\t/evil.example` are
 /// `//evil.example` to it: any backslash, any control character, or a second
-/// slash first is refused (the normalization hunt, 2026-10-10).
-pub fn internalTarget(next: []const u8) []const u8 {
-    if (next.len == 0 or next[0] != '/') return "/";
-    if (next.len > 1 and next[1] == '/') return "/";
-    for (next) |c| if (c == '\\' or c < 0x20 or c == 0x7f) return "/";
-    return next;
+/// slash first is refused (the normalization hunt, 2026-10-10). A control
+/// character refused is a CR or LF too, so no target splits the header.
+///
+/// **SEALED** (metal-vmm QUEUE 250): `redirect` takes only a `Target`, and
+/// only this file makes one, so a target from a form or a query cannot
+/// reach the `location` header unchecked. Zig has no private fields: a
+/// literal without `target_seal` does not compile, and shale's
+/// cookbook/sealed.shale (angry-gopher's ops/check_zig runs it over this
+/// tree, in `zig build consumers`) refuses one that sets it outside this file.
+pub const Target = struct {
+    path: []const u8,
+    target_seal: Seal,
+
+    /// `next` if it is a path on this site, else the site's root.
+    pub fn of(next: []const u8) Target {
+        return .{ .path = if (internal(next)) next else "/", .target_seal = .{} };
+    }
+
+    /// A path written in the source, checked as it compiles.
+    pub fn literal(comptime path: []const u8) Target {
+        comptime if (!internal(path)) @compileError("not a path on this site: " ++ path);
+        return .{ .path = path, .target_seal = .{} };
+    }
+
+    /// A relative path written in the source (`town/`), checked as it
+    /// compiles: it lands under whatever prefix a host mounts the page at, so
+    /// it may not begin with a slash or a backslash, and with no `:` it names
+    /// no scheme (`https:`, `javascript:`).
+    pub fn relative(comptime path: []const u8) Target {
+        comptime if (!relativeOnSite(path)) @compileError("not a relative path on this site: " ++ path);
+        return .{ .path = path, .target_seal = .{} };
+    }
+
+    /// `fmt` filled in, checked as `of` checks it.
+    pub fn format(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !Target {
+        return of(try std.fmt.allocPrint(alloc, fmt, args));
+    }
+};
+
+const Seal = struct {};
+
+fn relativeOnSite(path: []const u8) bool {
+    if (path.len == 0 or path[0] == '/' or path[0] == '\\') return false;
+    for (path) |c| if (c == ':' or c == '\\' or c < 0x20 or c == 0x7f) return false;
+    return true;
+}
+
+fn internal(next: []const u8) bool {
+    if (next.len == 0 or next[0] != '/') return false;
+    if (next.len > 1 and next[1] == '/') return false;
+    for (next) |c| if (c == '\\' or c < 0x20 or c == 0x7f) return false;
+    return true;
 }
 
 /// **THE TAIL OF `path` UNDER `prefix`**, when `path` is exactly `prefix` or
@@ -449,16 +495,29 @@ pub fn readLimitedBody(req: *std.http.Server.Request, alloc: std.mem.Allocator, 
     return got;
 }
 
-/// redirect sends a 303 See Other to `location`.
-pub fn redirect(req: *std.http.Server.Request, location: []const u8) !void {
+/// redirect sends a 303 See Other to `location`, a path on this site.
+pub fn redirect(req: *std.http.Server.Request, location: Target) !void {
     declineExpectation(req);
     try req.respond("", .{
         .status = .see_other,
-        .extra_headers = &.{.{ .name = "location", .value = location }},
+        .extra_headers = &.{.{ .name = "location", .value = location.path }},
     });
 }
 
 const testing = std.testing;
+
+test "Target: a path on this site is kept; anything a browser could read as another host, or that splits a header, is the root" {
+    for ([_][]const u8{ "/", "/game", "/chat/c/1_2/ChitChat?x=1#msg-ChitChat_3" }) |ok| try testing.expectEqualStrings(ok, Target.of(ok).path);
+    for ([_][]const u8{ "", "game", "//evil.example", "https://evil.example", "/\\evil.example", "/\t/evil.example", "/x\r\nset-cookie: a=b", "/x\x7f" }) |bad| try testing.expectEqualStrings("/", Target.of(bad).path);
+    try testing.expectEqualStrings("/login", Target.literal("/login").path);
+    try testing.expectEqualStrings("town/", Target.relative("town/").path);
+    try testing.expect(comptime !relativeOnSite("/x") and !relativeOnSite("https://evil.example") and !relativeOnSite("\\\\evil") and !relativeOnSite("") and relativeOnSite("a/b?c=1"));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("/chat/c/7", (try Target.format(arena.allocator(), "/chat/c/{d}", .{7})).path);
+    const evil = try Target.format(arena.allocator(), "{s}", .{"//evil.example"});
+    try testing.expectEqualStrings("/", evil.path);
+}
 
 test "parseCookieValue: picks the named cookie, trims spaces, ignores the rest" {
     try testing.expectEqualStrings("xyz", parseCookieValue("a=1; gopher_auth=xyz; b=2", "gopher_auth").?);
