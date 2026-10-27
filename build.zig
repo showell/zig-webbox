@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
         const dir = b.pathJoin(&.{ here, "..", c.repo });
         const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
             "cd '{s}' 2>/dev/null || {{ echo 'consumers: no {s} beside this checkout ({s})'; exit 1; }}; " ++
-                "echo '==> {s}: {s}'; env -u ZIG_PROGRESS {s}",
+                "echo '==> {s}: {s}'; unset ZIG_PROGRESS; {s}",
             .{ dir, c.repo, dir, c.repo, c.cmd, c.cmd },
         ) });
         run.has_side_effects = true;
