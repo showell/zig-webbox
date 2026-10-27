@@ -19,18 +19,24 @@ const http = @import("http.zig");
 const signed = @import("signed.zig");
 const site_secret = @import("site_secret.zig");
 
-pub const Cookie = struct {
-    /// The cookie's name (`http.host_prefix` and a name, for any cookie set
-    /// now).
-    name: []const u8,
-    /// The name it had before, read when a request has none of `name`; one
-    /// read so is due to be signed again, under `name` (`needsRenewal`).
-    legacy_name: ?[]const u8 = null,
-    /// Its signing rules; `kind.lifetime_secs` is also its Max-Age.
-    kind: signed.Kind,
-    /// How it travels: Secure, behind HTTPS, unless a site says otherwise.
-    transport: Transport = .https,
-};
+/// **A COOKIE OF ITS OWN ID** (metal-vmm QUEUE 250): `Id` is what its
+/// kind's parser makes (`signed.Kind`), and a verified reading carries it.
+pub fn Cookie(comptime Id: type) type {
+    return struct {
+        /// The cookie's name (`http.host_prefix` and a name, for any cookie set
+        /// now).
+        name: []const u8,
+        /// The name it had before, read when a request has none of `name`; one
+        /// read so is due to be signed again, under `name` (`needsRenewal`).
+        legacy_name: ?[]const u8 = null,
+        /// Its signing rules; `kind.lifetime_secs` is also its Max-Age.
+        kind: signed.Kind(Id),
+        /// How it travels: Secure, behind HTTPS, unless a site says otherwise.
+        transport: Transport = .https,
+
+        pub const Carries = Id;
+    };
+}
 
 /// **HOW A COOKIE TRAVELS.** `https` for anything served: Secure, and named
 /// `__Host-` (`named`). `plain_http` for development over plain http, where
@@ -47,7 +53,7 @@ pub fn named(comptime base: []const u8, t: Transport) []const u8 {
 }
 
 /// The Set-Cookie header value for a signed `value`.
-pub fn header(c: Cookie, alloc: Alloc, value: []const u8) ![]const u8 {
+pub fn header(c: anytype, alloc: Alloc, value: []const u8) ![]const u8 {
     const attributes = switch (c.transport) {
         .https => http.cookie_attributes,
         .plain_http => "HttpOnly; SameSite=Lax",
@@ -55,25 +61,32 @@ pub fn header(c: Cookie, alloc: Alloc, value: []const u8) ![]const u8 {
     return std.fmt.allocPrint(alloc, "{s}={s}; Path=/; Max-Age={d}; {s}", .{ c.name, value, c.kind.lifetime_secs, attributes });
 }
 
-/// A value that verified: the id it names, when it was signed, and with
-/// which secret.
-pub const Verified = struct {
-    id: []const u8,
-    issued: i64,
-    by: enum { current, previous },
-    /// Read under the cookie's legacy name.
-    legacy: bool = false,
-};
+/// A value that verified: the id it names, as its kind's parser made it, and
+/// as it was signed; when it was signed, and with which secret.
+pub fn Verified(comptime Id: type) type {
+    return struct {
+        id: Id,
+        text: []const u8,
+        issued: i64,
+        by: By,
+        /// Read under the cookie's legacy name.
+        legacy: bool = false,
+    };
+}
+
+pub const By = enum { current, previous };
 
 /// What a request's cookie says, each case named, so a caller decides on
 /// each: there is no cookie; there is no secret to read it with (nothing is
 /// issued either); it names no one (`Invalid` says how); or it verifies.
-pub const Reading = union(enum) {
-    none,
-    no_secret,
-    invalid: Invalid,
-    verified: Verified,
-};
+pub fn Reading(comptime Id: type) type {
+    return union(enum) {
+        none,
+        no_secret,
+        invalid: Invalid,
+        verified: Verified(Id),
+    };
+}
 
 /// **HOW A COOKIE NAMES NO ONE.** Of several of one name (a parent domain's
 /// beside the site's own, metal-vmm QUEUE 162.4), the one that verifies is
@@ -88,7 +101,8 @@ pub const Invalid = enum {
 
 /// Reads this request's cookie, signed with the secret in `secret_dir` or,
 /// after a change of secret, with the previous one while it is still taken.
-pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Reading {
+pub fn read(c: anytype, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Reading(@TypeOf(c).Carries) {
+    const Id = @TypeOf(c).Carries;
     var one: [1][]const u8 = undefined;
     const sent: http.Named = if (c.legacy_name) |old|
         try http.cookieOrLegacy(req, alloc, c.name, old, http.namesNow(now))
@@ -104,58 +118,50 @@ pub fn read(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secr
     };
     const current = (try site_secret.load(io, alloc, secret_dir)) orelse return .no_secret;
     const prev = try site_secret.previous(io, alloc, secret_dir, now);
-    var found: Found = .nothing_yet;
-    for (values) |value| switch (verifyEither(c, current, prev, value, now)) {
-        .no => {},
+    var found: ?Verified(Id) = null;
+    for (values) |value| if (verifyEither(c, current, prev, value, now)) |v| {
         // A legacy-named value signed after the move is a plant: not read.
-        .yes => |v| if (sent.legacy and v.issued >= http.legacy_issued_before_unix) {} else switch (found) {
-            .nothing_yet => found = .{ .one = v },
-            .one => return .{ .invalid = .more_than_one_verifies },
-        },
+        if (sent.legacy and v.issued >= http.legacy_issued_before_unix) continue;
+        if (found != null) return .{ .invalid = .more_than_one_verifies };
+        found = v;
     };
-    return switch (found) {
-        .nothing_yet => .{ .invalid = .does_not_verify },
-        .one => |v| blk: {
-            var under = v;
-            under.legacy = sent.legacy;
-            break :blk .{ .verified = under };
-        },
-    };
+    var under = found orelse return .{ .invalid = .does_not_verify };
+    under.legacy = sent.legacy;
+    return .{ .verified = under };
 }
 
-const Found = union(enum) { nothing_yet, one: Verified };
-
 /// One value, under the current secret or else the previous one.
-fn verifyEither(c: Cookie, current: []const u8, prev: ?[]const u8, value: []const u8, now: i64) union(enum) { no, yes: Verified } {
-    if (signed.verify(c.kind, current, value, now)) |id| return .{ .yes = .{ .id = id, .issued = signed.issuedOf(value), .by = .current } };
-    if (prev) |p| if (signed.verify(c.kind, p, value, now)) |id| return .{ .yes = .{ .id = id, .issued = signed.issuedOf(value), .by = .previous } };
-    return .no;
+fn verifyEither(c: anytype, current: []const u8, prev: ?[]const u8, value: []const u8, now: i64) ?Verified(@TypeOf(c).Carries) {
+    const text = value[0 .. std.mem.indexOfScalar(u8, value, '.') orelse 0];
+    if (signed.verify(c.kind, current, value, now)) |id| return .{ .id = id, .text = text, .issued = signed.issuedOf(value), .by = .current };
+    if (prev) |p| if (signed.verify(c.kind, p, value, now)) |id| return .{ .id = id, .text = text, .issued = signed.issuedOf(value), .by = .previous };
+    return null;
 }
 
 /// **DUE TO BE SIGNED AGAIN**: signed with the previous secret, or past half
 /// its life. Nothing else re-signs a valid cookie, so without this one active
 /// all its life is lost at its end.
-pub fn needsRenewal(c: Cookie, v: Verified, now: i64) bool {
+pub fn needsRenewal(c: anytype, v: Verified(@TypeOf(c).Carries), now: i64) bool {
     return v.legacy or v.by == .previous or now -| v.issued > @divTrunc(c.kind.lifetime_secs, 2);
 }
 
 /// The Set-Cookie header for `id`, signed now with the secret in
 /// `secret_dir`; null when there is no secret (nothing unsigned is ever
 /// issued).
-pub fn issue(c: Cookie, io: Io, alloc: Alloc, secret_dir: []const u8, id: []const u8, now: i64) !?[]const u8 {
+pub fn issue(c: anytype, io: Io, alloc: Alloc, secret_dir: []const u8, id: []const u8, now: i64) !?[]const u8 {
     const current = (try site_secret.load(io, alloc, secret_dir)) orelse return null;
     return try header(c, alloc, try signed.sign(alloc, c.kind, current, id, now));
 }
 
 /// **RENEWED WHEN USED**: the Set-Cookie header that signs this request's
 /// cookie again, when it verifies and needs renewal; null otherwise.
-pub fn renew(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !?[]const u8 {
+pub fn renew(c: anytype, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !?[]const u8 {
     const v = switch (try read(c, io, alloc, req, secret_dir, now)) {
         .verified => |v| v,
         .none, .no_secret, .invalid => return null,
     };
     if (!needsRenewal(c, v, now)) return null;
-    return issue(c, io, alloc, secret_dir, v.id, now);
+    return issue(c, io, alloc, secret_dir, v.text, now);
 }
 
 /// **WHO IS ASKING, WITH NO ACCOUNT.** The id this request's cookie `c`
@@ -172,8 +178,8 @@ pub const Visitor = struct {
     pub const Seen = enum { new, returning, unrecognised };
 };
 
-/// A visitor's id: 8 random bytes as 16 lowercase hex digits. The
-/// `kind.validId` of a visitor cookie.
+/// A visitor's id: 8 random bytes as 16 lowercase hex digits. A visitor
+/// cookie's `kind.parse` is `signed.textIf(isVisitorId)`.
 pub fn isVisitorId(id: []const u8) bool {
     if (id.len != 16) return false;
     for (id) |ch| if (!std.ascii.isDigit(ch) and !(ch >= 'a' and ch <= 'f')) return false;
@@ -182,11 +188,11 @@ pub fn isVisitorId(id: []const u8) bool {
 
 /// This request's visitor, by cookie `c` signed with the secret in
 /// `secret_dir` (`error.NoSecret` with none: nothing unsigned is issued).
-pub fn visitor(c: Cookie, io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Visitor {
+pub fn visitor(c: Cookie([]const u8), io: Io, alloc: Alloc, req: *std.http.Server.Request, secret_dir: []const u8, now: i64) !Visitor {
     const seen: Visitor.Seen = switch (try read(c, io, alloc, req, secret_dir, now)) {
         .verified => |v| return .{
             .id = v.id,
-            .set_cookie = if (needsRenewal(c, v, now)) try issue(c, io, alloc, secret_dir, v.id, now) else null,
+            .set_cookie = if (needsRenewal(c, v, now)) try issue(c, io, alloc, secret_dir, v.text, now) else null,
             .seen = .returning,
         },
         .none => .new,
@@ -206,13 +212,13 @@ test "signed_cookie: the header carries the name, the value and the lifetime; it
             return true;
         }
     };
-    const c: Cookie = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 100, .skew_secs = 5, .validId = any.id } };
+    const c: Cookie([]const u8) = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 100, .skew_secs = 5, .parse = signed.textIf(any.id) } };
     const h = try header(c, std.testing.allocator, "7.1000.mac");
     defer std.testing.allocator.free(h);
     try std.testing.expectEqualStrings("device=7.1000.mac; Path=/; Max-Age=100; HttpOnly; Secure; SameSite=Lax", h);
-    try std.testing.expect(!needsRenewal(c, .{ .id = "7", .issued = 1000, .by = .current }, 1050));
-    try std.testing.expect(needsRenewal(c, .{ .id = "7", .issued = 1000, .by = .current }, 1051));
-    try std.testing.expect(needsRenewal(c, .{ .id = "7", .issued = 1000, .by = .previous }, 1000));
+    try std.testing.expect(!needsRenewal(c, .{ .id = "7", .text = "7", .issued = 1000, .by = .current }, 1050));
+    try std.testing.expect(needsRenewal(c, .{ .id = "7", .text = "7", .issued = 1000, .by = .current }, 1051));
+    try std.testing.expect(needsRenewal(c, .{ .id = "7", .text = "7", .issued = 1000, .by = .previous }, 1000));
 }
 
 /// A request whose head carries `cookie_header` (several Cookie headers when
@@ -235,19 +241,19 @@ const Rig = struct {
         self.threaded.deinit();
         self.arena.deinit();
     }
-    fn signedFor(self: *Rig, c: Cookie, id: []const u8, now: i64) ![]const u8 {
+    fn signedFor(self: *Rig, c: Cookie([]const u8), id: []const u8, now: i64) ![]const u8 {
         const a = self.arena.allocator();
         const secret = (try site_secret.load(self.threaded.io(), a, self.dir)).?;
         return signed.sign(a, c.kind, secret, id, now);
     }
-    fn reading(self: *Rig, c: Cookie, cookie_lines: []const []const u8, now: i64) !Reading {
+    fn reading(self: *Rig, c: Cookie([]const u8), cookie_lines: []const []const u8, now: i64) !Reading([]const u8) {
         return self.asked(c, cookie_lines, now, .reading);
     }
-    fn visiting(self: *Rig, c: Cookie, cookie_lines: []const []const u8, now: i64) !Visitor {
+    fn visiting(self: *Rig, c: Cookie([]const u8), cookie_lines: []const []const u8, now: i64) !Visitor {
         return self.asked(c, cookie_lines, now, .visiting);
     }
-    fn asked(self: *Rig, c: Cookie, cookie_lines: []const []const u8, now: i64, comptime what: enum { reading, visiting }) !switch (what) {
-        .reading => Reading,
+    fn asked(self: *Rig, c: Cookie([]const u8), cookie_lines: []const []const u8, now: i64, comptime what: enum { reading, visiting }) !switch (what) {
+        .reading => Reading([]const u8),
         .visiting => Visitor,
     } {
         const a = self.arena.allocator();
@@ -276,14 +282,14 @@ test "signed_cookie: two that verify, or none, name no one, and say which" {
     var rig: Rig = undefined;
     try rig.init();
     defer rig.deinit();
-    const c: Cookie = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .validId = digits } };
+    const c: Cookie([]const u8) = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .parse = signed.textIf(digits) } };
     const a = rig.arena.allocator();
     const seven = try rig.signedFor(c, "7", 5000);
     const eight = try rig.signedFor(c, "8", 5000);
-    try std.testing.expectEqual(Reading{ .invalid = .more_than_one_verifies }, try rig.reading(c, &.{try std.fmt.allocPrint(a, "device={s}; device={s}", .{ seven, eight })}, 5000));
-    try std.testing.expectEqual(Reading{ .invalid = .does_not_verify }, try rig.reading(c, &.{"device=junk; device=other"}, 5000));
-    try std.testing.expectEqual(Reading{ .invalid = .does_not_verify }, try rig.reading(c, &.{"device=junk"}, 5000));
-    try std.testing.expectEqual(Reading.none, try rig.reading(c, &.{"other=1"}, 5000));
+    try std.testing.expectEqual(Reading([]const u8){ .invalid = .more_than_one_verifies }, try rig.reading(c, &.{try std.fmt.allocPrint(a, "device={s}; device={s}", .{ seven, eight })}, 5000));
+    try std.testing.expectEqual(Reading([]const u8){ .invalid = .does_not_verify }, try rig.reading(c, &.{"device=junk; device=other"}, 5000));
+    try std.testing.expectEqual(Reading([]const u8){ .invalid = .does_not_verify }, try rig.reading(c, &.{"device=junk"}, 5000));
+    try std.testing.expectEqual(Reading([]const u8).none, try rig.reading(c, &.{"other=1"}, 5000));
     try std.testing.expectEqualStrings("7", (try rig.reading(c, &.{try std.fmt.allocPrint(a, "device={s}", .{seven})}, 5000)).verified.id);
 }
 
@@ -294,7 +300,7 @@ test "signed_cookie: of two cookies of one name, the one that verifies is read, 
     var rig: Rig = undefined;
     try rig.init();
     defer rig.deinit();
-    const c: Cookie = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .validId = digits } };
+    const c: Cookie([]const u8) = .{ .name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .parse = signed.textIf(digits) } };
     const good = try rig.signedFor(c, "7", 5000);
     const a = rig.arena.allocator();
     for ([_][]const []const u8{
@@ -310,7 +316,7 @@ test "signed_cookie: the legacy name is read only when the new one is absent, an
     var rig: Rig = undefined;
     try rig.init();
     defer rig.deinit();
-    const c: Cookie = .{ .name = "__Host-device", .legacy_name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .validId = digits } };
+    const c: Cookie([]const u8) = .{ .name = "__Host-device", .legacy_name = "device", .kind = .{ .label = "device\n", .lifetime_secs = 1000, .skew_secs = 5, .parse = signed.textIf(digits) } };
     const a = rig.arena.allocator();
     const seven = try rig.signedFor(c, "7", 5000);
     const eight = try rig.signedFor(c, "8", 5000);
@@ -332,7 +338,7 @@ test "signed_cookie: a visitor is given an id once, recognised by it after, rene
     try rig.init();
     defer rig.deinit();
     const a = rig.arena.allocator();
-    const c: Cookie = .{ .name = "visitor", .transport = .plain_http, .kind = .{ .label = "visitor\n", .lifetime_secs = 1000, .skew_secs = 5, .validId = isVisitorId } };
+    const c: Cookie([]const u8) = .{ .name = "visitor", .transport = .plain_http, .kind = .{ .label = "visitor\n", .lifetime_secs = 1000, .skew_secs = 5, .parse = signed.textIf(isVisitorId) } };
     const first = try rig.visiting(c, &.{}, 5000);
     try std.testing.expectEqual(Visitor.Seen.new, first.seen);
     try std.testing.expect(isVisitorId(first.id));
