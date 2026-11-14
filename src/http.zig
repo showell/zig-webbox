@@ -337,7 +337,7 @@ pub fn formDecode(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
 /// only this file makes one, so a target from a form or a query cannot
 /// reach the `location` header unchecked. Zig has no private fields, so
 /// a literal, or a change to one made, is refused by shale's
-/// cookbook/sealed.shale outside this file, over this tree and every
+/// cookbook/check_seals.shale outside this file, over this tree and every
 /// consumer's (`zig build consumers`, angry-gopher's ops/check_zig): it
 /// refuses `.target_path =` and `.target_seal =`. The path is read by
 /// `path()`. **A `location` HEADER IS SET HERE ONLY** (`redirect`,
