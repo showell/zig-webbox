@@ -116,17 +116,15 @@ are from each repo's `build.zig` (`zig build -l` lists them).
 | repo | what | build, test, serve | metal | where it serves |
 |---|---|---|---|---|
 | [zig-webbox](https://github.com/showell/zig-webbox) | this library | `zig build test`, `zig build consumers` | through zig-metal-unikernel | (a library) |
-| [angry-gopher](https://github.com/showell/angry-gopher) | Gopher Chat and the rest of lynrummy.com; **primary** of lynrummy.com's combination (`zig-server/src/router.zig`: Codex Chat at `/codex-chat`, the UO town at `/uo`) | `ops/check_zig` (its gate); `cd zig-server && zig build run` (:9001) | zig-metal-unikernel's `zig build gopher` (`gopher.elf`) | lynrummy.com, on the `metal` droplet behind prod's Caddy |
-| [cobble-webbox](https://github.com/showell/cobble-webbox) | Cobblestone's Codex apps: Codex Chat (module `codex_chat`), Damian's UO town (`uo_town`), the games, Idea Forge | `zig build test`; `serve-chat` (:9106), `serve-uo` (:9107), `serve` (games, :9104), `serve-ideas` (:9105) | none of its own: mounted in angry-gopher's | inside lynrummy.com: Codex Chat at `/codex-chat/`, the UO town at `/uo/town/` (unannounced) |
+| [angry-gopher](https://github.com/showell/angry-gopher) | Gopher Chat and the rest of lynrummy.com; | `ops/check_zig` (its gate); `cd zig-server && zig build run` (:9001) | zig-metal-unikernel's `zig build gopher` (`gopher.elf`) | lynrummy.com, on the `metal` droplet behind prod's Caddy |
 | [dog-park](https://github.com/showell/dog-park) | the Dog Park game (Zig, Roc physics); **primary** of Dog Park + TODO (`src/combos/dogpark_todo.zig`) | `zig build test`, `zig build check`; `play` (:9103); `dogpark-todo`, `serve-dogpark-todo` (:9113) | `zig build metal` (`dogpark.elf`), `metal-gate`; `metal-dogpark-todo` (`dogpark-todo.elf`) | dogpark.lynrummy.com, its own droplet (its `DEPLOY.md`) |
 | [roc-webbox](https://github.com/showell/roc-webbox) | a Roc platform for webbox, a TODO list on it (modules `roc_todo`, `roc_todo_metal`, `roc_hooks`), and the Roc chat router (`roc_chat`, which angry-gopher's Linux build routes `/chat` and `/channel` through) | `zig build test` (the Roc `roc-version` pins); `serve` (:9110) | `zig build metal` (`roc-todo.elf`) | the TODO list: nowhere, alone or in dog-park's combination |
 | [observatory](https://github.com/showell/observatory) | a machine that polls another's `/version` | `zig build test`; `run` (:9104) | `zig build metal` (`observatory.elf`) | prod, as a Linux program watching Dog Park |
 | [shale](https://github.com/showell/shale) | the script language, on `store` | `zig build test` | (in the applications' kernels) | (a library) |
 | [zig-metal-unikernel](https://github.com/showell/zig-metal-unikernel) | the kernel that serves any hosted root with no OS (`addAppKernel`) | `zig build test`; `zig build gopher`; tiers in its README | it is the kernel | its `DEPLOY.md`: a release is a `v*` tag |
 
-Ports collide (cobble-webbox's `serve` and the Observatory's `run` are both
-:9104); each step's description names the environment variable that moves
-it, except the Observatory's, whose is `OBSERVATORY_PORT`.
+Each step's description names the environment variable that moves its
+port, except the Observatory's, whose is `OBSERVATORY_PORT`.
 
 ## Scripts: Shale
 
@@ -148,8 +146,7 @@ Observatory, dog-park, zig-metal-unikernel (`zig build gopher`) and
 angry-gopher (`ops/check_zig`), as `build.zig` lists them; it needs those checkouts
 beside this one, and fails naming one that is missing. Run it before a change
 here goes to master: each catches webbox changes that `test` passes.
-cobble-webbox's and roc-webbox's own tests are not in it (angry-gopher's
-check compiles cobble-webbox's two mounted modules).
+roc-webbox's own tests are not in it.
 `-Dtest-filter=TEXT` runs only the tests whose names contain it;
 `-Dtest-timing` prints each test's time, slowest first.
 

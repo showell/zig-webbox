@@ -6,9 +6,8 @@
 //!
 //!     pub const site = combo.site;
 //!     pub const hosting = combo.hosting;
-//!     const combo = webbox.combo.Mount(gopher, &.{
-//!         .{ .prefix = "/codex-chat", .root = codex_chat },
-//!         .{ .prefix = "/uo", .root = uo_town },
+//!     const combo = webbox.combo.Mount(dogpark, &.{
+//!         .{ .prefix = "/todo", .root = roc_todo },
 //!     });
 //!
 //! A part is a hosted root (it exports `site`, a `Site`, and may export
