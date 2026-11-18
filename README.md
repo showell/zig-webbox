@@ -1,5 +1,34 @@
 # zig-webbox
 
+**Deprecated (2026-11-18): zig-webbox is no longer developed.**
+
+zig-webbox was a small Zig library for a web application: the application
+supplies its routes, pages and store, and webbox does the HTTP, the cookies,
+the streams and the disk, reaching the machine through one module,
+`host_io`. It was pulled out of angry-gopher's Zig server in October 2026,
+and lynrummy.com, Dog Park, roc-webbox's TODO list and the Observatory were
+built on it.
+
+What came of it: angry-gopher carries its own copy of the whole library in
+`zig-server/webbox/`, copied unchanged from this repo's last commit
+(`e90cc25`), and the two change apart. zig-ast pins this repo at that commit
+for `src/zig_refs.zig` and reads `src/` as a test corpus, so that commit
+still serves. Shale began here as `webbox.script` and has been its own repo
+since 2026-10-18.
+
+What we learned:
+- One seam to the host was enough: the same application ran on Linux and on
+  zig-metal-unikernel's bare metal with no line changed, and the kernel's
+  checks held the two builds to the same answers.
+- A library's own tests are not its verdict: `zig build consumers` ran each
+  consumer's checks against a change here, because each caught changes that
+  `zig build test` passed.
+- The generality outlived its users: once the other applications retired,
+  angry-gopher was the one left, and a copy of its own was simpler than a
+  shared library.
+
+---
+
 **webbox**, a web server in a box: a small Zig library an application is
 built on. The application exports a site (its routes, its pages, its
 store); webbox does the HTTP, the cookies, the streams and the disk, and a
